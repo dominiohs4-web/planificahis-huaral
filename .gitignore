@@ -1,0 +1,26 @@
+node_modules/
+build/
+dist/
+coverage/
+.phpunit.result.cache
+.DS_Store
+Thumbs.db
+*.log
+
+# Entorno y secretos
+.env
+.env.*
+!.env.example
+
+# Dumps y respaldos clínicos (NUNCA versionar)
+dump*.sql
+*.dump
+*.bak
+*.old
+sync_preview.sql
+
+# APK generado localmente
+public/planificahis.apk
+
+# Metadatos del entorno de desarrollo
+.aistudio/

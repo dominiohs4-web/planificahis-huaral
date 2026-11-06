@@ -1,0 +1,1657 @@
+<?php
+/**
+ * api.php — API REST clínica blindada
+ * Hospital San Juan Bautista Huaral / Red de Salud Huaral-Chancay
+ *
+ * Endpoints principales:
+ *   GET  ?action=establecimientos
+ *   POST ?action=login | register_obstetra | verify_2fa | logout
+ *   GET  ?action=overview | lookup_dni | audit_logs | sync_export_local_sql
+ *   POST ?action=save_paciente | update_estado | change_establecimiento
+ *        ?action=verify_chain | test_waf
+ *
+ * Seguridad: PDO nativo, WAF SQLi/XSS, rate limiting, TOTP RFC 6238,
+ * Bearer Token HMAC-SHA256, expiración por inactividad, AES-256-GCM y
+ * cadena de auditoría SHA-256.
+ */
+declare(strict_types=1);
+
+require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/catalogo_establecimientos.php';
+
+// ---------------------------------------------------------------------------
+// Cabeceras de seguridad clínica (OWASP ASVS L3) y CORS controlado
+// ---------------------------------------------------------------------------
+function api_server_origin(): string
+{
+    $forwardedProto = strtolower(trim((string)($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '')));
+    $https = $forwardedProto === 'https'
+        || (!empty($_SERVER['HTTPS']) && strtolower((string)$_SERVER['HTTPS']) !== 'off');
+    $scheme = $https ? 'https' : 'http';
+    $host = (string)($_SERVER['HTTP_X_FORWARDED_HOST'] ?? $_SERVER['HTTP_HOST'] ?? $_SERVER['SERVER_NAME'] ?? 'localhost');
+    $host = trim(explode(',', $host)[0]);
+    if ($host === '') {
+        $host = 'localhost';
+    }
+    return $scheme . '://' . $host;
+}
+
+if (function_exists('header_remove')) {
+    header_remove('X-Powered-By');
+    header_remove('Server');
+}
+header('Content-Type: application/json; charset=utf-8');
+header('X-Content-Type-Options: nosniff');
+header('X-Frame-Options: DENY');
+header('Referrer-Policy: no-referrer');
+header('Strict-Transport-Security: max-age=63072000; includeSubDomains; preload');
+header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+header('Pragma: no-cache');
+header('Expires: 0');
+header('Content-Security-Policy: default-src \'none\'; frame-ancestors \'none\'; base-uri \'none\'; form-action \'none\'; object-src \'none\'');
+header('Cross-Origin-Opener-Policy: same-origin');
+header('Cross-Origin-Resource-Policy: same-origin');
+header('X-Permitted-Cross-Domain-Policies: none');
+header('Permissions-Policy: geolocation=(), camera=(), microphone=(), payment=(), usb=()');
+header('Vary: Origin');
+
+$requestOrigin = trim((string)($_SERVER['HTTP_ORIGIN'] ?? ''));
+$configuredOrigins = array_values(array_filter(array_map(
+    'trim',
+    explode(',', (string)getenv('ALLOWED_ORIGIN'))
+), static fn (string $origin): bool => $origin !== ''));
+if (!$configuredOrigins) {
+    $configuredOrigins[] = api_server_origin();
+}
+
+$originAllowed = false;
+if ($requestOrigin !== '') {
+    foreach ($configuredOrigins as $allowedOrigin) {
+        if ($allowedOrigin === '*' || hash_equals($allowedOrigin, $requestOrigin)) {
+            $originAllowed = true;
+            break;
+        }
+    }
+    if ($originAllowed) {
+        // Se devuelve el origen exacto (nunca "*" con credenciales) para que el
+        // navegador aplique la política CORS sin abrir la API a cualquier sitio.
+        header('Access-Control-Allow-Origin: ' . $requestOrigin);
+        header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
+        header('Access-Control-Allow-Headers: Authorization, Content-Type, X-Requested-With, X-Sync-Token');
+        header('Access-Control-Expose-Headers: Retry-After');
+        header('Access-Control-Max-Age: 600');
+    } else {
+        json_error('Origen no autorizado por la política CORS del hospital.', 403, [
+            'code' => 'CORS_ORIGIN_DENIED',
+        ]);
+    }
+}
+
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'OPTIONS') {
+    http_response_code(204);
+    exit;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers de respuesta
+// ---------------------------------------------------------------------------
+function json_out(array $data, int $status = 200): void
+{
+    http_response_code($status);
+    echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+    exit;
+}
+
+function json_error(string $message, int $status = 400, array $extra = []): void
+{
+    json_out(array_merge(['error' => $message], $extra), $status);
+}
+
+function read_json_body(): array
+{
+    static $cached = null;
+    if (is_array($cached)) {
+        return $cached;
+    }
+    $raw = file_get_contents('php://input');
+    $decoded = json_decode($raw !== false ? $raw : '', true);
+    $cached = is_array($decoded) ? $decoded : [];
+    return $cached;
+}
+
+function require_session(): array
+{
+    $session = HospitalHuaralDB::authenticateSession();
+    if ($session === null) {
+        json_error('Sesión no válida, expirada o sin segundo factor 2FA. Inicie sesión nuevamente.', 401, [
+            'code' => 'AUTH_REQUIRED_2FA',
+        ]);
+    }
+    return $session;
+}
+
+function is_admin_session(array $session): bool
+{
+    return in_array($session['dni'], array_map('strval', array_filter([
+        getenv('APP_ADMIN_DNI') ?: '',
+    ])), true) || (int)(getenv('APP_ADMIN_NIVELID') ?: 0) === 1;
+}
+
+/**
+ * Modo demostración: por defecto SOLO se activa en desarrollo local. En
+ * producción (APP_ENV=production o RENDER=1) exige APP_DEMO_MODE=1 explícito.
+ * Nunca debe habilitarse en el servidor del hospital.
+ */
+function demo_mode_enabled(): bool
+{
+    $raw = getenv('APP_DEMO_MODE');
+    if ($raw !== false && trim((string)$raw) !== '') {
+        return trim((string)$raw) === '1';
+    }
+    $appEnv = strtolower(trim((string)getenv('APP_ENV')));
+    $render = strtolower(trim((string)getenv('RENDER')));
+    return !($appEnv === 'production' || in_array($render, ['1', 'true', 'yes'], true));
+}
+
+function waf_action_for_type(?string $type): string
+{
+    return match ($type) {
+        'SQLI' => 'WAF_SQLI_BLOCKED',
+        'XSS' => 'WAF_XSS_BLOCKED',
+        'PATH_TRAVERSAL' => 'WAF_PATH_TRAVERSAL_BLOCKED',
+        default => 'WAF_BLOCKED',
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Conexión, endpoint de salud y WAF de aplicación
+// ---------------------------------------------------------------------------
+$action = isset($_GET['action']) ? (string)$_GET['action'] : '';
+$body = read_json_body();
+
+try {
+    $pdo = HospitalHuaralDB::getConnection();
+} catch (Throwable $e) {
+    error_log('[PlanificaHIS] DB connection failure: ' . $e->getMessage());
+    if ($action === 'health') {
+        json_out([
+            'status' => 'degraded',
+            'db' => 'disconnected',
+            'timestamp' => date('c'),
+        ], 503);
+    }
+    json_error('No se pudo conectar a MySQL/MariaDB. Verifique que el servicio esté activo y la base de datos configurada.', 503);
+}
+
+// Endpoint ligero para Render/UptimeRobot. Nunca expone credenciales ni PII.
+if ($action === 'health') {
+    try {
+        $pdo->query('SELECT 1')->fetchColumn();
+        json_out([
+            'status' => 'ok',
+            'db' => 'connected',
+            'timestamp' => date('c'),
+        ], 200);
+    } catch (Throwable $e) {
+        error_log('[PlanificaHIS] Health check failure: ' . $e->getMessage());
+        json_out([
+            'status' => 'degraded',
+            'db' => 'disconnected',
+            'timestamp' => date('c'),
+        ], 503);
+    }
+}
+
+// WAF: inspecciona query string + cuerpo JSON + ruta. El simulador se evalúa aparte.
+if ($action !== 'test_waf') {
+    $inspection = HospitalHuaralDB::detectMaliciousPayload([
+        'query' => $_GET,
+        'body' => $body,
+        'uri' => $_SERVER['REQUEST_URI'] ?? '',
+    ]);
+    if ($inspection['type'] !== null) {
+        $ip = HospitalHuaralDB::clientIp();
+        $platform = HospitalHuaralDB::detectPlatform();
+        HospitalHuaralDB::registrarAuditoria(
+            'WAF_INTERCEPTOR',
+            waf_action_for_type($inspection['type']),
+            'Ataque ' . $inspection['type'] . ' neutralizado. Patrón: [' . $inspection['matched'] . ']. Ruta: ' . ($_SERVER['REQUEST_URI'] ?? ''),
+            '',
+            $platform
+        );
+        json_error('Solicitud bloqueada por el Firewall de Seguridad Clínica (' . $inspection['type'] . ' detectado).', 403, [
+            'code' => 'WAF_' . $inspection['type'] . '_BLOCKED',
+            'matchedPattern' => $inspection['matched'],
+            'ip' => $ip,
+        ]);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Catálogo público (no contiene PII; necesario para el registro de obstetras)
+// ---------------------------------------------------------------------------
+if ($action === 'establecimientos') {
+    json_out([
+        'total' => count(hospital_establecimientos()),
+        'establecimientos' => hospital_establecimientos(),
+        'porDistrito' => hospital_establecimientos_por_distrito(),
+    ]);
+}
+
+// ---------------------------------------------------------------------------
+// 1. LOGIN — 5 intentos fallidos / 15 min por IP + DNI
+// ---------------------------------------------------------------------------
+if ($action === 'login') {
+    $dni = preg_replace('/[^0-9]/', '', (string)($body['dni'] ?? '')) ?? '';
+    $password = (string)($body['password'] ?? '');
+    $ip = HospitalHuaralDB::clientIp();
+    $platform = HospitalHuaralDB::detectPlatform();
+
+    if (strlen($dni) < 8 || strlen($dni) > 11) {
+        json_error('Ingrese un DNI válido de 8 a 11 dígitos.', 400);
+    }
+
+    $bucket = 'login_fail:' . hash('sha256', $ip . '|' . $dni);
+    $limit = HospitalHuaralDB::rateLimitStatus($bucket, 5, 900);
+    if (!$limit['allowed']) {
+        HospitalHuaralDB::registrarAuditoria($dni, 'LOGIN_RATE_LIMITED', 'Límite de 5 intentos fallidos alcanzado. Bloqueo temporal de 15 minutos.', '', $platform);
+        json_error('Demasiados intentos fallidos. Espere 15 minutos antes de volver a intentar.', 429, [
+            'retryAfter' => $limit['retryAfter'],
+        ]);
+    }
+
+    $stmt = $pdo->prepare('SELECT * FROM usuario WHERE dni = :dni LIMIT 1');
+    $stmt->execute([':dni' => $dni]);
+    $user = $stmt->fetch();
+
+    if (!$user) {
+        HospitalHuaralDB::rateLimitHit($bucket, 900);
+        HospitalHuaralDB::registrarAuditoria($dni, 'AUTH_LOGIN_FAILED', 'DNI no registrado en la tabla usuario.', '', $platform);
+        // Respuesta genérica: no se revela si el DNI existe (anti-enumeración).
+        json_error('DNI o contraseña incorrectos.', 401, ['remainingAttempts' => max(0, 4 - (int)$limit['hits'])]);
+    }
+    if (isset($user['estado']) && (int)$user['estado'] === 0) {
+        json_error('La cuenta se encuentra inactiva. Contacte a la Unidad de Estadística e Informática.', 403);
+    }
+
+    $storedPass = (string)($user['passwordx'] ?? '');
+    if (!HospitalHuaralDB::verifyPassword($password, $storedPass)) {
+        HospitalHuaralDB::rateLimitHit($bucket, 900);
+        HospitalHuaralDB::registrarAuditoria($dni, 'AUTH_LOGIN_FAILED', 'Contraseña inválida verificada con Bcrypt/Scrypt. Intento registrado.', '', $platform);
+        $remaining = max(0, 4 - (int)$limit['hits']);
+        json_error('DNI o contraseña incorrectos.', 401, ['remainingAttempts' => $remaining]);
+    }
+
+    HospitalHuaralDB::rateLimitReset($bucket);
+    $codEstab = HospitalHuaralDB::obtenerEstablecimientoObstetra($dni);
+    if (hospital_establecimiento($codEstab) === null) {
+        $nivel = trim((string)($user['nivelcd'] ?? ''));
+        if (hospital_establecimiento($nivel) !== null) {
+            $codEstab = hospital_codigo_canonico($nivel);
+            HospitalHuaralDB::establecerEstablecimientoObstetra($dni, $codEstab);
+        }
+    }
+    $nombreCompleto = trim(
+        (string)($user['nombre1'] ?? '') . ' ' .
+        (string)($user['apaterno'] ?? '') . ' ' .
+        (string)($user['amaterno'] ?? '')
+    );
+    if ($nombreCompleto === '') {
+        $stmtPers = $pdo->prepare('SELECT NOMBRE FROM mstrpers WHERE CODPSAL = :dni LIMIT 1');
+        $stmtPers->execute([':dni' => $dni]);
+        $nombreCompleto = (string)($stmtPers->fetchColumn() ?: ('OBSTETRA ' . $dni));
+    }
+
+    $secret = HospitalHuaralDB::obtenerSecretoTotp($dni);
+    $totp = HospitalHuaralDB::generateTOTP($secret);
+    $challenge = HospitalHuaralDB::crearChallenge($dni, $codEstab, $platform);
+
+    HospitalHuaralDB::registrarAuditoria($dni, 'AUTH_STEP1_PASSED', 'Credenciales válidas. Se emitió desafío 2FA TOTP (RFC 6238).', $codEstab, $platform);
+
+    $payload = [
+        'requires2FA' => true,
+        'challengeId' => $challenge['challengeId'],
+        'dni' => $dni,
+        'nombreCompleto' => $nombreCompleto,
+        'cod_estab' => $codEstab,
+        'estab_nombre' => hospital_nombre_establecimiento($codEstab),
+        'userPreview' => [
+            'dni' => $dni,
+            'nombreCompleto' => $nombreCompleto,
+            'rol' => (string)($user['tipo'] ?? 'Obstetra'),
+            'cod_estab' => $codEstab,
+            'estab_nombre' => hospital_nombre_establecimiento($codEstab),
+        ],
+    ];
+    // En producción real APP_DEMO_MODE=0: ni el secreto TOTP ni el código
+    // actual viajan jamás al navegador. Solo se exponen en modo demostración.
+    if (demo_mode_enabled()) {
+        $payload['demoCurrentCode'] = $totp['code'];
+        $payload['userPreview']['totpSecret'] = $secret;
+        $payload['userPreview']['currentTotpCode'] = $totp['code'];
+        $payload['userPreview']['remainingSeconds'] = $totp['remainingSeconds'];
+        $payload['userPreview']['demoCurrentCode'] = $totp['code'];
+    }
+    json_out($payload);
+}
+
+// ---------------------------------------------------------------------------
+// 2. REGISTRO DE OBSTETRA + ESTABLECIMIENTO ASIGNADO
+// ---------------------------------------------------------------------------
+if ($action === 'register_obstetra') {
+    $dni = preg_replace('/[^0-9]/', '', (string)($body['dni'] ?? '')) ?? '';
+    $nombre1 = strtoupper(HospitalHuaralDB::sanitizeText($body['nombre1'] ?? '', 90));
+    $apaterno = strtoupper(HospitalHuaralDB::sanitizeText($body['apaterno'] ?? '', 90));
+    $amaterno = strtoupper(HospitalHuaralDB::sanitizeText($body['amaterno'] ?? '', 90));
+    $email = strtolower(HospitalHuaralDB::sanitizeText($body['email'] ?? '', 190));
+    $celular = preg_replace('/[^0-9]/', '', (string)($body['celular'] ?? '')) ?? '';
+    $password = (string)($body['password'] ?? '');
+    $codEstab = hospital_codigo_canonico((string)($body['cod_estab'] ?? ''));
+    $platform = HospitalHuaralDB::detectPlatform();
+
+    if (strlen($dni) !== 8 || $nombre1 === '' || $apaterno === '' || $email === '' || strlen($password) < 8) {
+        json_error('Complete DNI (8 dígitos), nombres, apellidos, correo y contraseña de al menos 8 caracteres.', 400);
+    }
+    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        json_error('El correo institucional no tiene un formato válido.', 400);
+    }
+    if (hospital_establecimiento($codEstab) === null) {
+        json_error('Seleccione un establecimiento válido de la Red Huaral-Chancay (53 IPRESS).', 400);
+    }
+
+    $stmt = $pdo->prepare('SELECT dni FROM usuario WHERE dni = :dni LIMIT 1');
+    $stmt->execute([':dni' => $dni]);
+    if ($stmt->fetchColumn()) {
+        json_error('Ya existe una cuenta con ese DNI. Inicie sesión o recupere su acceso.', 409);
+    }
+
+    $hashed = HospitalHuaralDB::hashPassword($password);
+    $stmt = $pdo->prepare("
+        INSERT INTO usuario (dni, nombre1, nombre2, apaterno, amaterno, passwordx, email, celular, nivelid, nivelcd, tipo, estado)
+        VALUES (:dni, :nom1, '', :ap, :am, :pass, :email, :cel, 2, :nivelcd, 2, 1)
+    ");
+    $stmt->execute([
+        ':dni' => $dni,
+        ':nom1' => $nombre1,
+        ':ap' => $apaterno,
+        ':am' => $amaterno,
+        ':pass' => $hashed,
+        ':email' => $email,
+        ':cel' => substr($celular, 0, 9),
+        ':nivelcd' => $codEstab,
+    ]);
+
+    HospitalHuaralDB::establecerEstablecimientoObstetra($dni, $codEstab);
+    $secret = HospitalHuaralDB::obtenerSecretoTotp($dni);
+    $totp = HospitalHuaralDB::generateTOTP($secret);
+    $challenge = HospitalHuaralDB::crearChallenge($dni, $codEstab, $platform);
+    $nombreCompleto = "OBST. {$nombre1} {$apaterno} {$amaterno}";
+    // URI de aprovisionamiento estándar para el autenticador del celular.
+    $otpauthUri = 'otpauth://totp/'
+        . rawurlencode('PlanificaHIS Huaral:' . $dni)
+        . '?secret=' . rawurlencode($secret)
+        . '&issuer=' . rawurlencode('PlanificaHIS Huaral')
+        . '&algorithm=SHA1&digits=6&period=30';
+
+    HospitalHuaralDB::registrarAuditoria(
+        $dni,
+        'REGISTRO_OBSTETRA',
+        'Cuenta creada para ' . $nombreCompleto . ' en ' . hospital_nombre_establecimiento($codEstab) . ' con secreto TOTP propio.',
+        $codEstab,
+        $platform
+    );
+
+    $payload = [
+        'requires2FA' => true,
+        'challengeId' => $challenge['challengeId'],
+        'dni' => $dni,
+        'nombreCompleto' => $nombreCompleto,
+        'cod_estab' => $codEstab,
+        'estab_nombre' => hospital_nombre_establecimiento($codEstab),
+        'userPreview' => [
+            'dni' => $dni,
+            'nombreCompleto' => $nombreCompleto,
+            'email' => $email,
+            'rol' => 'Obstetra Captadora',
+            'cod_estab' => $codEstab,
+            'estab_nombre' => hospital_nombre_establecimiento($codEstab),
+            // Se muestra una sola vez tras crear la cuenta para enrolar el
+            // autenticador. En login nunca se devuelve el secreto.
+            'totpSecret' => $secret,
+            'otpauthUri' => $otpauthUri,
+        ],
+    ];
+    // El código TOTP actual solo se expone en modo demostración; el secreto de
+    // aprovisionamiento ya se devolvió arriba para el enrolamiento inicial.
+    if (demo_mode_enabled()) {
+        $payload['demoCurrentCode'] = $totp['code'];
+        $payload['userPreview']['totpSecret'] = $secret;
+        $payload['userPreview']['currentTotpCode'] = $totp['code'];
+        $payload['userPreview']['remainingSeconds'] = $totp['remainingSeconds'];
+        $payload['userPreview']['demoCurrentCode'] = $totp['code'];
+    }
+    json_out($payload, 201);
+}
+
+// ---------------------------------------------------------------------------
+// 3. VERIFICAR 2FA TOTP Y EMITIR BEARER TOKEN HMAC-SHA256
+// ---------------------------------------------------------------------------
+if ($action === 'verify_2fa') {
+    $challengeId = HospitalHuaralDB::sanitizeText($body['challengeId'] ?? '', 64);
+    $code = preg_replace('/[^0-9]/', '', (string)($body['code'] ?? '')) ?? '';
+    $platform = HospitalHuaralDB::detectPlatform();
+    $ip = HospitalHuaralDB::clientIp();
+
+    if (!preg_match('/^[a-f0-9]{48}$/', $challengeId) || strlen($code) !== 6) {
+        json_error('Desafío 2FA o código inválido.', 400);
+    }
+
+    // Máximo 5 intentos de verificación por desafío (no por DNI), para evitar
+    // fuerza bruta sobre el código TOTP de 6 dígitos.
+    $bucket = '2fa:' . hash('sha256', $challengeId . '|' . $ip);
+    $limit = HospitalHuaralDB::rateLimitStatus($bucket, 5, 900);
+    if (!$limit['allowed']) {
+        HospitalHuaralDB::marcarChallengeUsado($challengeId);
+        HospitalHuaralDB::registrarAuditoria(
+            'DESCONOCIDO',
+            'AUTH_2FA_RATE_LIMITED',
+            'Límite de 5 intentos de verificación 2FA alcanzado para un desafío.',
+            '',
+            $platform
+        );
+        json_error('Demasiados intentos 2FA para este desafío. Inicie sesión nuevamente.', 429, [
+            'retryAfter' => $limit['retryAfter'],
+        ]);
+    }
+    HospitalHuaralDB::rateLimitHit($bucket, 900);
+
+    $challenge = HospitalHuaralDB::obtenerChallenge($challengeId);
+    if (!$challenge) {
+        json_error('La verificación 2FA expiró o ya fue utilizada. Inicie sesión nuevamente.', 401);
+    }
+
+    $secret = HospitalHuaralDB::obtenerSecretoTotp((string)$challenge['dni']);
+    if (!HospitalHuaralDB::verifyTOTP($secret, $code)) {
+        HospitalHuaralDB::registrarAuditoria(
+            (string)$challenge['dni'],
+            'AUTH_2FA_FAILED',
+            'Código TOTP inválido. Ventana RFC 6238 rechazada. El desafío continúa disponible hasta agotar los 5 intentos.',
+            (string)$challenge['cod_estab'],
+            $platform
+        );
+        json_error('Código 2FA de 6 dígitos incorrecto o expirado.', 401, [
+            'remainingAttempts' => max(0, (int)$limit['remaining'] - 1),
+        ]);
+    }
+
+    HospitalHuaralDB::marcarChallengeUsado($challengeId);
+    HospitalHuaralDB::rateLimitReset($bucket);
+
+    $dni = (string)$challenge['dni'];
+    $codEstab = hospital_codigo_canonico((string)$challenge['cod_estab']);
+    $stmt = $pdo->prepare('SELECT nombre1, apaterno, amaterno, email, nivelid, tipo FROM usuario WHERE dni = :dni LIMIT 1');
+    $stmt->execute([':dni' => $dni]);
+    $user = $stmt->fetch() ?: [];
+    $nombreCompleto = trim((string)($user['nombre1'] ?? '') . ' ' . (string)($user['apaterno'] ?? '') . ' ' . (string)($user['amaterno'] ?? ''));
+    if ($nombreCompleto === '') {
+        $nombreCompleto = 'OBSTETRA ' . $dni;
+    }
+
+    $token = HospitalHuaralDB::createSessionToken($dni, $codEstab, $platform);
+    HospitalHuaralDB::registrarAuditoria($dni, 'AUTH_2FA_VERIFIED', 'Autenticación 2FA TOTP RFC 6238 verificada. Sesión Bearer emitida (expira en 8 h, inactividad 30 min).', $codEstab, $platform);
+
+    json_out([
+        'requires2FA' => false,
+        'session' => [
+            'token' => $token,
+            'dni' => $dni,
+            'nombreCompleto' => $nombreCompleto,
+            'rol' => (string)($user['tipo'] ?? 'Obstetra'),
+            'nivelid' => (int)($user['nivelid'] ?? 2),
+            'cod_estab' => $codEstab,
+            'estab_nombre' => hospital_nombre_establecimiento($codEstab),
+            'verified2FA' => true,
+            'platform' => $platform,
+            'isAdmin' => is_admin_session(['dni' => $dni]),
+        ],
+    ]);
+}
+
+// ---------------------------------------------------------------------------
+// 4. LOGOUT / CAMBIO DE ESTABLECIMIENTO
+// ---------------------------------------------------------------------------
+if ($action === 'logout') {
+    $session = require_session();
+    HospitalHuaralDB::revokeSession((string)$session['token']);
+    HospitalHuaralDB::registrarAuditoria($session['dni'], 'LOGOUT', 'Sesión revocada por el usuario.', $session['cod_estab'], $session['platform']);
+    json_out(['success' => true]);
+}
+
+if ($action === 'change_establecimiento') {
+    $session = require_session();
+    $codEstab = hospital_codigo_canonico((string)($body['cod_estab'] ?? ''));
+    if (hospital_establecimiento($codEstab) === null) {
+        json_error('El establecimiento seleccionado no pertenece a la Red Huaral-Chancay.', 400);
+    }
+    HospitalHuaralDB::cambiarEstablecimientoSesion((string)$session['token'], $codEstab, (string)$session['dni']);
+    HospitalHuaralDB::registrarAuditoria(
+        $session['dni'],
+        'CAMBIO_ESTABLECIMIENTO',
+        'La obstetra cambió su establecimiento activo a ' . hospital_nombre_establecimiento($codEstab) . ' (guardia/rotación).',
+        $codEstab,
+        $session['platform']
+    );
+    json_out([
+        'success' => true,
+        'session' => [
+            'dni' => $session['dni'],
+            'cod_estab' => $codEstab,
+            'estab_nombre' => hospital_nombre_establecimiento($codEstab),
+        ],
+    ]);
+}
+
+// ---------------------------------------------------------------------------
+// 5. OVERVIEW — Dashboard, agenda de ampollas e indicadores
+// ---------------------------------------------------------------------------
+if ($action === 'overview') {
+    $session = require_session();
+    $platform = $session['platform'];
+
+    $stmt = $pdo->prepare("
+        SELECT p.*, m.NOMBRE AS nombre_obstetra_bd
+        FROM pacientes_sin_metodo p
+        LEFT JOIN mstrpers m ON m.CODPSAL = p.codpsal_obstetra
+        ORDER BY p.fecha_registro DESC
+        LIMIT 500
+    ");
+    $stmt->execute();
+    $pacientesRows = $stmt->fetchAll();
+    $pacientes = [];
+    foreach ($pacientesRows as $row) {
+        $pacientes[] = [
+            'id' => (int)$row['id'],
+            'dni' => (string)$row['dni'],
+            'apellido_paterno' => (string)$row['apellido_paterno'],
+            'apellido_materno' => (string)$row['apellido_materno'],
+            'nombres' => (string)$row['nombres'],
+            'edad' => (int)$row['edad'],
+            'celular' => HospitalHuaralDB::decryptPII((string)$row['celular']),
+            'correo' => HospitalHuaralDB::decryptPII((string)$row['correo']),
+            'direccion' => HospitalHuaralDB::decryptPII((string)$row['direccion']),
+            'distrito' => (string)$row['distrito'],
+            'sector' => (string)$row['sector'],
+            'estado_paciente' => (string)$row['estado_paciente'],
+            'codpsal_obstetra' => (string)$row['codpsal_obstetra'],
+            'nombre_obstetra' => (string)($row['nombre_obstetra_bd'] ?? ('OBST. ' . $row['codpsal_obstetra'])),
+            'cod_estab' => (string)($row['cod_estab'] ?? ''),
+            'estab_nombre' => hospital_nombre_establecimiento((string)($row['cod_estab'] ?? '')),
+            'atencion_99208' => (int)($row['atencion_99208'] ?? 0) === 1,
+            'fecha_registro' => (string)$row['fecha_registro'],
+            'encrypted_raw' => [
+                'celular' => (string)$row['celular'],
+                'correo' => (string)$row['correo'],
+                'direccion' => (string)$row['direccion'],
+            ],
+        ];
+    }
+
+    $agenda = [];
+    try {
+        $stmtAgenda = $pdo->query("
+            SELECT h.ID AS id_his, h.DNI AS dni,
+                   CONCAT(TRIM(IFNULL(h.Apellido_p,'')), ' ', TRIM(IFNULL(h.Apellido_m,'')), ', ', TRIM(IFNULL(h.Dnombres, IFNULL(h.Pnombre,'')))) AS paciente_nombre,
+                   h.EDAD AS edad, h.HCLFAM AS historia_clinica, h.COD_ESTAB,
+                   dt.DX AS codigo_his, dt.id_dosis AS dosis_nro, h.fecha_reg AS fecha_ultima_aplicacion,
+                   h.CODPSAL, dt.Alerta
+            FROM his_dl h
+            INNER JOIN his_dl_dt dt ON dt.ID = h.ID
+            WHERE dt.DX IN ('90782', 'Z304', 'Z301', '99208', 'Z300')
+            ORDER BY h.ANO DESC, h.MES DESC, h.DIA DESC
+            LIMIT 40
+        ");
+        $ciclos = ['90782' => 30, 'Z304' => 90, 'Z301' => 1095, '99208' => 30, 'Z300' => 0];
+        $hoy = date('Y-m-d');
+        $manana = date('Y-m-d', strtotime('+1 day'));
+        foreach ($stmtAgenda->fetchAll() as $row) {
+            $dias = $ciclos[(string)$row['codigo_his']] ?? 0;
+            $proxima = $dias > 0 ? date('Y-m-d', strtotime((string)$row['fecha_ultima_aplicacion'] . ' +' . $dias . ' days')) : null;
+            if ($dias === 0) {
+                $estado = 'SIN_METODO_EN_HIS';
+            } elseif ($proxima === $hoy) {
+                $estado = 'TOCA_HOY';
+            } elseif ($proxima === $manana) {
+                $estado = 'TOCA_MANANA';
+            } elseif ($proxima !== null && $proxima < $hoy) {
+                $estado = 'VENCIDA_ABANDONO';
+            } else {
+                $estado = 'VIGENTE';
+            }
+            $row['establecimiento'] = hospital_nombre_establecimiento((string)$row['COD_ESTAB']);
+            $row['metodo_descripcion'] = $row['codigo_his'];
+            $row['fecha_proxima_cita'] = $proxima;
+            $row['ciclo_dias'] = $dias;
+            $row['estado_cita'] = $estado;
+            $agenda[] = $row;
+        }
+    } catch (Throwable $e) {
+        $agenda = [];
+    }
+
+    $stmtProd = $pdo->query("
+        SELECT p.codpsal_obstetra AS codpsal,
+               IFNULL(m.NOMBRE, CONCAT('Obstetra DNI ', p.codpsal_obstetra)) AS nombre,
+               IFNULL(m.COD_ESTAB, p.cod_estab) AS cod_estab,
+               COUNT(*) AS totalCaptadas,
+               SUM(CASE WHEN p.estado_paciente = 'INSATISFECHA_SIN_METODO' THEN 1 ELSE 0 END) AS insatisfechasCaptadas,
+               SUM(CASE WHEN p.estado_paciente = 'CAPTADA_CON_METODO' THEN 1 ELSE 0 END) AS conMetodoLogrado
+        FROM pacientes_sin_metodo p
+        LEFT JOIN mstrpers m ON m.CODPSAL = p.codpsal_obstetra
+        GROUP BY p.codpsal_obstetra, m.NOMBRE, m.COD_ESTAB, p.cod_estab
+        ORDER BY totalCaptadas DESC
+        LIMIT 100
+    ");
+    $produccion = $stmtProd->fetchAll();
+
+    $auditoria = HospitalHuaralDB::ultimaAuditoria(30);
+    $stats = [
+        'totalCaptadas' => count($pacientes),
+        'insatisfechasSinMetodo' => count(array_filter($pacientes, static fn ($p) => $p['estado_paciente'] === 'INSATISFECHA_SIN_METODO')),
+        'captadasConMetodo' => count(array_filter($pacientes, static fn ($p) => $p['estado_paciente'] === 'CAPTADA_CON_METODO')),
+        'seguimientoDomiciliario' => count(array_filter($pacientes, static fn ($p) => $p['estado_paciente'] === 'SEGUIMIENTO_DOMICILIARIO')),
+        'citasAmpollaHoyManana' => count(array_filter($agenda, static fn ($a) => in_array($a['estado_cita'], ['TOCA_HOY', 'TOCA_MANANA'], true))),
+        'alertasHisPorCaptar' => 0,
+        'atenciones99208' => count(array_filter($pacientes, static fn ($p) => $p['atencion_99208'] === true)),
+    ];
+    $metricsRow = $pdo->query("
+        SELECT
+          SUM(CASE WHEN accion = 'WAF_SQLI_BLOCKED' THEN 1 ELSE 0 END) AS sqli,
+          SUM(CASE WHEN accion = 'WAF_XSS_BLOCKED' THEN 1 ELSE 0 END) AS xss,
+          SUM(CASE WHEN accion IN ('AUTH_2FA_VERIFIED', 'AUTH_2FA_FAILED') THEN 1 ELSE 0 END) AS totp,
+          SUM(CASE WHEN accion LIKE 'AUTH_LOGIN_FAILED%' OR accion = 'LOGIN_RATE_LIMITED' THEN 1 ELSE 0 END) AS failed,
+          COUNT(*) AS total
+        FROM auditoria_seguridad_app
+    ")->fetch() ?: [];
+
+    json_out([
+        'session' => [
+            'dni' => $session['dni'],
+            'cod_estab' => $session['cod_estab'],
+            'estab_nombre' => $session['estab_nombre'],
+            'platform' => $platform,
+            'verified2FA' => true,
+            'isAdmin' => is_admin_session($session),
+        ],
+        'stats' => $stats,
+        'securityMetrics' => [
+            'sqliBlockedCount' => (int)($metricsRow['sqli'] ?? 0),
+            'xssBlockedCount' => (int)($metricsRow['xss'] ?? 0),
+            'totpVerifiedCount' => (int)($metricsRow['totp'] ?? 0),
+            'encryptedRecordsCount' => count($pacientes),
+            'failedLoginsBlocked' => (int)($metricsRow['failed'] ?? 0),
+            'auditLogCount' => (int)($metricsRow['total'] ?? 0),
+        ],
+        'pacientes' => $pacientes,
+        'agendaAmpollas' => $agenda,
+        'produccionObstetras' => $produccion,
+        'auditLogs' => $auditoria,
+        'establecimientos' => hospital_establecimientos(),
+        'distritos' => [
+            ['UBIGEO' => '150601', 'DESC_DIST' => 'HUARAL'],
+            ['UBIGEO' => '150605', 'DESC_DIST' => 'CHANCAY'],
+            ['UBIGEO' => '150604', 'DESC_DIST' => 'AUCALLAMA'],
+            ['UBIGEO' => '150606', 'DESC_DIST' => 'IHUARI'],
+            ['UBIGEO' => '150602', 'DESC_DIST' => 'ATAVILLOS ALTO'],
+            ['UBIGEO' => '150603', 'DESC_DIST' => 'ATAVILLOS BAJO'],
+            ['UBIGEO' => '150607', 'DESC_DIST' => 'LAMPIAN'],
+            ['UBIGEO' => '150608', 'DESC_DIST' => 'PACARAOS'],
+            ['UBIGEO' => '150609', 'DESC_DIST' => 'SAN MIGUEL DE ACOS'],
+            ['UBIGEO' => '150610', 'DESC_DIST' => 'SANTA CRUZ DE ANDAMARCA'],
+            ['UBIGEO' => '150611', 'DESC_DIST' => 'SUMBILCA'],
+            ['UBIGEO' => '150612', 'DESC_DIST' => 'VEINTISIETE DE NOVIEMBRE'],
+        ],
+    ]);
+}
+
+// ---------------------------------------------------------------------------
+// 6. HELPERS CLÍNICOS: 99208, UPS Planificación Familiar y establecimientos
+// ---------------------------------------------------------------------------
+/**
+ * Resuelve el nombre oficial del establecimiento con prioridad:
+ * 1) catálogo IPRESS local (53 establecimientos),
+ * 2) nombre devuelto por el JOIN con `establec`,
+ * 3) consulta directa a `establec` por cualquiera de las variantes del código.
+ */
+function resolver_nombre_establecimiento(PDO $pdo, ?string $codigo, ?string $fallback = null): string
+{
+    $codigo = trim((string)$codigo);
+    $variantes = hospital_codigos_busqueda_establecimiento($codigo);
+    // El catálogo oficial manda: se prueba el código recibido y sus variantes
+    // (IPRESS, interno de 4 dígitos, sin ceros) antes de consultar establec.
+    foreach ($variantes as $variante) {
+        $est = hospital_establecimiento($variante);
+        if ($est !== null) {
+            $nombre = trim((string)($est['DESC_ESTAB'] ?? ''));
+            if ($nombre !== '') {
+                return $nombre;
+            }
+        }
+    }
+
+    $fallback = trim((string)$fallback);
+    if ($fallback !== '' && $fallback !== $codigo) {
+        return $fallback;
+    }
+
+    if ($variantes) {
+        $placeholders = implode(',', array_fill(0, count($variantes), '?'));
+        try {
+            $stmt = $pdo->prepare("SELECT DESC_ESTAB FROM establec WHERE COD_ESTAB IN ({$placeholders}) LIMIT 1");
+            $stmt->execute($variantes);
+            $nombre = trim((string)($stmt->fetchColumn() ?: ''));
+            if ($nombre !== '') {
+                return $nombre;
+            }
+        } catch (Throwable $e) {
+            // La tabla establec puede no existir en una instalación mínima.
+        }
+    }
+
+    return $fallback !== '' ? $fallback : ($codigo !== '' ? $codigo : 'SIN ESTABLECIMIENTO');
+}
+
+/**
+ * Determina si una fila HIS corresponde realmente a la UPS de Planificación
+ * Familiar. Se prioriza COD_SERVSA 302304 (o equivalentes) y, solo cuando el
+ * campo está vacío, se aceptan los DX históricos de métodos anticonceptivos.
+ *
+ * @param array<string, mixed> $row
+ * @param array<int, string> $codigosUps
+ */
+function atencion_ups_es_planificacion_familiar(array $row, array $codigosUps): bool
+{
+    $codServsa = trim((string)($row['COD_SERVSA'] ?? ''));
+    if ($codServsa !== '') {
+        return in_array($codServsa, $codigosUps, true);
+    }
+    $dx = trim((string)($row['DX'] ?? ''));
+    return in_array($dx, ['90782', 'Z304', 'Z301', 'Z300'], true);
+}
+
+/**
+ * @return array<int, array<string, mixed>>
+ */
+function consultar_atenciones_99208(PDO $pdo, string $dni): array
+{
+    $sql = "
+        SELECT h.ID, h.DNI, h.COD_ESTAB, h.COD_ESTAB AS nombre_establecimiento,
+               h.DIA, h.MES, h.ANO, h.fecha_reg, dt.DX, dt.TDX, dt.LDX,
+               dt.fecha_reg AS fecha_dx, h.CODPSAL
+        FROM his_dl h
+        INNER JOIN his_dl_dt dt ON dt.ID = h.ID
+        WHERE h.DNI = :dni AND TRIM(dt.DX) = '99208'
+        ORDER BY h.ANO DESC, h.MES DESC, h.DIA DESC
+        LIMIT 5
+    ";
+    try {
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute([':dni' => $dni]);
+        return $stmt->fetchAll();
+    } catch (Throwable $e) {
+        // Fallback si el servidor local no tiene las tablas maestro_*: usa el catálogo IPRESS.
+        try {
+            $stmt = $pdo->prepare("
+                SELECT h.ID, h.DNI, h.COD_ESTAB, h.COD_ESTAB AS nombre_establecimiento,
+                       h.DIA, h.MES, h.ANO, h.fecha_reg, dt.DX, dt.TDX, dt.LDX,
+                       dt.fecha_reg AS fecha_dx, h.CODPSAL
+                FROM his_dl h
+                INNER JOIN his_dl_dt dt ON dt.ID = h.ID
+                WHERE h.DNI = :dni AND TRIM(dt.DX) = '99208'
+                ORDER BY h.ANO DESC, h.MES DESC, h.DIA DESC
+                LIMIT 5
+            ");
+            $stmt->execute([':dni' => $dni]);
+            return $stmt->fetchAll();
+        } catch (Throwable $e2) {
+            return [];
+        }
+    }
+}
+
+/**
+ * Códigos UPS equivalentes a Planificación Familiar.
+ * @return array<int, string>
+ */
+function codigos_ups_planificacion_familiar(PDO $pdo): array
+{
+    $codigos = ['302304'];
+    foreach (['tablaupsequivalente', 'maestro_sys_ups'] as $tabla) {
+        try {
+            $cols = $pdo->prepare("
+                SELECT COLUMN_NAME FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :tabla
+            ");
+            $cols->execute([':tabla' => $tabla]);
+            $nombres = array_map(static fn ($r) => (string)$r['COLUMN_NAME'], $cols->fetchAll());
+            if (!$nombres) {
+                continue;
+            }
+            $colCodigo = null;
+            $colNombre = null;
+            foreach ($nombres as $col) {
+                if ($colCodigo === null && preg_match('/^(codigo|cod_ups|codups|id_ups|codigo_ups)$/i', $col)) {
+                    $colCodigo = $col;
+                }
+                if ($colNombre === null && preg_match('/(nombre|descripcion|denominacion)/i', $col)) {
+                    $colNombre = $col;
+                }
+            }
+            if ($colCodigo === null) {
+                continue;
+            }
+            if ($colNombre !== null) {
+                $sql = "SELECT DISTINCT `{$colCodigo}` AS codigo FROM `{$tabla}`
+                        WHERE `{$colNombre}` LIKE '%PLANIFIC%' LIMIT 50";
+            } else {
+                $sql = "SELECT DISTINCT `{$colCodigo}` AS codigo FROM `{$tabla}` LIMIT 50";
+            }
+            foreach ($pdo->query($sql)->fetchAll() as $row) {
+                $codigo = trim((string)($row['codigo'] ?? ''));
+                if ($codigo !== '' && preg_match('/^[A-Za-z0-9\-\.]{1,20}$/', $codigo)) {
+                    $codigos[] = $codigo;
+                }
+            }
+        } catch (Throwable $e) {
+            // La tabla puede no existir en el servidor local; se mantiene 302304.
+        }
+    }
+    return array_values(array_unique($codigos));
+}
+
+/**
+ * @return array<int, array<string, mixed>>
+ */
+function consultar_ups_planificacion_familiar(PDO $pdo, string $dni, string $codEstab, array $codigosUps): array
+{
+    $codigosEstab = hospital_codigos_busqueda_establecimiento($codEstab);
+    if (!$codigosEstab) {
+        $codigosEstab = [trim($codEstab)];
+    }
+    $codigosUps = array_values(array_unique(array_filter(array_map(
+        static fn ($codigo): string => trim((string)$codigo),
+        $codigosUps
+    ), static fn (string $codigo): bool => $codigo !== '')));
+    if (!$codigosUps) {
+        $codigosUps = ['302304'];
+    }
+
+    $dxCodes = ['99208', '90782', 'Z304', 'Z301', 'Z300'];
+    $placeholdersEstab = implode(',', array_fill(0, count($codigosEstab), '?'));
+    $placeholdersUps = implode(',', array_fill(0, count($codigosUps), '?'));
+    $placeholdersDx = implode(',', array_fill(0, count($dxCodes), '?'));
+
+    // h.COD_ESTAB IN (...) es sargable y usa idx_his_dl_dni_estab_ups.
+    // Se eliminó RIGHT(TRIM(h.COD_ESTAB), 5) = RIGHT(TRIM(?), 5), que forzaba
+    // un Table Scan sobre millones de filas de his_dl.
+    $sql = "
+        SELECT h.ID, h.DNI, h.COD_ESTAB, h.COD_SERVSA, h.CODPSAL,
+               h.ANO, h.MES, h.DIA, h.fecha_reg, h.HCLFAM,
+               dt.DX, dt.TDX, dt.LDX, dt.id_dosis, dt.Alerta, dt.fecha_reg AS fecha_dx
+        FROM his_dl h
+        INNER JOIN his_dl_dt dt ON dt.ID = h.ID
+        WHERE h.DNI = ?
+          AND h.COD_ESTAB IN ({$placeholdersEstab})
+          AND (h.COD_SERVSA IN ({$placeholdersUps}) OR dt.DX IN ({$placeholdersDx}))
+        ORDER BY h.ANO DESC, h.MES DESC, h.DIA DESC
+        LIMIT 20
+    ";
+    $params = array_merge([$dni], $codigosEstab, $codigosUps, $dxCodes);
+    try {
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($params);
+        return $stmt->fetchAll();
+    } catch (Throwable $e) {
+        try {
+            $sqlFallback = "
+                SELECT h.ID, h.DNI, h.COD_ESTAB, h.CODPSAL,
+                       h.ANO, h.MES, h.DIA, h.fecha_reg, h.HCLFAM,
+                       dt.DX, dt.TDX, dt.LDX, dt.id_dosis, dt.Alerta, dt.fecha_reg AS fecha_dx
+                FROM his_dl h
+                INNER JOIN his_dl_dt dt ON dt.ID = h.ID
+                WHERE h.DNI = ?
+                  AND h.COD_ESTAB IN ({$placeholdersEstab})
+                  AND dt.DX IN ({$placeholdersDx})
+                ORDER BY h.ANO DESC, h.MES DESC, h.DIA DESC
+                LIMIT 20
+            ";
+            $stmt = $pdo->prepare($sqlFallback);
+            $stmt->execute(array_merge([$dni], $codigosEstab, $dxCodes));
+            return $stmt->fetchAll();
+        } catch (Throwable $e2) {
+            return [];
+        }
+    }
+}
+
+function fecha_dd_mm_yyyy(array $row): string
+{
+    $dia = (int)($row['DIA'] ?? 0);
+    $mes = (int)($row['MES'] ?? 0);
+    $ano = (int)($row['ANO'] ?? 0);
+    if ($dia >= 1 && $dia <= 31 && $mes >= 1 && $mes <= 12 && $ano >= 1900) {
+        return sprintf('%02d/%02d/%04d', $dia, $mes, $ano);
+    }
+    $fecha = (string)($row['fecha_dx'] ?? $row['fecha_reg'] ?? '');
+    $ts = strtotime($fecha);
+    return $ts ? date('d/m/Y', $ts) : '';
+}
+
+// ---------------------------------------------------------------------------
+// 7. BÚSQUEDA DE DNI — 30 consultas/minuto (anti-scraping)
+// ---------------------------------------------------------------------------
+if ($action === 'lookup_dni') {
+    $session = require_session();
+    $ip = HospitalHuaralDB::clientIp();
+    $bucket = 'lookup:' . hash('sha256', (string)($session['token'] ?? ($session['dni'] . '|' . $ip)));
+    $limit = HospitalHuaralDB::rateLimitStatus($bucket, 30, 60);
+    if (!$limit['allowed']) {
+        HospitalHuaralDB::registrarAuditoria($session['dni'], 'LOOKUP_RATE_LIMITED', 'Límite de 30 consultas de DNI por minuto excedido. Posible scraping bloqueado.', $session['cod_estab'], $session['platform']);
+        json_error('Límite de 30 consultas de DNI por minuto alcanzado. Espere y vuelva a intentar.', 429, [
+            'retryAfter' => $limit['retryAfter'],
+        ]);
+    }
+    HospitalHuaralDB::rateLimitHit($bucket, 60);
+
+    $dni = preg_replace('/[^0-9]/', '', (string)($_GET['dni'] ?? '')) ?? '';
+    if (strlen($dni) < 8 || strlen($dni) > 15) {
+        json_error('Formato de DNI inválido. Use únicamente números (8 a 15 dígitos).', 400);
+    }
+
+    $codEstab = hospital_codigo_canonico((string)($_GET['cod_estab'] ?? $session['cod_estab']));
+    if (hospital_establecimiento($codEstab) === null) {
+        $codEstab = $session['cod_estab'];
+    }
+    $est = hospital_establecimiento($codEstab);
+
+    // 7.1 Historia general (la más reciente)
+    $hisRecord = null;
+    try {
+        $stmt = $pdo->prepare("
+            SELECT h.ID, h.DNI, h.COD_ESTAB, h.COD_SERVSA, h.CODPSAL,
+                   TRIM(h.Apellido_p) AS Apellido_p, TRIM(h.Apellido_m) AS Apellido_m,
+                   TRIM(h.Pnombre) AS Pnombre, TRIM(h.Dnombres) AS Dnombres,
+                   h.EDAD, h.SEXO, h.UBIGEO, h.FICHAFAM, h.HCLFAM,
+                   h.Fecha_Ultima_Regla, h.condicion_gestante, h.fecha_reg,
+                   h.PESO, h.TALLA, h.IMC, h.FECHA_NAC, h.gruporiesgo_desc
+            FROM his_dl h
+            WHERE h.DNI = :dni
+            ORDER BY h.ANO DESC, h.MES DESC, h.DIA DESC
+            LIMIT 1
+        ");
+        $stmt->execute([':dni' => $dni]);
+        $hisRecord = $stmt->fetch() ?: null;
+    } catch (Throwable $e) {
+        $stmt = $pdo->prepare("
+            SELECT h.ID, h.DNI, h.COD_ESTAB, h.COD_SERVSA, h.CODPSAL,
+                   TRIM(h.Apellido_p) AS Apellido_p, TRIM(h.Apellido_m) AS Apellido_m,
+                   TRIM(h.Pnombre) AS Pnombre, TRIM(h.Dnombres) AS Dnombres,
+                   h.EDAD, h.SEXO, h.UBIGEO, h.FICHAFAM, h.HCLFAM,
+                   h.Fecha_Ultima_Regla, h.condicion_gestante, h.fecha_reg
+            FROM his_dl h
+            WHERE h.DNI = :dni
+            ORDER BY h.ANO DESC, h.MES DESC, h.DIA DESC
+            LIMIT 1
+        ");
+        $stmt->execute([':dni' => $dni]);
+        $hisRecord = $stmt->fetch() ?: null;
+    }
+
+    $hisDetails = [];
+    if ($hisRecord) {
+        $stmtDt = $pdo->prepare('SELECT DX, TDX, LDX, id_dosis, Alerta, fecha_reg FROM his_dl_dt WHERE ID = :id ORDER BY num ASC LIMIT 50');
+        $stmtDt->execute([':id' => $hisRecord['ID']]);
+        $hisDetails = $stmtDt->fetchAll();
+    }
+
+    // 7.2 Código 99208 (banner clínico destacado)
+    $atenciones99208 = consultar_atenciones_99208($pdo, $dni);
+    $historial99208 = [];
+    foreach ($atenciones99208 as $row) {
+        // Primero el catálogo oficial de las 53 IPRESS; como respaldo se usa el
+        // nombre del JOIN con establec y, si no existe, la consulta directa.
+        $nombre = resolver_nombre_establecimiento(
+            $pdo,
+            (string)$row['COD_ESTAB'],
+            (string)($row['nombre_establecimiento'] ?? '')
+        );
+        $historial99208[] = [
+            'establecimiento' => $nombre,
+            'cod_estab' => (string)$row['COD_ESTAB'],
+            'fecha' => fecha_dd_mm_yyyy($row),
+            'fecha_iso' => (string)($row['fecha_dx'] ?? $row['fecha_reg'] ?? ''),
+            'profesional' => (string)($row['CODPSAL'] ?? ''),
+            'dx' => (string)$row['DX'],
+            'tdx' => (string)($row['TDX'] ?? ''),
+            'ldx' => (string)($row['LDX'] ?? ''),
+        ];
+    }
+    $tiene99208 = count($historial99208) > 0;
+    $primer99208 = $historial99208[0] ?? null;
+    $mensaje99208 = $tiene99208
+        ? sprintf(
+            'La paciente con DNI %s recibió atención con el código 99208 en el establecimiento %s en la fecha %s.',
+            $dni,
+            $primer99208['establecimiento'],
+            $primer99208['fecha']
+        )
+        : sprintf('La paciente con DNI %s no registra atención con el código 99208 en la Red Huaral-Chancay.', $dni);
+
+    // 7.3 Búsqueda en la UPS de Planificación Familiar del establecimiento de la obstetra
+    $codigosUps = codigos_ups_planificacion_familiar($pdo);
+    $atencionesUps = consultar_ups_planificacion_familiar($pdo, $dni, $codEstab, $codigosUps);
+    $tieneUps = false;
+    foreach ($atencionesUps as $row) {
+        if (atencion_ups_es_planificacion_familiar($row, $codigosUps)) {
+            $tieneUps = true;
+            break;
+        }
+    }
+    $nombreEstab = $est['DESC_ESTAB'] ?? hospital_nombre_establecimiento($codEstab);
+    $mensajeUps = $tieneUps
+        ? 'Paciente YA REGISTRADA en la UPS de Planificación Familiar del establecimiento ' . $nombreEstab . '. Pase directo habilitado sin volver a llenar el formulario.'
+        : 'Paciente no registra atención previa en la UPS de Planificación Familiar de ' . $nombreEstab . '. Complete el formulario (datos precargados desde HIS) para registrar la captación.';
+
+    $upsAtenciones = [];
+    foreach ($atencionesUps as $row) {
+        $upsAtenciones[] = [
+            'id_his' => (string)$row['ID'],
+            'fecha' => fecha_dd_mm_yyyy($row),
+            'cod_servsa' => (string)($row['COD_SERVSA'] ?? ''),
+            'dx' => (string)($row['DX'] ?? ''),
+            'profesional' => (string)($row['CODPSAL'] ?? ''),
+            'id_dosis' => (string)($row['id_dosis'] ?? ''),
+            'alerta' => (string)($row['Alerta'] ?? ''),
+            'es_planificacion_familiar' => atencion_ups_es_planificacion_familiar($row, $codigosUps),
+        ];
+    }
+
+    // 7.4 Captación previa en la app (PII descifrada solo dentro de sesión 2FA)
+    $stmtCap = $pdo->prepare('SELECT * FROM pacientes_sin_metodo WHERE dni = :dni LIMIT 1');
+    $stmtCap->execute([':dni' => $dni]);
+    $existing = $stmtCap->fetch() ?: null;
+    if ($existing) {
+        $existing['celular'] = HospitalHuaralDB::decryptPII((string)$existing['celular']);
+        $existing['correo'] = HospitalHuaralDB::decryptPII((string)$existing['correo']);
+        $existing['direccion'] = HospitalHuaralDB::decryptPII((string)$existing['direccion']);
+        unset($existing['encrypted_raw']);
+    }
+
+    $hasActiveMethod = false;
+    $ciclos = ['90782' => 30, 'Z304' => 90, 'Z301' => 1095, '99208' => 30, 'Z300' => 0];
+    foreach ($hisDetails as $dt) {
+        $dias = $ciclos[(string)($dt['DX'] ?? '')] ?? 0;
+        if ($dias > 0) {
+            $hasActiveMethod = true;
+            break;
+        }
+    }
+
+    // Caso B: datos mínimos para que el formulario se abra precargado desde HIS.
+    $precargaDesdeHis = null;
+    if ($hisRecord) {
+        $precargaDesdeHis = [
+            'apellido_paterno' => (string)($hisRecord['Apellido_p'] ?? ''),
+            'apellido_materno' => (string)($hisRecord['Apellido_m'] ?? ''),
+            'nombres' => (string)($hisRecord['Dnombres'] ?? ($hisRecord['Pnombre'] ?? '')),
+            'edad' => (int)($hisRecord['EDAD'] ?? 0),
+            'dni' => (string)($hisRecord['DNI'] ?? $dni),
+        ];
+    }
+
+    HospitalHuaralDB::registrarAuditoria(
+        $session['dni'],
+        'VALIDACION_DNI_HIS',
+        'Consulta DNI ' . $dni . ' en ' . $nombreEstab . '. 99208: ' . ($tiene99208 ? 'SÍ' : 'NO') . '. UPS PF previa: ' . ($tieneUps ? 'SÍ (Caso A)' : 'NO (Caso B)') . '.',
+        $codEstab,
+        $session['platform']
+    );
+    HospitalHuaralDB::registrarAuditoria(
+        $session['dni'],
+        'VERIFICACION_99208',
+        'Verificación del código 99208 para DNI ' . $dni . ': ' . ($tiene99208 ? 'ATENCIÓN ENCONTRADA' : 'SIN ATENCIÓN') . '.',
+        $codEstab,
+        $session['platform']
+    );
+
+    json_out([
+        'foundInHis' => (bool)$hisRecord,
+        'foundInEstablecimiento' => $hisRecord
+            ? (hospital_codigo_canonico((string)$hisRecord['COD_ESTAB']) === $codEstab)
+            : false,
+        'hasActiveMethodInHis' => $hasActiveMethod,
+        'hisRecord' => $hisRecord,
+        'hisDetails' => $hisDetails,
+        'existingCaptacion' => $existing,
+        'precargaDesdeHis' => $precargaDesdeHis,
+        'establecimiento' => [
+            'codigo' => $codEstab,
+            'nombre' => $nombreEstab,
+            'categoria' => $est['CATEGORIA'] ?? '',
+            'distrito' => $est['DISTRITO'] ?? '',
+        ],
+        'atencion99208' => [
+            'tieneCodigo99208' => $tiene99208,
+            'mensajeOficial99208' => $mensaje99208,
+            'historial99208' => $historial99208,
+        ],
+        'upsPlanificacionFamiliar' => [
+            'establecimiento' => [
+                'codigo' => $codEstab,
+                'nombre' => $nombreEstab,
+            ],
+            'codigosUps' => $codigosUps,
+            'tieneAtencionPrevia' => $tieneUps,
+            'paseDirectoHabilitado' => $tieneUps,
+            'requiereFormularioCompleto' => !$tieneUps,
+            'caso' => $tieneUps ? 'A' : 'B',
+            'mensaje' => $mensajeUps,
+            'atenciones' => $upsAtenciones,
+        ],
+    ]);
+}
+
+// ---------------------------------------------------------------------------
+// 8. GUARDAR PACIENTE (upsert por DNI, PII cifrada AES-256-GCM)
+// ---------------------------------------------------------------------------
+if ($action === 'save_paciente') {
+    $session = require_session();
+    $paseUps = !empty($body['pase_ups']);
+
+    $dni = preg_replace('/[^0-9]/', '', (string)($body['dni'] ?? '')) ?? '';
+    $apPaterno = strtoupper(HospitalHuaralDB::sanitizeText($body['apellido_paterno'] ?? '', 50));
+    $apMaterno = strtoupper(HospitalHuaralDB::sanitizeText($body['apellido_materno'] ?? '', 50));
+    $nombres = strtoupper(HospitalHuaralDB::sanitizeText($body['nombres'] ?? '', 80));
+    $edad = (int)($body['edad'] ?? 0);
+    $celular = HospitalHuaralDB::sanitizeText($body['celular'] ?? '', 15);
+    $correo = strtolower(HospitalHuaralDB::sanitizeText($body['correo'] ?? '', 150));
+    $distrito = strtoupper(HospitalHuaralDB::sanitizeText($body['distrito'] ?? '', 80));
+    $direccion = HospitalHuaralDB::sanitizeText($body['direccion'] ?? '', 200);
+    $sector = strtoupper(HospitalHuaralDB::sanitizeText($body['sector'] ?? '', 50));
+    $estado = strtoupper(HospitalHuaralDB::sanitizeText(
+        $body['estado_paciente'] ?? ($paseUps ? 'CAPTADA_CON_METODO' : 'INSATISFECHA_SIN_METODO'),
+        30
+    ));
+    $estadosValidos = ['INSATISFECHA_SIN_METODO', 'CAPTADA_CON_METODO', 'SEGUIMIENTO_DOMICILIARIO', 'CONSEJERIA_REALIZADA', 'RECHAZA_METODO'];
+    if (!in_array($estado, $estadosValidos, true)) {
+        $estado = $paseUps ? 'CAPTADA_CON_METODO' : 'INSATISFECHA_SIN_METODO';
+    }
+    $codEstab = $session['cod_estab'];
+    $atencion99208Solicitada = !empty($body['atencion_99208']) ? 1 : 0;
+
+    if (strlen($dni) < 8 || strlen($dni) > 15) {
+        json_error('El DNI de la paciente debe contener entre 8 y 15 dígitos numéricos.', 400);
+    }
+
+    // Caso A: el pase directo solo es válido si el HIS confirma atención previa
+    // real en la UPS de Planificación Familiar del establecimiento activo.
+    if ($paseUps) {
+        $codigosUps = codigos_ups_planificacion_familiar($pdo);
+        $atencionesUps = consultar_ups_planificacion_familiar($pdo, $dni, $codEstab, $codigosUps);
+        $tieneUpsPrevia = false;
+        foreach ($atencionesUps as $atencionUps) {
+            if (atencion_ups_es_planificacion_familiar($atencionUps, $codigosUps)) {
+                $tieneUpsPrevia = true;
+                break;
+            }
+        }
+        if (!$tieneUpsPrevia) {
+            json_error(
+                'No se puede confirmar el pase directo: la paciente no registra atención previa en la UPS de Planificación Familiar de este establecimiento.',
+                409,
+                ['code' => 'UPS_PREVIA_NO_ENCONTRADA', 'caso' => 'B']
+            );
+        }
+    }
+
+    // Caso A: pase directo desde UPS. Si faltan datos, se completan con HIS o con
+    // marcadores seguros para que la obstetra no tenga que redigitar todo.
+    if ($paseUps) {
+        $stmt = $pdo->prepare('SELECT * FROM pacientes_sin_metodo WHERE dni = :dni LIMIT 1');
+        $stmt->execute([':dni' => $dni]);
+        $existente = $stmt->fetch() ?: null;
+        if ($existente) {
+            $apPaterno = $apPaterno ?: strtoupper((string)$existente['apellido_paterno']);
+            $apMaterno = $apMaterno ?: strtoupper((string)$existente['apellido_materno']);
+            $nombres = $nombres ?: strtoupper((string)$existente['nombres']);
+            $edad = $edad >= 10 ? $edad : (int)$existente['edad'];
+            $celular = $celular ?: HospitalHuaralDB::decryptPII((string)$existente['celular']);
+            $correo = $correo ?: HospitalHuaralDB::decryptPII((string)$existente['correo']);
+            $direccion = $direccion ?: HospitalHuaralDB::decryptPII((string)$existente['direccion']);
+            $distrito = $distrito ?: strtoupper((string)$existente['distrito']);
+            $sector = $sector ?: strtoupper((string)$existente['sector']);
+        } else {
+            try {
+                $stmtHis = $pdo->prepare('SELECT TRIM(Apellido_p) AS ap, TRIM(Apellido_m) AS am, TRIM(Dnombres) AS nom, EDAD FROM his_dl WHERE DNI = :dni ORDER BY ANO DESC, MES DESC, DIA DESC LIMIT 1');
+                $stmtHis->execute([':dni' => $dni]);
+                $his = $stmtHis->fetch() ?: [];
+                $apPaterno = $apPaterno ?: strtoupper((string)($his['ap'] ?? 'SIN DATO'));
+                $apMaterno = $apMaterno ?: strtoupper((string)($his['am'] ?? 'SIN DATO'));
+                $nombres = $nombres ?: strtoupper((string)($his['nom'] ?? 'SIN DATO'));
+                $edad = $edad >= 10 ? $edad : (int)($his['EDAD'] ?? 18);
+            } catch (Throwable $e) {
+                $apPaterno = $apPaterno ?: 'SIN DATO';
+                $apMaterno = $apMaterno ?: 'SIN DATO';
+                $nombres = $nombres ?: 'SIN DATO';
+                $edad = $edad >= 10 ? $edad : 18;
+            }
+            $direccion = $direccion ?: 'NO REGISTRADA - ACTUALIZAR EN CAMPO';
+            $distrito = $distrito ?: 'HUARAL';
+            $sector = $sector ?: 'UPS PLANIFICACION FAMILIAR';
+        }
+    }
+
+    if ($distrito === '') {
+        $distrito = 'HUARAL';
+    }
+
+    if ($apPaterno === '' || $apMaterno === '' || $nombres === '' || $direccion === '' || $sector === '') {
+        json_error('Complete los campos obligatorios: apellidos, nombres, dirección y sector.', 400);
+    }
+    if ($edad < 10 || $edad > 65) {
+        json_error('La edad en planificación familiar debe estar entre 10 y 65 años.', 400);
+    }
+
+    // El antecedente 99208 se valida contra his_dl/his_dl_dt, no se confía solo
+    // en el booleano que envía el navegador.
+    $atencion99208 = $atencion99208Solicitada;
+    try {
+        if (count(consultar_atenciones_99208($pdo, $dni)) > 0) {
+            $atencion99208 = 1;
+        }
+    } catch (Throwable $e) {
+        // Si el HIS no responde, se conserva el valor enviado por la obstetra.
+    }
+
+    $stmt = $pdo->prepare("
+        INSERT INTO pacientes_sin_metodo
+            (dni, apellido_paterno, apellido_materno, nombres, edad, celular, correo, distrito, direccion, sector, estado_paciente, codpsal_obstetra, cod_estab, atencion_99208)
+        VALUES
+            (:dni, :ap_p, :ap_m, :nom, :edad, :cel, :cor, :dist, :dir, :sec, :est, :obst, :estab, :a99208)
+        ON DUPLICATE KEY UPDATE
+            apellido_paterno = VALUES(apellido_paterno),
+            apellido_materno = VALUES(apellido_materno),
+            nombres = VALUES(nombres),
+            edad = VALUES(edad),
+            celular = VALUES(celular),
+            correo = VALUES(correo),
+            distrito = VALUES(distrito),
+            direccion = VALUES(direccion),
+            sector = VALUES(sector),
+            estado_paciente = VALUES(estado_paciente),
+            codpsal_obstetra = VALUES(codpsal_obstetra),
+            cod_estab = VALUES(cod_estab),
+            atencion_99208 = GREATEST(atencion_99208, VALUES(atencion_99208))
+    ");
+    $stmt->execute([
+        ':dni' => $dni,
+        ':ap_p' => $apPaterno,
+        ':ap_m' => $apMaterno,
+        ':nom' => $nombres,
+        ':edad' => $edad,
+        ':cel' => HospitalHuaralDB::encryptPII($celular),
+        ':cor' => HospitalHuaralDB::encryptPII($correo),
+        ':dist' => $distrito,
+        ':dir' => HospitalHuaralDB::encryptPII($direccion),
+        ':sec' => $sector,
+        ':est' => $estado,
+        ':obst' => $session['dni'],
+        ':estab' => $codEstab,
+        ':a99208' => $atencion99208,
+    ]);
+
+    HospitalHuaralDB::registrarAuditoria(
+        $session['dni'],
+        $paseUps ? 'PASE_UPS_CONFIRMADO' : 'GUARDAR_PACIENTE',
+        ($paseUps ? 'Pase directo UPS PF confirmado' : 'Paciente registrada') . ' DNI ' . $dni . ' (' . $apPaterno . ' ' . $apMaterno . ', ' . $nombres . ') en ' . hospital_nombre_establecimiento($codEstab) . '. PII cifrada AES-256-GCM.',
+        $codEstab,
+        $session['platform']
+    );
+
+    if ($atencion99208 === 1) {
+        HospitalHuaralDB::registrarAuditoria($session['dni'], 'VERIFICACION_99208', 'Paciente DNI ' . $dni . ' registrada con antecedente de atención 99208.', $codEstab, $session['platform']);
+    }
+
+    json_out([
+        'success' => true,
+        'mode' => $paseUps ? 'PASE_UPS' : 'UPSERT',
+        'message' => $paseUps
+            ? 'Pase directo confirmado en la UPS de Planificación Familiar.'
+            : 'Paciente guardada exitosamente en MySQL/MariaDB (PII cifrada AES-256-GCM).',
+        'atencion_99208' => (bool)$atencion99208,
+    ], 201);
+}
+
+// ---------------------------------------------------------------------------
+// 9. ACTUALIZAR ESTADO CLÍNICO
+// ---------------------------------------------------------------------------
+if ($action === 'update_estado') {
+    $session = require_session();
+    $id = (int)($body['id'] ?? 0);
+    $estado = strtoupper(HospitalHuaralDB::sanitizeText($body['estado_paciente'] ?? 'INSATISFECHA_SIN_METODO', 30));
+    $estadosValidos = ['INSATISFECHA_SIN_METODO', 'CAPTADA_CON_METODO', 'SEGUIMIENTO_DOMICILIARIO', 'CONSEJERIA_REALIZADA', 'RECHAZA_METODO'];
+    if ($id <= 0 || !in_array($estado, $estadosValidos, true)) {
+        json_error('Registro o estado clínico inválido.', 400);
+    }
+    $stmt = $pdo->prepare('UPDATE pacientes_sin_metodo SET estado_paciente = :estado WHERE id = :id LIMIT 1');
+    $stmt->execute([':estado' => $estado, ':id' => $id]);
+    if ($stmt->rowCount() === 0) {
+        json_error('No se encontró el registro solicitado.', 404);
+    }
+    HospitalHuaralDB::registrarAuditoria($session['dni'], 'PACIENTE_STATUS_CHANGE', 'Cambio de estado del registro #' . $id . ' a ' . $estado . '.', $session['cod_estab'], $session['platform']);
+    json_out(['success' => true, 'id' => $id, 'estado_paciente' => $estado]);
+}
+
+// ---------------------------------------------------------------------------
+// 10. AUDITORÍA — lectura y verificación de cadena
+// ---------------------------------------------------------------------------
+if ($action === 'audit_logs') {
+    $session = require_session();
+    $limit = (int)($_GET['limit'] ?? 50);
+    json_out([
+        'logs' => HospitalHuaralDB::ultimaAuditoria($limit),
+        'total' => (int)$pdo->query('SELECT COUNT(*) FROM auditoria_seguridad_app')->fetchColumn(),
+        'session' => $session['dni'],
+    ]);
+}
+
+if ($action === 'verify_chain') {
+    $session = require_session();
+    $result = HospitalHuaralDB::verificarCadenaAuditoria();
+    HospitalHuaralDB::registrarAuditoria(
+        $session['dni'],
+        'AUDIT_CHAIN_VERIFICATION',
+        'Verificación SHA-256 de la cadena de auditoría: ' . ($result['valid'] ? 'INTACTA' : 'ALTERADA') . ' (' . $result['verified'] . ' registros).',
+        $session['cod_estab'],
+        $session['platform']
+    );
+    json_out($result);
+}
+
+// ---------------------------------------------------------------------------
+// 11. EXPORTACIÓN SQL NUBE -> LOCAL (solo tablas existentes en el hospital)
+// ---------------------------------------------------------------------------
+function tabla_existe(PDO $pdo, string $tabla): bool
+{
+    $stmt = $pdo->prepare('SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :tabla');
+    $stmt->execute([':tabla' => $tabla]);
+    return (int)$stmt->fetchColumn() > 0;
+}
+
+function identificador_seguro(string $name): bool
+{
+    return (bool)preg_match('/^[A-Za-z0-9_]{1,64}$/', $name);
+}
+
+function sql_valor(PDO $pdo, mixed $value): string
+{
+    if ($value === null) {
+        return 'NULL';
+    }
+    if (is_bool($value)) {
+        return $value ? '1' : '0';
+    }
+    if (is_int($value) || is_float($value)) {
+        return (string)$value;
+    }
+    return $pdo->quote((string)$value);
+}
+
+/**
+ * @param array<int, array<string, mixed>> $rows
+ * @param array<int, string> $pk preferencia de clave primaria
+ */
+function construir_upsert(PDO $pdo, string $tabla, array $rows, array $pk): string
+{
+    if (!$rows || !identificador_seguro($tabla)) {
+        return '';
+    }
+    $columns = array_keys($rows[0]);
+    foreach ($columns as $col) {
+        if (!identificador_seguro((string)$col)) {
+            return '';
+        }
+    }
+    $colList = implode(', ', array_map(static fn ($c) => '`' . $c . '`', $columns));
+    $tuples = [];
+    foreach ($rows as $row) {
+        $vals = [];
+        foreach ($columns as $col) {
+            $vals[] = sql_valor($pdo, $row[$col] ?? null);
+        }
+        $tuples[] = '(' . implode(', ', $vals) . ')';
+    }
+    $updateCols = array_values(array_diff($columns, $pk));
+    if (!$updateCols) {
+        $updateCols = $columns;
+    }
+    $updates = implode(', ', array_map(static fn ($c) => '`' . $c . '` = VALUES(`' . $c . '`)', $updateCols));
+    return "INSERT INTO `{$tabla}` ({$colList})\nVALUES\n  " . implode(",\n  ", $tuples) . "\nON DUPLICATE KEY UPDATE {$updates};\n";
+}
+
+function sql_export_seguro(string $sql): bool
+{
+    // Se excluyen comentarios y literales para no confundir nombres de pacientes
+    // con palabras reservadas. El script solo puede contener INSERT/UPDATE/CALL.
+    $limpio = preg_replace('/^\s*--.*$/m', '', $sql) ?? '';
+    $limpio = preg_replace("/'(?:\\\\.|''|[^'\\\\])*'/s", "''", $limpio) ?? '';
+    return !preg_match('/\b(CREATE|ALTER|DROP|TRUNCATE|DELETE|REPLACE|GRANT|REVOKE)\b/i', $limpio);
+}
+
+if ($action === 'sync_export_local_sql') {
+    $session = require_session();
+    // La exportación contiene hashes de usuario y datos del HIS: solo el
+    // administrador de Estadística puede generarla desde la web.
+    if (!is_admin_session($session)) {
+        json_error('Solo el administrador de Estadística puede generar exportaciones Nube → Local.', 403, [
+            'code' => 'ADMIN_REQUIRED',
+        ]);
+    }
+    $ip = HospitalHuaralDB::clientIp();
+    $bucket = 'sync_export:' . hash('sha256', (string)($session['token'] ?? ($session['dni'] . '|' . $ip)));
+    $limit = HospitalHuaralDB::rateLimitStatus($bucket, 10, 60);
+    if (!$limit['allowed']) {
+        json_error('Límite de exportaciones alcanzado. Espere un minuto.', 429, ['retryAfter' => $limit['retryAfter']]);
+    }
+    HospitalHuaralDB::rateLimitHit($bucket, 60);
+
+    $modo = (string)($_GET['modo'] ?? 'directo');
+    if (!in_array($modo, ['directo', 'puente'], true)) {
+        $modo = 'directo';
+    }
+    $batch = 300;
+
+    // Modo directo: solo las cinco tablas originales del hospital.
+    $tablasDirectas = ['usuario', 'mstrpers', 'his_mstrpers', 'his_dl', 'his_dl_dt'];
+    // Modo puente: tablas receptoras nativas + CALL sp_get_recepcion().
+    $mapaPuente = [
+        'his_dl' => 'r_his_dl',
+        'his_dl_dt' => 'r_his_dl_dt',
+        'his_mstrpers' => 'r_his_mstrpers',
+        'usuario' => 'r_his_digitad',
+    ];
+    $tablasNubeProhibidas = [
+        'pacientes_sin_metodo',
+        'auditoria_seguridad_app',
+        'app_2fa_challenges',
+        'app_obstetra_establecimiento',
+        'app_rate_limits',
+        'app_sesiones',
+        'app_sync_runs',
+        'app_totp_secretos',
+    ];
+    $pkPreferida = [
+        'usuario' => ['dni'],
+        'mstrpers' => ['CODPSAL'],
+        'his_mstrpers' => ['CODPSAL'],
+        'his_dl' => ['ID'],
+        'his_dl_dt' => ['ID', 'num'],
+        'r_his_dl' => ['ID'],
+        'r_his_dl_dt' => ['ID', 'num'],
+        'r_his_mstrpers' => ['CODPSAL'],
+        'r_his_digitad' => ['dni'],
+    ];
+    $plan = $modo === 'puente'
+        ? $mapaPuente
+        : array_combine($tablasDirectas, $tablasDirectas);
+
+    $sql = "-- =====================================================================\n";
+    $sql .= "-- PlanificaSalud HIS · Exportación Nube -> Base Local (Navicat / XAMPP)\n";
+    $sql .= "-- Hospital San Juan Bautista Huaral · Red de Salud Huaral-Chancay\n";
+    $sql .= "-- Generado: " . date('Y-m-d H:i:s') . " · Modo: {$modo} · Lote: {$batch}\n";
+    $sql .= "-- SOLO tablas originales/receptoras existentes en el hospital.\n";
+    $sql .= "-- Las tablas exclusivas de la nube NO se exportan.\n";
+    $sql .= "-- Sin sentencias de definición de esquema y sin borrados de historial.\n";
+    $sql .= "-- =====================================================================\n\n";
+    $sql .= "SET NAMES utf8mb4;\nSET @OLD_SQL_MODE=@@SQL_MODE;\n";
+    $sql .= "SET SQL_MODE='STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION,ALLOW_INVALID_DATES';\nSTART TRANSACTION;\n\n";
+
+    $tablasExportadas = [];
+    $detallePlan = [];
+    $filasTotales = 0;
+    foreach ($plan as $tablaOrigen => $tablaDestino) {
+        if (!identificador_seguro($tablaOrigen) || !identificador_seguro($tablaDestino)) {
+            continue;
+        }
+        if (in_array($tablaOrigen, $tablasNubeProhibidas, true) || in_array($tablaDestino, $tablasNubeProhibidas, true)) {
+            $sql .= "-- [PROHIBIDA] `{$tablaOrigen}` es una tabla exclusiva de la nube.\n\n";
+            continue;
+        }
+        if (!tabla_existe($pdo, $tablaOrigen)) {
+            $sql .= "-- [OMITIDA] La tabla `{$tablaOrigen}` no existe en esta base de datos.\n\n";
+            continue;
+        }
+        try {
+            $order = $tablaOrigen === 'his_dl' ? 'ANO DESC, MES DESC, DIA DESC' : '1 DESC';
+            $stmt = $pdo->query("SELECT * FROM `{$tablaOrigen}` ORDER BY {$order} LIMIT {$batch}");
+            $rows = $stmt->fetchAll();
+        } catch (Throwable $e) {
+            $sql .= "-- [OMITIDA] No se pudo leer `{$tablaOrigen}`: " . str_replace(["\r", "\n"], ' ', $e->getMessage()) . "\n\n";
+            continue;
+        }
+        if (!$rows) {
+            $sql .= "-- [VACÍA] `{$tablaOrigen}` no tiene registros en este lote.\n\n";
+            continue;
+        }
+        $sql .= "-- ---------------------------------------------------------------------\n";
+        $sql .= "-- Origen: `{$tablaOrigen}` -> Destino: `{$tablaDestino}` (" . count($rows) . " filas, LIMIT {$batch})\n";
+        $sql .= "-- ---------------------------------------------------------------------\n";
+        $upsert = construir_upsert($pdo, $tablaDestino, $rows, $pkPreferida[$tablaDestino] ?? ['id']);
+        if ($upsert === '') {
+            $sql .= "-- [OMITIDA] No se pudo construir el INSERT seguro para `{$tablaDestino}`.\n\n";
+            continue;
+        }
+        $sql .= $upsert . "\n";
+        $tablasExportadas[] = $tablaOrigen . '->' . $tablaDestino;
+        $detallePlan[$tablaOrigen] = $tablaDestino;
+        $filasTotales += count($rows);
+    }
+
+    $sql .= "COMMIT;\n";
+    if ($modo === 'puente') {
+        $sql .= "\n-- Procedimiento nativo del hospital: integra las tablas receptoras.\n";
+        $sql .= "CALL sp_get_recepcion();\n";
+    } else {
+        $sql .= "\n-- Modo directo: no se invoca sp_get_recepcion() para evitar doble inserción.\n";
+    }
+    $sql .= "\nSET SQL_MODE=@OLD_SQL_MODE;\n\n";
+    $sql .= "-- Fin del script. Ejecutar en Navicat sobre la base local del hospital.\n";
+
+    if (!sql_export_seguro($sql)) {
+        error_log('[PlanificaHIS] Exportación bloqueada por validación de sentencias peligrosas.');
+        json_error('La exportación fue bloqueada por la política de seguridad SQL del hospital.', 500, [
+            'code' => 'SYNC_UNSAFE_SQL',
+        ]);
+    }
+
+    try {
+        $pdo->prepare("INSERT INTO app_sync_runs (actor_dni, modo, tablas, filas) VALUES (:dni, :modo, :tablas, :filas)")
+            ->execute([
+                ':dni' => (string)$session['dni'],
+                ':modo' => $modo,
+                ':tablas' => implode(',', $tablasExportadas),
+                ':filas' => $filasTotales,
+            ]);
+    } catch (Throwable $e) {
+        // El log de sincronización es auxiliar.
+    }
+
+    HospitalHuaralDB::registrarAuditoria(
+        $session['dni'],
+        'SYNC_EXPORT_LOCAL_SQL',
+        'Exportación Nube -> Local generada en modo ' . $modo . ' para tablas: ' . implode(', ', $tablasExportadas) . ' (' . $filasTotales . ' filas).',
+        $session['cod_estab'],
+        $session['platform']
+    );
+
+    json_out([
+        'success' => true,
+        'filename' => 'sync_nube_a_local_' . date('Ymd_His') . '.sql',
+        'generatedAt' => date('c'),
+        'mode' => $modo,
+        'batchLimit' => $batch,
+        'plan' => $detallePlan,
+        'tables' => $tablasExportadas,
+        'rows' => $filasTotales,
+        'sql' => $sql,
+        'warnings' => [
+            'Las tablas pacientes_sin_metodo, auditoria_seguridad_app y app_* son exclusivas de la nube y NO se exportan.',
+            'Ejecute siempre con respaldo previo de la base local del hospital.',
+            'El script solo usa INSERT ... ON DUPLICATE KEY UPDATE; no elimina historial clínico.',
+        ],
+    ]);
+}
+
+// ---------------------------------------------------------------------------
+// 12. SIMULADOR WAF (solo sesión autenticada, no toca datos reales)
+// ---------------------------------------------------------------------------
+if ($action === 'test_waf') {
+    $session = require_session();
+    $payload = (string)($body['payload'] ?? '');
+    $target = HospitalHuaralDB::sanitizeText($body['targetField'] ?? 'dni', 30);
+    $inspection = HospitalHuaralDB::detectMaliciousPayload($payload);
+    if ($inspection['type'] !== null) {
+        HospitalHuaralDB::registrarAuditoria(
+            $session['dni'],
+            waf_action_for_type($inspection['type']),
+            'Prueba de penetración controlada en campo ' . $target . '. Patrón: [' . $inspection['matched'] . '].',
+            $session['cod_estab'],
+            $session['platform']
+        );
+    }
+    json_out([
+        'blocked' => $inspection['type'] !== null,
+        'attackType' => $inspection['type'],
+        'matchedPattern' => $inspection['matched'],
+        'sanitizedOutput' => HospitalHuaralDB::sanitizeForHtml($payload, 200),
+        'preparedStatementPreview' => 'Parámetro nativo PDO: ' . $target . ' = ? (EMULATE_PREPARES = false)',
+        'aes256Preview' => HospitalHuaralDB::encryptPII($payload !== '' ? $payload : 'Dato Clínico Sensible'),
+    ]);
+}
+
+// ---------------------------------------------------------------------------
+// 13. Estado del API
+// ---------------------------------------------------------------------------
+json_out([
+    'status' => 'API Hospital San Juan Bautista Huaral activa',
+    'version' => '2026.11-ASVS-L3',
+    'security' => [
+        'pdo_native_prepares' => true,
+        'aes_256_gcm' => true,
+        'totp_rfc6238' => true,
+        'bearer_hmac_sha256' => true,
+        'waf' => true,
+        'rate_limiting' => true,
+        'audit_sha256_chain' => true,
+    ],
+    'establecimientos' => count(hospital_establecimientos()),
+]);

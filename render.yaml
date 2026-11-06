@@ -1,0 +1,42 @@
+services:
+  - type: web
+    name: planificahis-huaral
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health.php
+    autoDeploy: true
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: APP_DEMO_MODE
+        value: "0"
+      - key: DB_HOST
+        sync: false
+      - key: DB_PORT
+        value: "4000"
+      - key: DB_NAME
+        sync: false
+      - key: DB_USER
+        sync: false
+      - key: DB_PASS
+        sync: false
+      - key: DB_SSL
+        value: "1"
+      - key: DB_SSL_CA
+        sync: false
+      - key: DB_AUTO_MIGRATE
+        value: "0"
+      - key: HUARAL_AES_SECRET
+        sync: false
+      - key: HUARAL_SESSION_SECRET
+        sync: false
+      - key: ALLOWED_ORIGIN
+        sync: false
+      - key: SYNC_TOKEN
+        sync: false
+      - key: APP_ADMIN_DNI
+        sync: false
+      - key: APP_ADMIN_NIVELID
+        value: "0"

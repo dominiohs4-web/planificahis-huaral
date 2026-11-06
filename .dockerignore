@@ -1,0 +1,43 @@
+# Dependencias y artefactos del frontend React/Vite (no se usan en PHP).
+node_modules/
+dist/
+build/
+coverage/
+src/
+*.ts
+*.tsx
+package.json
+package-lock.json
+bun.lock
+tsconfig.json
+vite.config.ts
+index.html
+
+# Control de versiones / metadatos
+.git/
+.gitignore
+.aistudio/
+metadata.json
+
+# Secretos y entorno local
+.env
+.env.*
+!.env.example
+
+# Dumps, respaldos y archivos temporales (NUNCA subir datos clínicos)
+dump*.sql
+*.dump
+*.bak
+*.old
+*.log
+sync_preview.sql
+
+# Sistema operativo / editores
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Documentación no necesaria en la imagen
+README.md
