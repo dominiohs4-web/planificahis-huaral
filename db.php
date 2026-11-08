@@ -534,7 +534,20 @@ final class HospitalHuaralDB
      */
     public static function authenticateSession(?string $requiredPlatform = null): ?array
     {
-        $auth = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
+        $auth = $_SERVER['HTTP_AUTHORIZATION'] ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION'] ?? '';
+        if (!is_string($auth) || trim($auth) === '') {
+            // Respaldo para Apache/XAMPP y PHP-FPM, donde la cabecera no
+            // siempre llega a $_SERVER.
+            $headers = function_exists('apache_request_headers')
+                ? apache_request_headers()
+                : (function_exists('getallheaders') ? getallheaders() : []);
+            foreach ($headers as $name => $value) {
+                if (strcasecmp((string)$name, 'Authorization') === 0) {
+                    $auth = (string)$value;
+                    break;
+                }
+            }
+        }
         if (!preg_match('/^Bearer\s+(ph1\.[A-Za-z0-9\-_\.]+)$/', trim($auth), $m)) {
             return null;
         }

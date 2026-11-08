@@ -12,6 +12,8 @@ services:
         value: production
       - key: APP_DEMO_MODE
         value: "0"
+      - key: APP_2FA_REQUIRED
+        value: "0"
       - key: DB_HOST
         sync: false
       - key: DB_PORT

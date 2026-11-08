@@ -52,6 +52,10 @@ AddDefaultCharset UTF-8
 # Carpetas de desarrollo que no deben servirse por HTTP.
 <IfModule mod_rewrite.c>
   RewriteEngine On
+  # Apache no siempre expone Authorization a PHP (CGI/FastCGI). Lo copiamos a
+  # una variable de entorno que PHP sí puede leer.
+  RewriteCond %{HTTP:Authorization} .
+  RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
   RewriteRule ^(?:node_modules|src|\.git|\.aistudio)(?:/|$) - [R=404,L]
 </IfModule>
 

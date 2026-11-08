@@ -3,7 +3,8 @@
  * index.php — Interfaz móvil oficial (Apache + PHP + MariaDB / XAMPP)
  * Hospital San Juan Bautista Huaral — Red de Salud Huaral-Chancay
  *
- * Esta variante consume api.php con Bearer Token emitido tras 2FA TOTP.
+ * Esta variante consume api.php con Bearer Token emitido tras validar DNI y
+ * contraseña (el segundo factor TOTP es opcional con APP_2FA_REQUIRED=1).
  * No contiene datos clínicos en el HTML: todo se carga por API autenticada.
  */
 declare(strict_types=1);
@@ -37,7 +38,7 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>PlanificaSalud HIS — Hospital San Juan Bautista Huaral</title>
-  <meta name="description" content="Captación y seguimiento de Planificación Familiar del Hospital San Juan Bautista Huaral y la Red Huaral-Chancay. Seguridad 2FA, AES-256-GCM y auditoría SHA-256." />
+  <meta name="description" content="Captación y seguimiento de Planificación Familiar del Hospital San Juan Bautista Huaral y la Red Huaral-Chancay. Seguridad AES-256-GCM y auditoría SHA-256." />
   <meta name="theme-color" content="#0f172a" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -390,8 +391,7 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
           ${state.feedback ? `<div class="p-3.5 rounded-xl border text-xs ${state.feedback.type === 'error' ? 'bg-red-50 border-red-200 text-red-800' : 'bg-emerald-50 border-emerald-200 text-emerald-900'}">${esc(state.feedback.text)}</div>` : ''}
           ${state.authStep === 'CREDENTIALS' && state.authTab === 'LOGIN' ? `
             <div class="p-3 rounded-xl bg-sky-50 border border-sky-200 text-[11px] text-sky-950 leading-relaxed">
-              <strong>Acceso clínico protegido:</strong> DNI de la obstetra, contraseña y segundo factor TOTP.
-              El código 2FA se muestra aquí solo cuando <code class="font-mono">APP_DEMO_MODE=1</code>.
+              <strong>Acceso clínico protegido:</strong> ingrese su DNI de obstetra y su contraseña.
             </div>
             <form onsubmit="handleLogin(event)" class="space-y-4">
               <div>
@@ -406,7 +406,7 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
             </form>` : ''}
           ${state.authStep === 'CREDENTIALS' && state.authTab === 'REGISTER' ? `
             <form onsubmit="handleRegister(event)" class="space-y-3">
-              <p class="text-xs text-slate-600">Cada obstetra crea su propio acceso vinculado a su DNI, correo y establecimiento. El sistema le asignará su secreto TOTP individual.</p>
+              <p class="text-xs text-slate-600">Cada obstetra crea su propio acceso vinculado a su DNI, correo y establecimiento.</p>
               <div class="grid grid-cols-2 gap-2.5">
                 <div><label class="block text-xs font-semibold text-slate-700 mb-1">DNI (8 dígitos)</label><input id="reg-dni" type="text" inputmode="numeric" maxlength="8" required placeholder="43819205" class="w-full min-h-[44px] px-3 rounded-xl border border-slate-300 text-sm font-mono" /></div>
                 <div><label class="block text-xs font-semibold text-slate-700 mb-1">Celular</label><input id="reg-cel" type="tel" inputmode="numeric" maxlength="9" required placeholder="987654321" class="w-full min-h-[44px] px-3 rounded-xl border border-slate-300 text-sm font-mono" /></div>
@@ -1154,7 +1154,7 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
         <div class="grid grid-cols-2 gap-2.5">
           <div class="p-3.5 rounded-2xl bg-white border border-slate-200"><div class="text-[10px] text-slate-500">SQLi / XSS bloqueados</div><div class="text-xl font-bold font-mono">${Number(m.sqliBlockedCount || 0) + Number(m.xssBlockedCount || 0)}</div><div class="text-[10px] text-teal-700">${Number(m.sqliBlockedCount || 0)} SQLi · ${Number(m.xssBlockedCount || 0)} XSS</div></div>
           <div class="p-3.5 rounded-2xl bg-white border border-slate-200"><div class="text-[10px] text-slate-500">Registros cifrados AES-256</div><div class="text-xl font-bold font-mono">${Number(m.encryptedRecordsCount || 0)}</div><div class="text-[10px] text-teal-700">PII protegida en reposo</div></div>
-          <div class="p-3.5 rounded-2xl bg-white border border-slate-200"><div class="text-[10px] text-slate-500">2FA TOTP verificados</div><div class="text-xl font-bold font-mono">${Number(m.totpVerifiedCount || 0)}</div><div class="text-[10px] text-slate-600">RFC 6238 · 30 s</div></div>
+          <div class="p-3.5 rounded-2xl bg-white border border-slate-200"><div class="text-[10px] text-slate-500">Verificaciones 2FA</div><div class="text-xl font-bold font-mono">${Number(m.totpVerifiedCount || 0)}</div><div class="text-[10px] text-slate-600">RFC 6238 · 30 s</div></div>
           <div class="p-3.5 rounded-2xl bg-white border border-slate-200"><div class="text-[10px] text-slate-500">Eventos de auditoría</div><div class="text-xl font-bold font-mono">${Number(m.auditLogCount || state.auditLogs.length || 0)}</div><div class="text-[10px] text-teal-700">Cadena SHA-256</div></div>
         </div>
 
@@ -1244,6 +1244,21 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
       if (input) input.value = state.demoCode;
     }
 
+    async function enterApp(session) {
+      state.token = session.token;
+      state.session = session;
+      persistSession();
+      state.authStep = 'CREDENTIALS';
+      state.activeTab = 'CAPTAR';
+      state.pendingUser = null;
+      state.demoCode = '';
+      state.challengeId = '';
+      state.feedback = null;
+      await loadOverview();
+      startOfflineSync();
+      render();
+    }
+
     async function handleLogin(event) {
       event.preventDefault();
       state.feedback = null;
@@ -1251,6 +1266,10 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
       const password = document.getElementById('login-pass').value;
       try {
         const data = await apiPost('login', { dni: dni, password: password });
+        if (data.session && data.session.token) {
+          await enterApp(data.session);
+          return;
+        }
         state.challengeId = data.challengeId;
         state.pendingUser = data.userPreview || { dni: data.dni, nombreCompleto: data.nombreCompleto, estab_nombre: data.estab_nombre };
         state.demoCode = (data.userPreview && (data.userPreview.demoCurrentCode || data.userPreview.currentTotpCode)) || data.demoCurrentCode || '';
@@ -1276,6 +1295,10 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
       };
       try {
         const data = await apiPost('register_obstetra', payload);
+        if (data.session && data.session.token) {
+          await enterApp(data.session);
+          return;
+        }
         state.challengeId = data.challengeId;
         state.pendingUser = data.userPreview || { dni: data.dni, nombreCompleto: data.nombreCompleto, estab_nombre: data.estab_nombre };
         state.demoCode = (data.userPreview && (data.userPreview.demoCurrentCode || data.userPreview.currentTotpCode)) || data.demoCurrentCode || '';
@@ -1292,16 +1315,7 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
       const code = document.getElementById('totp-input').value.replace(/\D/g, '');
       try {
         const data = await apiPost('verify_2fa', { challengeId: state.challengeId, code: code });
-        state.token = data.session.token;
-        state.session = data.session;
-        persistSession();
-        state.authStep = 'CREDENTIALS';
-        state.activeTab = 'CAPTAR';
-        state.pendingUser = null;
-        state.demoCode = '';
-        await loadOverview();
-        startOfflineSync();
-        render();
+        await enterApp(data.session);
       } catch (error) {
         showFeedback('error', error.message);
       }

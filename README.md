@@ -8,7 +8,8 @@ AI Studio fue retirado.
 
 ## Seguridad
 
-- Autenticación con contraseña + TOTP (RFC 6238) y token Bearer HMAC-SHA256.
+- Autenticación con contraseña y token Bearer HMAC-SHA256. El segundo factor
+  TOTP (RFC 6238) es opcional y se activa con `APP_2FA_REQUIRED=1`.
 - PII cifrada con AES-256-GCM (`enc:gcm:<iv>:<tag>:<ciphertext>`).
 - Consultas PDO preparadas nativas, WAF, rate limiting y auditoría SHA-256.
 - Cabeceras OWASP ASVS L3, CORS restringido por `ALLOWED_ORIGIN` y HSTS.

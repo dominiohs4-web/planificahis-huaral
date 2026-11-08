@@ -123,7 +123,7 @@ function require_session(): array
 {
     $session = HospitalHuaralDB::authenticateSession();
     if ($session === null) {
-        json_error('Sesión no válida, expirada o sin segundo factor 2FA. Inicie sesión nuevamente.', 401, [
+        json_error('Sesión no válida o expirada. Inicie sesión nuevamente.', 401, [
             'code' => 'AUTH_REQUIRED_2FA',
         ]);
     }
@@ -151,6 +151,20 @@ function demo_mode_enabled(): bool
     $appEnv = strtolower(trim((string)getenv('APP_ENV')));
     $render = strtolower(trim((string)getenv('RENDER')));
     return !($appEnv === 'production' || in_array($render, ['1', 'true', 'yes'], true));
+}
+
+/**
+ * Segundo factor TOTP. Desactivado por defecto para evitar bloqueos operativos
+ * (código vencido, autenticador no enrolado o desafío expirado). Puede
+ * reactivarse en cualquier momento con APP_2FA_REQUIRED=1.
+ */
+function two_factor_required(): bool
+{
+    $raw = getenv('APP_2FA_REQUIRED');
+    if ($raw === false || trim((string)$raw) === '') {
+        return false;
+    }
+    return !in_array(strtolower(trim((string)$raw)), ['0', 'false', 'off', 'no'], true);
 }
 
 function waf_action_for_type(?string $type): string
@@ -302,6 +316,34 @@ if ($action === 'login') {
         $nombreCompleto = (string)($stmtPers->fetchColumn() ?: ('OBSTETRA ' . $dni));
     }
 
+    // Con APP_2FA_REQUIRED=0 se emite la sesión directamente tras validar
+    // DNI y contraseña, sin crear desafíos ni secretos TOTP.
+    if (!two_factor_required()) {
+        $token = HospitalHuaralDB::createSessionToken($dni, $codEstab, $platform);
+        HospitalHuaralDB::registrarAuditoria(
+            $dni,
+            'AUTH_LOGIN_SUCCESS',
+            'Credenciales válidas. Segundo factor desactivado por configuración operativa. Sesión Bearer emitida.',
+            $codEstab,
+            $platform
+        );
+        json_out([
+            'requires2FA' => false,
+            'session' => [
+                'token' => $token,
+                'dni' => $dni,
+                'nombreCompleto' => $nombreCompleto,
+                'rol' => (string)($user['tipo'] ?? 'Obstetra'),
+                'nivelid' => (int)($user['nivelid'] ?? 2),
+                'cod_estab' => $codEstab,
+                'estab_nombre' => hospital_nombre_establecimiento($codEstab),
+                'verified2FA' => false,
+                'platform' => $platform,
+                'isAdmin' => is_admin_session(['dni' => $dni]),
+            ],
+        ]);
+    }
+
     $secret = HospitalHuaralDB::obtenerSecretoTotp($dni);
     $totp = HospitalHuaralDB::generateTOTP($secret);
     $challenge = HospitalHuaralDB::crearChallenge($dni, $codEstab, $platform);
@@ -382,10 +424,39 @@ if ($action === 'register_obstetra') {
     ]);
 
     HospitalHuaralDB::establecerEstablecimientoObstetra($dni, $codEstab);
+    $nombreCompleto = "OBST. {$nombre1} {$apaterno} {$amaterno}";
+
+    // Con el segundo factor desactivado, la cuenta queda lista y la sesión se
+    // emite de inmediato sin generar un secreto TOTP que nadie va a enrolar.
+    if (!two_factor_required()) {
+        $token = HospitalHuaralDB::createSessionToken($dni, $codEstab, $platform);
+        HospitalHuaralDB::registrarAuditoria(
+            $dni,
+            'REGISTRO_OBSTETRA',
+            'Cuenta creada para ' . $nombreCompleto . ' en ' . hospital_nombre_establecimiento($codEstab) . ' (segundo factor desactivado).',
+            $codEstab,
+            $platform
+        );
+        json_out([
+            'requires2FA' => false,
+            'session' => [
+                'token' => $token,
+                'dni' => $dni,
+                'nombreCompleto' => $nombreCompleto,
+                'rol' => 'Obstetra Captadora',
+                'nivelid' => 2,
+                'cod_estab' => $codEstab,
+                'estab_nombre' => hospital_nombre_establecimiento($codEstab),
+                'verified2FA' => false,
+                'platform' => $platform,
+                'isAdmin' => is_admin_session(['dni' => $dni]),
+            ],
+        ], 201);
+    }
+
     $secret = HospitalHuaralDB::obtenerSecretoTotp($dni);
     $totp = HospitalHuaralDB::generateTOTP($secret);
     $challenge = HospitalHuaralDB::crearChallenge($dni, $codEstab, $platform);
-    $nombreCompleto = "OBST. {$nombre1} {$apaterno} {$amaterno}";
     // URI de aprovisionamiento estándar para el autenticador del celular.
     $otpauthUri = 'otpauth://totp/'
         . rawurlencode('PlanificaHIS Huaral:' . $dni)
@@ -679,7 +750,7 @@ if ($action === 'overview') {
             'cod_estab' => $session['cod_estab'],
             'estab_nombre' => $session['estab_nombre'],
             'platform' => $platform,
-            'verified2FA' => true,
+            'verified2FA' => two_factor_required(),
             'isAdmin' => is_admin_session($session),
         ],
         'stats' => $stats,

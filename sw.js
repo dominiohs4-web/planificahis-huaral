@@ -3,7 +3,7 @@
  * - Nunca cachea api.php, sync_cloud_to_local.php ni respuestas clínicas.
  * - No intercepta métodos distintos de GET.
  */
-const SW_VERSION = 'planificahis-php-v1.1.2';
+const SW_VERSION = 'planificahis-php-v1.1.3';
 const PRECACHE = [
   './index.php',
   './manifest.webmanifest',
