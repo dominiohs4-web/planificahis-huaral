@@ -476,14 +476,12 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
           ${state.activeTab === 'CAPTAR' ? renderCaptar() : ''}
           ${state.activeTab === 'PACIENTES' ? renderPacientes() : ''}
           ${state.activeTab === 'AGENDA' ? renderAgenda() : ''}
-          ${state.activeTab === 'SEGURIDAD' ? renderSeguridad() : ''}
           ${state.activeTab === 'PERFIL' ? renderPerfil() : ''}
         </main>
-        <nav class="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-[430px] z-40 bg-white/95 backdrop-blur-md border-t border-slate-200 grid grid-cols-5 items-center h-16 safe-bottom">
+        <nav class="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-[430px] z-40 bg-white/95 backdrop-blur-md border-t border-slate-200 grid grid-cols-4 items-center h-16 safe-bottom">
           ${navButton('CAPTAR', 'Captar')}
           ${navButton('PACIENTES', 'Pacientes')}
           ${navButton('AGENDA', 'Agenda')}
-          ${navButton('SEGURIDAD', 'Seguridad')}
           ${navButton('PERFIL', 'Mi Perfil')}
         </nav>`;
     }
@@ -1147,51 +1145,6 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
       render();
     }
 
-    function renderSeguridad() {
-      const m = state.securityMetrics;
-      const chain = state.chainVerification;
-      return `
-        <div class="grid grid-cols-2 gap-2.5">
-          <div class="p-3.5 rounded-2xl bg-white border border-slate-200"><div class="text-[10px] text-slate-500">SQLi / XSS bloqueados</div><div class="text-xl font-bold font-mono">${Number(m.sqliBlockedCount || 0) + Number(m.xssBlockedCount || 0)}</div><div class="text-[10px] text-teal-700">${Number(m.sqliBlockedCount || 0)} SQLi · ${Number(m.xssBlockedCount || 0)} XSS</div></div>
-          <div class="p-3.5 rounded-2xl bg-white border border-slate-200"><div class="text-[10px] text-slate-500">Registros cifrados AES-256</div><div class="text-xl font-bold font-mono">${Number(m.encryptedRecordsCount || 0)}</div><div class="text-[10px] text-teal-700">PII protegida en reposo</div></div>
-          <div class="p-3.5 rounded-2xl bg-white border border-slate-200"><div class="text-[10px] text-slate-500">Verificaciones 2FA</div><div class="text-xl font-bold font-mono">${Number(m.totpVerifiedCount || 0)}</div><div class="text-[10px] text-slate-600">RFC 6238 · 30 s</div></div>
-          <div class="p-3.5 rounded-2xl bg-white border border-slate-200"><div class="text-[10px] text-slate-500">Eventos de auditoría</div><div class="text-xl font-bold font-mono">${Number(m.auditLogCount || state.auditLogs.length || 0)}</div><div class="text-[10px] text-teal-700">Cadena SHA-256</div></div>
-        </div>
-
-        <div class="p-4 rounded-2xl bg-white border border-slate-200 space-y-3">
-          <div class="flex items-center justify-between gap-2">
-            <div><h3 class="text-sm font-bold text-slate-900">Auditoría clínica SHA-256</h3><p class="text-[10px] text-slate-500">Actor, establecimiento, plataforma, IP y hash encadenado.</p></div>
-            <button type="button" onclick="verificarCadena()" class="min-h-[38px] px-3 rounded-xl bg-slate-900 text-white text-[11px] font-semibold">Verificar cadena</button>
-          </div>
-          ${chain ? `<div class="p-3 rounded-xl border text-[11px] ${chain.valid ? 'bg-teal-50 border-teal-200 text-teal-900' : 'bg-red-50 border-red-300 text-red-900'}">${chain.valid ? 'Integridad verificada: ' + Number(chain.verified || 0) + ' bloques sin alteración.' : 'CADENA ALTERADA en el registro #' + esc(chain.brokenAt || 'desconocido') + '. Notifique a Estadística.'}</div>` : ''}
-          <div class="divide-y divide-slate-100 max-h-72 overflow-y-auto">
-            ${state.auditLogs.slice(0, 20).map(function (log) {
-              return '<div class="py-2.5 text-[11px]"><div class="flex items-center justify-between gap-2 font-mono text-slate-500"><span>' + esc(log.accion) + '</span><span>' + esc(log.fecha_hora) + '</span></div><div class="text-slate-700 mt-0.5">' + esc(log.detalle) + '</div><div class="text-slate-400 font-mono mt-0.5">' + esc(log.actor_dni) + ' · ' + esc(log.actor_estab || '') + ' · ' + esc(log.plataforma || '') + ' · IP ' + esc(log.ip) + '</div></div>';
-            }).join('') || '<div class="py-2 text-slate-500">Sin eventos de auditoría disponibles.</div>'}
-          </div>
-        </div>
-
-        <div class="p-4 rounded-2xl bg-white border border-slate-200 space-y-3">
-          <h3 class="text-sm font-bold text-slate-900">Prueba Anti-SQLi y Anti-XSS</h3>
-          <p class="text-[11px] text-slate-500">El WAF audita el intento y nunca modifica las tablas del hospital.</p>
-          <textarea id="waf-payload" rows="2" class="w-full p-3 rounded-xl border border-slate-300 text-xs font-mono">73819204' OR '1'='1 --</textarea>
-          <button type="button" onclick="probarWaf()" class="w-full min-h-[42px] rounded-xl bg-slate-900 text-white text-xs font-semibold">Ejecutar prueba</button>
-          ${state.wafResult ? `<div class="p-3 rounded-xl border text-[11px] ${state.wafResult.blocked ? 'bg-red-50 border-red-200 text-red-900' : 'bg-teal-50 border-teal-200 text-teal-900'}"><div class="font-bold">${state.wafResult.blocked ? 'ATAQUE ' + esc(state.wafResult.attackType) + ' BLOQUEADO' : 'ENTRADA LIMPIA PERMITIDA'}</div><div class="font-mono mt-1 break-all">Patrón: ${esc(state.wafResult.matchedPattern || '—')}</div><div class="font-mono mt-1 break-all">AES: ${esc(state.wafResult.aes256Preview || '')}</div></div>` : ''}
-        </div>
-
-        ${state.session && state.session.isAdmin ? `<div class="p-4 rounded-2xl bg-white border border-slate-200 space-y-3">
-          <h3 class="text-sm font-bold text-slate-900">Exportación Nube → Local (5 GB)</h3>
-          <p class="text-[11px] text-slate-500">Solo administrador. INSERT ... ON DUPLICATE KEY UPDATE, sin DROP/DELETE.</p>
-          <select id="sync-mode" class="w-full min-h-[42px] px-3 rounded-xl border border-slate-300 text-xs bg-white">
-            <option value="directo" ${state.syncMode === 'directo' ? 'selected' : ''}>Directo · ON DUPLICATE KEY UPDATE</option>
-            <option value="puente" ${state.syncMode === 'puente' ? 'selected' : ''}>Puente · r_his_dl + sp_get_recepcion()</option>
-          </select>
-          <button type="button" onclick="generarExportacion()" class="w-full min-h-[42px] rounded-xl bg-slate-900 text-white text-xs font-semibold">${state.loadingSync ? 'Generando...' : 'Generar exportación SQL'}</button>
-          ${state.syncExport ? `<div class="p-3 rounded-xl bg-slate-50 border border-slate-200 text-[11px] space-y-1"><div class="font-semibold">${esc(state.syncExport.filename)} · ${state.syncExport.rows} filas</div><div class="text-slate-600">${esc((state.syncExport.tables || []).join(', ') || 'Sin tablas locales')}</div><div class="flex gap-2 pt-1"><button type="button" onclick="descargarExportacion()" class="px-3 py-1.5 rounded-lg bg-teal-700 text-white font-semibold">Descargar SQL</button><button type="button" onclick="descargarIndices()" class="px-3 py-1.5 rounded-lg bg-slate-800 text-white font-semibold">Descargar índices</button></div></div>` : ''}
-          <button type="button" onclick="descargarIndices()" class="w-full min-h-[40px] rounded-xl border border-slate-300 text-slate-800 text-xs font-semibold">Descargar optimizar_indices_5gb.sql</button>
-        </div>` : ''}`;
-    }
-
     function renderPerfil() {
       const s = state.session;
       return `<div class="p-4 rounded-2xl bg-white border border-slate-200 space-y-3">
@@ -1217,6 +1170,17 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
         <div class="text-xs font-bold text-slate-900">Últimos Registros de Actividad (${state.auditLogs.length})</div>
         <div class="divide-y divide-slate-100 max-h-64 overflow-y-auto">${state.auditLogs.slice(0, 8).map(function (log) { return '<div class="py-2 text-xs"><div class="flex items-center justify-between font-mono text-[11px] text-slate-500"><span>' + esc(log.accion) + '</span><span>' + esc(log.fecha_hora) + '</span></div><p class="text-slate-700 mt-0.5">' + esc(log.detalle) + '</p></div>'; }).join('') || '<div class="py-2 text-xs text-slate-500">Sin actividad reciente.</div>'}</div>
       </div>
+      ${state.session && state.session.isAdmin ? `<div class="p-4 rounded-2xl bg-white border border-slate-200 space-y-3">
+        <h3 class="text-sm font-bold text-slate-900">Exportación Nube → Local (5 GB)</h3>
+        <p class="text-[11px] text-slate-500">Solo administrador. INSERT ... ON DUPLICATE KEY UPDATE, sin DROP/DELETE.</p>
+        <select id="sync-mode" class="w-full min-h-[42px] px-3 rounded-xl border border-slate-300 text-xs bg-white">
+          <option value="directo" ${state.syncMode === 'directo' ? 'selected' : ''}>Directo · ON DUPLICATE KEY UPDATE</option>
+          <option value="puente" ${state.syncMode === 'puente' ? 'selected' : ''}>Puente · r_his_dl + sp_get_recepcion()</option>
+        </select>
+        <button type="button" onclick="generarExportacion()" class="w-full min-h-[42px] rounded-xl bg-slate-900 text-white text-xs font-semibold">${state.loadingSync ? 'Generando...' : 'Generar exportación SQL'}</button>
+        ${state.syncExport ? `<div class="p-3 rounded-xl bg-slate-50 border border-slate-200 text-[11px] space-y-1"><div class="font-semibold">${esc(state.syncExport.filename)} · ${state.syncExport.rows} filas</div><div class="text-slate-600">${esc((state.syncExport.tables || []).join(', ') || 'Sin tablas locales')}</div><div class="flex gap-2 pt-1"><button type="button" onclick="descargarExportacion()" class="px-3 py-1.5 rounded-lg bg-teal-700 text-white font-semibold">Descargar SQL</button><button type="button" onclick="descargarIndices()" class="px-3 py-1.5 rounded-lg bg-slate-800 text-white font-semibold">Descargar índices</button></div></div>` : ''}
+        <button type="button" onclick="descargarIndices()" class="w-full min-h-[40px] rounded-xl border border-slate-300 text-slate-800 text-xs font-semibold">Descargar optimizar_indices_5gb.sql</button>
+      </div>` : ''}
       <button type="button" onclick="logout()" class="w-full min-h-[48px] rounded-2xl border border-red-200 bg-red-50 text-red-700 text-sm font-semibold">Cerrar Sesión</button>`;
     }
 
