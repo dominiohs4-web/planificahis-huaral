@@ -18,6 +18,10 @@ require_once __DIR__ . '/catalogo_establecimientos.php';
 
 final class HospitalHuaralDB
 {
+    /** Sesión persistente de 7 días exactos (60 * 60 * 24 * 7). */
+    public const SESSION_TTL = 604800;
+    public const SESSION_COOKIE = 'planificahis_session';
+
     private static ?PDO $pdo = null;
 
     private static function isProductionEnvironment(): bool
@@ -106,8 +110,13 @@ final class HospitalHuaralDB
                 // BLOQUEO REAL DE SQLi: el driver no interpola parámetros.
                 PDO::ATTR_EMULATE_PREPARES => false,
                 PDO::ATTR_STRINGIFY_FETCHES => false,
-                PDO::ATTR_PERSISTENT => false,
+                // Conexión persistente: evita el handshake TLS completo contra
+                // TiDB Cloud en cada request del aplicativo.
+                PDO::ATTR_PERSISTENT => true,
                 PDO::ATTR_TIMEOUT => 10,
+                // El modo SQL se fija al abrir la conexión; así no se paga un
+                // round-trip adicional por request.
+                PDO::MYSQL_ATTR_INIT_COMMAND => "SET SESSION sql_mode = 'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION,ALLOW_INVALID_DATES'",
             ];
 
             // TiDB Cloud exige TLS en el puerto 4000. La verificación de cadena se
@@ -127,16 +136,14 @@ final class HospitalHuaralDB
             }
 
             self::$pdo = new PDO($dsn, $user, $pass, $options);
-            // ALLOW_INVALID_DATES conserva la lectura de fechas históricas
-            // '0000-00-00' de his_dl / his_dl_dt sin relajar STRICT_TRANS_TABLES.
-            self::$pdo->exec("SET SESSION sql_mode = 'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION,ALLOW_INVALID_DATES'");
 
             // En TiDB Cloud cada ALTER ... ADD COLUMN IF NOT EXISTS repetido en
             // cada request HTTP añade latencia. El esquema se crea una sola vez
             // (semáforo en /tmp) salvo que DB_AUTO_MIGRATE=1.
             $autoMigrate = getenv('DB_AUTO_MIGRATE') === '1';
             $schemaLock = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR)
-                . DIRECTORY_SEPARATOR . 'planificahis_schema_v3.lock';
+                . DIRECTORY_SEPARATOR . 'planificahis_schema_v4_'
+                . substr(hash('sha256', $host . '|' . $dbname), 0, 12) . '.lock';
             if ($autoMigrate || !is_file($schemaLock)) {
                 try {
                     self::bootstrapSchema(self::$pdo);
@@ -248,6 +255,20 @@ final class HospitalHuaralDB
                 $pdo->exec($ddl);
             } catch (Throwable $e) {
                 // Si el motor no soporta IF NOT EXISTS se ignora: la tabla base ya existe.
+            }
+        }
+
+        // Índices de los reportes web (tabla propia de la app). Se intentan una
+        // sola vez; si ya existen, el motor devuelve error y se ignora.
+        foreach ([
+            'idx_reporte_fecha_estab' => "CREATE INDEX `idx_reporte_fecha_estab` ON `pacientes_sin_metodo` (`fecha_registro`, `cod_estab`)",
+            'idx_reporte_estado_fecha' => "CREATE INDEX `idx_reporte_estado_fecha` ON `pacientes_sin_metodo` (`estado_paciente`, `fecha_registro`)",
+            'idx_reporte_sector' => "CREATE INDEX `idx_reporte_sector` ON `pacientes_sin_metodo` (`sector`)",
+        ] as $ddlIndice) {
+            try {
+                $pdo->exec($ddlIndice);
+            } catch (Throwable $e) {
+                // El índice ya existe o el motor no permite crearlo en línea.
             }
         }
 
@@ -477,11 +498,12 @@ final class HospitalHuaralDB
     }
 
     // ========================================================================
-    // SESIONES FIRMADAS HMAC-SHA256 + EXPIRACIÓN POR INACTIVIDAD
+    // SESIONES FIRMADAS HMAC-SHA256 + COOKIE PERSISTENTE + SLIDING EXPIRATION
     // ========================================================================
-    public static function createSessionToken(string $dni, string $codEstab, string $platform, int $ttlSeconds = 28800): string
+    public static function createSessionToken(string $dni, string $codEstab, string $platform, int $ttlSeconds = self::SESSION_TTL): string
     {
         $now = time();
+        $ttlSeconds = $ttlSeconds > 0 ? $ttlSeconds : self::SESSION_TTL;
         $payload = [
             'v' => 1,
             'dni' => $dni,
@@ -509,7 +531,69 @@ final class HospitalHuaralDB
             ':last_activity' => $now,
             ':expires' => $now + $ttlSeconds,
         ]);
+        self::sendSessionCookie($token, $ttlSeconds);
         return $token;
+    }
+
+    /**
+     * Cookie persistente HttpOnly de 7 días. El navegador la reenvía incluso
+     * después de cerrar la PWA; el token también viaja como Bearer.
+     */
+    public static function sendSessionCookie(string $token, int $ttlSeconds = self::SESSION_TTL): void
+    {
+        if (headers_sent()) {
+            return;
+        }
+        $https = self::requestIsHttps();
+        setcookie(self::SESSION_COOKIE, $token, [
+            'expires' => time() + max(60, $ttlSeconds),
+            'path' => '/',
+            'secure' => $https,
+            'httponly' => true,
+            'samesite' => 'Lax',
+        ]);
+    }
+
+    public static function clearSessionCookie(): void
+    {
+        if (headers_sent()) {
+            return;
+        }
+        setcookie(self::SESSION_COOKIE, '', [
+            'expires' => time() - 3600,
+            'path' => '/',
+            'secure' => self::requestIsHttps(),
+            'httponly' => true,
+            'samesite' => 'Lax',
+        ]);
+    }
+
+    public static function requestIsHttps(): bool
+    {
+        $forwarded = strtolower(trim((string)($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '')));
+        return $forwarded === 'https'
+            || (isset($_SERVER['HTTPS']) && strtolower((string)$_SERVER['HTTPS']) !== 'off');
+    }
+
+    public static function tokenFromRequest(): string
+    {
+        $auth = $_SERVER['HTTP_AUTHORIZATION'] ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION'] ?? '';
+        if (!is_string($auth) || trim($auth) === '') {
+            $headers = function_exists('apache_request_headers')
+                ? apache_request_headers()
+                : (function_exists('getallheaders') ? getallheaders() : []);
+            foreach ($headers as $name => $value) {
+                if (strcasecmp((string)$name, 'Authorization') === 0) {
+                    $auth = (string)$value;
+                    break;
+                }
+            }
+        }
+        if (preg_match('/^Bearer\s+(ph1\.[A-Za-z0-9\-_\.]+)$/', trim((string)$auth), $m)) {
+            return $m[1];
+        }
+        $cookie = $_COOKIE[self::SESSION_COOKIE] ?? '';
+        return is_string($cookie) && preg_match('/^ph1\.[A-Za-z0-9\-_\.]+$/', $cookie) ? $cookie : '';
     }
 
     private static function base64UrlEncode(string $data): string
@@ -534,24 +618,10 @@ final class HospitalHuaralDB
      */
     public static function authenticateSession(?string $requiredPlatform = null): ?array
     {
-        $auth = $_SERVER['HTTP_AUTHORIZATION'] ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION'] ?? '';
-        if (!is_string($auth) || trim($auth) === '') {
-            // Respaldo para Apache/XAMPP y PHP-FPM, donde la cabecera no
-            // siempre llega a $_SERVER.
-            $headers = function_exists('apache_request_headers')
-                ? apache_request_headers()
-                : (function_exists('getallheaders') ? getallheaders() : []);
-            foreach ($headers as $name => $value) {
-                if (strcasecmp((string)$name, 'Authorization') === 0) {
-                    $auth = (string)$value;
-                    break;
-                }
-            }
-        }
-        if (!preg_match('/^Bearer\s+(ph1\.[A-Za-z0-9\-_\.]+)$/', trim($auth), $m)) {
+        $token = self::tokenFromRequest();
+        if ($token === '') {
             return null;
         }
-        $token = $m[1];
         $parts = explode('.', $token);
         if (count($parts) !== 3) {
             return null;
@@ -562,29 +632,37 @@ final class HospitalHuaralDB
             return null;
         }
         $payload = json_decode(self::base64UrlDecode($encoded), true);
-        if (!is_array($payload) || ($payload['v'] ?? 0) !== 1 || (int)($payload['exp'] ?? 0) < time()) {
+        if (!is_array($payload) || ($payload['v'] ?? 0) !== 1) {
             return null;
         }
         $now = time();
         $pdo = self::getConnection();
+        $hash = hash('sha256', $token);
         $stmt = $pdo->prepare("
-            SELECT * FROM app_sesiones
+            SELECT dni, cod_estab, plataforma, expires_at, last_activity
+            FROM app_sesiones
             WHERE token_hash = :hash AND revoked = 0
             LIMIT 1
         ");
-        $stmt->execute([':hash' => hash('sha256', $token)]);
+        $stmt->execute([':hash' => $hash]);
         $row = $stmt->fetch();
         if (!$row) {
             return null;
         }
-        // Expiración absoluta (8 h) y por inactividad (30 min).
-        if ((int)$row['expires_at'] < $now || ($now - (int)$row['last_activity']) > 1800) {
+        // Expiración absoluta de 7 días. NO hay revocación por inactividad
+        // corta: basta con que la sesión siga vigente y no esté revocada.
+        if ((int)$row['expires_at'] < $now) {
             $pdo->prepare('UPDATE app_sesiones SET revoked = 1 WHERE token_hash = :hash')
-                ->execute([':hash' => hash('sha256', $token)]);
+                ->execute([':hash' => $hash]);
+            self::clearSessionCookie();
             return null;
         }
-        $pdo->prepare('UPDATE app_sesiones SET last_activity = :now WHERE token_hash = :hash')
-            ->execute([':now' => $now, ':hash' => hash('sha256', $token)]);
+
+        // Sliding expiration: cada request válido renueva 7 días completos.
+        $nuevoExpira = $now + self::SESSION_TTL;
+        $pdo->prepare('UPDATE app_sesiones SET last_activity = :now, expires_at = :expires WHERE token_hash = :hash')
+            ->execute([':now' => $now, ':expires' => $nuevoExpira, ':hash' => $hash]);
+        self::sendSessionCookie($token, self::SESSION_TTL);
 
         $platform = $requiredPlatform ?: ($row['plataforma'] ?? 'Web Desktop');
         return [
@@ -593,7 +671,7 @@ final class HospitalHuaralDB
             'cod_estab' => (string)$row['cod_estab'],
             'estab_nombre' => hospital_nombre_establecimiento((string)$row['cod_estab']),
             'platform' => $platform,
-            'expires_at' => (int)$row['expires_at'],
+            'expires_at' => $nuevoExpira,
             'last_activity' => $now,
         ];
     }
@@ -603,6 +681,7 @@ final class HospitalHuaralDB
         $pdo = self::getConnection();
         $pdo->prepare('UPDATE app_sesiones SET revoked = 1 WHERE token_hash = :hash')
             ->execute([':hash' => hash('sha256', $token)]);
+        self::clearSessionCookie();
     }
 
     public static function cambiarEstablecimientoSesion(string $token, string $codEstab, string $dni): void

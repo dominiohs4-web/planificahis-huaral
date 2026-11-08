@@ -4,7 +4,7 @@
  * Hospital San Juan Bautista Huaral — Red de Salud Huaral-Chancay
  *
  * Esta variante consume api.php con Bearer Token emitido tras validar DNI y
- * contraseña (el segundo factor TOTP es opcional con APP_2FA_REQUIRED=1).
+ * contraseña en un solo paso (sin 2FA) y sesión persistente de 7 días.
  * No contiene datos clínicos en el HTML: todo se carga por API autenticada.
  */
 declare(strict_types=1);
@@ -112,6 +112,26 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
       return d.getFullYear() + '-' + mm + '-' + dd;
     }
 
+    function primerDiaMesIso() {
+      const d = new Date();
+      return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-01';
+    }
+
+    function filtrosReportePorDefecto() {
+      return {
+        fecha_desde: primerDiaMesIso(),
+        fecha_hasta: localIsoDate(0),
+        estado_paciente: 'TODOS',
+        sector: 'TODOS',
+        obstetra: 'TODOS',
+        codigo_metodo: 'TODOS',
+        estado_vencimiento: 'TODOS',
+        q: '',
+        page: 1,
+        per_page: 25
+      };
+    }
+
     function formatIsoToDdMmYyyy(iso) {
       const value = String(iso || '').slice(0, 10);
       const parts = value.split('-');
@@ -119,7 +139,7 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
     }
 
     let state = {
-      token: sessionStorage.getItem(TOKEN_KEY) || '',
+      token: localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY) || '',
       session: null,
       authTab: 'LOGIN',
       authStep: 'CREDENTIALS',
@@ -160,6 +180,16 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
       iosStep: 1,
       showSecurity: true,
       booted: false,
+      reporteVista: 'CAMPO',
+      campoFiltros: filtrosReportePorDefecto(),
+      campoData: null,
+      campoLoading: false,
+      campoError: '',
+      metodosFiltros: filtrosReportePorDefecto(),
+      metodosData: null,
+      metodosLoading: false,
+      metodosError: '',
+      guardandoMetodo: false,
       reporteFecha: localIsoDate(0),
       reporteModo: 'exacto',
       reporteAlcance: 'establecimiento',
@@ -221,13 +251,24 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
       state.formDraft = null;
       state.formVisible = false;
       state.nombresDesbloqueados = false;
-      sessionStorage.removeItem(TOKEN_KEY);
-      sessionStorage.removeItem(SESSION_KEY);
+      state.campoData = null;
+      state.metodosData = null;
+      try {
+        localStorage.removeItem(TOKEN_KEY);
+        localStorage.removeItem(SESSION_KEY);
+        sessionStorage.removeItem(TOKEN_KEY);
+        sessionStorage.removeItem(SESSION_KEY);
+      } catch (e) {}
     }
 
     function persistSession() {
-      if (state.token) sessionStorage.setItem(TOKEN_KEY, state.token);
-      if (state.session) sessionStorage.setItem(SESSION_KEY, JSON.stringify(state.session));
+      try {
+        if (state.token) localStorage.setItem(TOKEN_KEY, state.token);
+        if (state.session) localStorage.setItem(SESSION_KEY, JSON.stringify(state.session));
+        // Se limpian las claves antiguas para evitar sesiones duplicadas.
+        sessionStorage.removeItem(TOKEN_KEY);
+        sessionStorage.removeItem(SESSION_KEY);
+      } catch (e) {}
     }
 
     function establishName(codigo) {
@@ -424,28 +465,6 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
               <div><label class="block text-xs font-semibold text-slate-700 mb-1">Contraseña (mínimo 8 caracteres)</label><input id="reg-pass" type="password" required minlength="8" placeholder="Mínimo 8 caracteres" class="w-full min-h-[44px] px-3 rounded-xl border border-slate-300 text-sm" /></div>
               <button type="submit" class="w-full min-h-[48px] rounded-xl bg-sky-700 hover:bg-sky-800 text-white text-sm font-semibold">Crear Cuenta de Obstetra</button>
             </form>` : ''}
-          ${state.authStep === 'VERIFY_2FA' ? `
-            <form onsubmit="handleVerify2FA(event)" class="space-y-4">
-              <div class="p-4 rounded-2xl bg-sky-950 text-white space-y-2">
-                <div class="text-xs font-semibold text-sky-200">Verificación de Seguridad en Dos Pasos (2FA TOTP)</div>
-                <div class="text-xs text-slate-300">${esc((state.pendingUser && state.pendingUser.nombreCompleto) || 'Obstetra')} · ${esc((state.pendingUser && state.pendingUser.estab_nombre) || '')}</div>
-                ${state.demoCode ? `<div class="flex items-center justify-between pt-1"><span class="text-2xl font-bold font-mono tracking-widest">${esc(state.demoCode)}</span><button type="button" onclick="useDemoCode()" class="px-3 py-1.5 rounded-lg bg-sky-700 text-xs font-semibold">Usar código</button></div>` : '<p class="text-[11px] text-slate-300">Abra su aplicación autenticadora e ingrese el código de 6 dígitos.</p>'}
-              </div>
-              ${state.pendingUser && state.pendingUser.totpSecret ? `<div class="p-3.5 rounded-xl bg-amber-50 border border-amber-300 text-[11px] text-amber-950 space-y-1.5">
-                <div class="font-bold">Enrole su autenticador (clave visible una sola vez)</div>
-                <p>En Google Authenticator o Microsoft Authenticator elija “Agregar cuenta → Clave de configuración” e ingrese:</p>
-                <div class="font-mono text-xs break-all bg-white/80 rounded-lg p-2 border border-amber-200">${esc(state.pendingUser.totpSecret)}</div>
-                ${state.pendingUser.otpauthUri ? `<div class="font-mono text-[9px] break-all text-amber-800">${esc(state.pendingUser.otpauthUri)}</div>` : ''}
-              </div>` : ''}
-              <div>
-                <label class="block text-xs font-semibold text-slate-700 mb-1.5">Código de 6 dígitos</label>
-                <input id="totp-input" type="text" inputmode="numeric" maxlength="6" value="${esc(state.demoCode)}" required class="w-full min-h-[50px] px-4 rounded-xl border border-slate-300 text-center text-xl font-bold font-mono tracking-widest" />
-              </div>
-              <div class="flex gap-2.5">
-                <button type="button" onclick="backToCredentials()" class="min-h-[48px] px-4 rounded-xl border border-slate-300 text-xs font-semibold text-slate-700">Atrás</button>
-                <button type="submit" class="flex-1 min-h-[48px] rounded-xl bg-sky-700 hover:bg-sky-800 text-white text-sm font-semibold">Confirmar y Entrar</button>
-              </div>
-            </form>` : ''}
         </div>
         <div class="px-6 py-4 bg-slate-50 border-t border-slate-100 flex items-center justify-between">
           <span class="text-xs text-slate-500">App Móvil Oficial</span>
@@ -475,14 +494,16 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
         <main class="flex-1 p-4 pb-24 space-y-4">
           ${state.activeTab === 'CAPTAR' ? renderCaptar() : ''}
           ${state.activeTab === 'PACIENTES' ? renderPacientes() : ''}
+          ${state.activeTab === 'REPORTES' ? renderReportes() : ''}
           ${state.activeTab === 'AGENDA' ? renderAgenda() : ''}
           ${state.activeTab === 'PERFIL' ? renderPerfil() : ''}
         </main>
-        <nav class="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-[430px] z-40 bg-white/95 backdrop-blur-md border-t border-slate-200 grid grid-cols-4 items-center h-16 safe-bottom">
+        <nav class="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-[430px] z-40 bg-white/95 backdrop-blur-md border-t border-slate-200 grid grid-cols-5 items-center h-16 safe-bottom">
           ${navButton('CAPTAR', 'Captar')}
           ${navButton('PACIENTES', 'Pacientes')}
+          ${navButton('REPORTES', 'Reportes')}
           ${navButton('AGENDA', 'Agenda')}
-          ${navButton('PERFIL', 'Mi Perfil')}
+          ${navButton('PERFIL', 'Perfil')}
         </nav>`;
     }
 
@@ -1185,6 +1206,412 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
     }
 
     // ---------------------------------------------------------------------
+    // Reportes y Seguimiento (Campo/Captación + Indicadores por Método)
+    // ---------------------------------------------------------------------
+    function estadoPacienteBadge(estado) {
+      const mapa = {
+        CAPTADA_CON_METODO: 'bg-emerald-100 text-emerald-900 border-emerald-300',
+        INSATISFECHA_SIN_METODO: 'bg-red-100 text-red-900 border-red-300',
+        SEGUIMIENTO_DOMICILIARIO: 'bg-amber-100 text-amber-900 border-amber-300',
+        CONSEJERIA_REALIZADA: 'bg-sky-100 text-sky-900 border-sky-300',
+        RECHAZA_METODO: 'bg-slate-200 text-slate-800 border-slate-400'
+      };
+      return mapa[estado] || 'bg-slate-100 text-slate-700 border-slate-300';
+    }
+
+    function estadoIndicadorBadge(estado) {
+      const mapa = {
+        VIGENTE: 'bg-emerald-100 text-emerald-900 border-emerald-300',
+        PROXIMA: 'bg-amber-100 text-amber-900 border-amber-300',
+        VENCIDA: 'bg-red-100 text-red-900 border-red-300',
+        SIN_METODO: 'bg-slate-200 text-slate-800 border-slate-400'
+      };
+      return mapa[estado] || 'bg-slate-100 text-slate-700 border-slate-300';
+    }
+
+    function estadoPacienteTexto(estado) {
+      return ESTADOS[estado] || estado || 'Sin estado';
+    }
+
+    function fechaDdMmYyyy(iso) {
+      const valor = String(iso || '').slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(valor)) return valor;
+      return formatIsoToDdMmYyyy(valor);
+    }
+
+    function horaDeFecha(valor) {
+      const texto = String(valor || '');
+      return texto.length >= 19 ? texto.slice(11, 19) : texto;
+    }
+
+    function renderReportes() {
+      const esCampo = state.reporteVista === 'CAMPO';
+      return `
+        <div class="space-y-3">
+          ${state.feedback ? `<div class="p-3 rounded-xl border text-[11px] ${state.feedback.type === 'error' ? 'bg-red-50 border-red-200 text-red-800' : 'bg-emerald-50 border-emerald-200 text-emerald-900'}">${esc(state.feedback.text)}</div>` : ''}
+          <div class="p-4 rounded-2xl bg-slate-900 text-white">
+            <div class="text-[10px] font-bold uppercase tracking-wider text-sky-300">Reportes y Seguimiento</div>
+            <h2 class="text-base font-bold">Inteligencia operativa de Planificación Familiar</h2>
+            <p class="text-[11px] text-slate-300 mt-0.5">Captación en campo, productividad por obstetra e indicadores de tiempos por método.</p>
+          </div>
+          <div class="grid grid-cols-2 gap-1 p-1 bg-slate-100 rounded-xl">
+            <button type="button" onclick="setVistaReporte('CAMPO')" class="min-h-[44px] rounded-lg text-[11px] font-bold ${esCampo ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600'}">1. Campo y Captación</button>
+            <button type="button" onclick="setVistaReporte('METODOS')" class="min-h-[44px] rounded-lg text-[11px] font-bold ${!esCampo ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600'}">2. Indicadores por Método</button>
+          </div>
+          ${esCampo ? renderReporteCampo() : renderReporteMetodos()}
+        </div>`;
+    }
+
+    function renderReporteCampo() {
+      const f = state.campoFiltros;
+      const d = state.campoData;
+      const resumen = (d && d.resumen) || { total_pacientes: 0, satisfechas: 0, insatisfechas: 0, con_99208: 0 };
+      const sectores = (d && d.sectores) || [];
+      const obstetras = (d && d.obstetras) || [];
+      const pag = (d && d.paginacion) || { page: 1, pages: 1, total: 0 };
+      const filas = (d && d.filas) || [];
+      const productividad = (d && d.productividad) || [];
+      return `
+        <div class="p-4 rounded-2xl bg-white border border-slate-200 space-y-3">
+          <div class="flex items-center justify-between">
+            <h3 class="text-sm font-bold text-slate-900">1. Reporte de Campo y Captación</h3>
+            <span class="text-[10px] text-slate-500">${esc((d && d.establecimiento && d.establecimiento.nombre) || '')}</span>
+          </div>
+          <div class="grid grid-cols-2 gap-2">
+            <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Desde</label><input type="date" value="${esc(f.fecha_desde)}" onchange="actualizarFiltroCampo('fecha_desde', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs font-mono" /></div>
+            <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Hasta</label><input type="date" value="${esc(f.fecha_hasta)}" onchange="actualizarFiltroCampo('fecha_hasta', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs font-mono" /></div>
+          </div>
+          <div class="grid grid-cols-2 gap-2">
+            <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Mes / Año rápido</label><input type="month" onchange="aplicarMesCampo(this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs font-mono" /></div>
+            <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Estado</label><select onchange="actualizarFiltroCampo('estado_paciente', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white">
+              <option value="TODOS" ${f.estado_paciente === 'TODOS' ? 'selected' : ''}>Todos</option>
+              <option value="CAPTADA_CON_METODO" ${f.estado_paciente === 'CAPTADA_CON_METODO' ? 'selected' : ''}>Satisfecha (con método)</option>
+              <option value="INSATISFECHA_SIN_METODO" ${f.estado_paciente === 'INSATISFECHA_SIN_METODO' ? 'selected' : ''}>Insatisfecha (sin método)</option>
+              <option value="SEGUIMIENTO_DOMICILIARIO" ${f.estado_paciente === 'SEGUIMIENTO_DOMICILIARIO' ? 'selected' : ''}>Pendiente / seguimiento</option>
+              <option value="CONSEJERIA_REALIZADA" ${f.estado_paciente === 'CONSEJERIA_REALIZADA' ? 'selected' : ''}>Consejería realizada</option>
+              <option value="RECHAZA_METODO" ${f.estado_paciente === 'RECHAZA_METODO' ? 'selected' : ''}>Rechaza método</option>
+            </select></div>
+          </div>
+          <div class="grid grid-cols-2 gap-2">
+            <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Sector</label><select onchange="actualizarFiltroCampo('sector', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white"><option value="TODOS">Todos los sectores</option>${sectores.map(function (s) { return '<option value="' + esc(s) + '"' + (f.sector === s ? ' selected' : '') + '>' + esc(s) + '</option>'; }).join('')}</select></div>
+            <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Obstetra</label><select onchange="actualizarFiltroCampo('obstetra', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white"><option value="TODOS">Todas las obstetras</option>${obstetras.map(function (o) { return '<option value="' + esc(o.codpsal_obstetra) + '"' + (f.obstetra === o.codpsal_obstetra ? ' selected' : '') + '>' + esc(o.nombre_obstetra || o.codpsal_obstetra) + '</option>'; }).join('')}</select></div>
+          </div>
+          <input type="search" value="${esc(f.q)}" oninput="buscarCampoDebounce(this.value)" placeholder="Buscar por DNI o nombres de la paciente..." class="w-full min-h-[44px] px-3 rounded-xl border border-slate-300 text-xs" />
+          <button type="button" onclick="cargarReporteCampo(true)" ${state.campoLoading ? 'disabled' : ''} class="w-full min-h-[46px] rounded-xl bg-sky-700 hover:bg-sky-800 text-white text-xs font-bold disabled:opacity-60">${state.campoLoading ? 'Consultando reporte...' : 'Aplicar filtros y actualizar'}</button>
+          ${state.campoError ? '<div class="p-3 rounded-xl bg-red-50 border border-red-200 text-[11px] text-red-800">' + esc(state.campoError) + '</div>' : ''}
+        </div>
+
+        <div class="grid grid-cols-2 gap-2">
+          <div class="p-3 rounded-2xl bg-sky-50 border border-sky-200"><div class="text-[10px] font-bold text-sky-700 uppercase">Pacientes registradas</div><div class="text-2xl font-extrabold text-sky-950">${Number(resumen.total_pacientes || 0)}</div></div>
+          <div class="p-3 rounded-2xl bg-emerald-50 border border-emerald-200"><div class="text-[10px] font-bold text-emerald-700 uppercase">Satisfechas</div><div class="text-2xl font-extrabold text-emerald-950">${Number(resumen.satisfechas || 0)}</div></div>
+          <div class="p-3 rounded-2xl bg-red-50 border border-red-200"><div class="text-[10px] font-bold text-red-700 uppercase">Insatisfechas</div><div class="text-2xl font-extrabold text-red-950">${Number(resumen.insatisfechas || 0)}</div></div>
+          <div class="p-3 rounded-2xl bg-amber-50 border border-amber-200"><div class="text-[10px] font-bold text-amber-700 uppercase">Con Consejería 99208</div><div class="text-2xl font-extrabold text-amber-950">${Number(resumen.con_99208 || 0)}</div></div>
+        </div>
+
+        ${state.campoLoading && !d ? '<div class="space-y-2"><div class="h-16 rounded-2xl bg-slate-200 animate-pulse"></div><div class="h-16 rounded-2xl bg-slate-200 animate-pulse"></div><div class="h-24 rounded-2xl bg-slate-200 animate-pulse"></div></div>' : ''}
+
+        <div class="p-4 rounded-2xl bg-white border border-slate-200 space-y-2">
+          <div class="flex items-center justify-between gap-2">
+            <h3 class="text-xs font-bold text-slate-900">Productividad de Salidas a Campo por Obstetra y Día</h3>
+            <button type="button" onclick="exportarReporteCampo('productividad')" class="min-h-[38px] px-3 rounded-xl bg-emerald-700 text-white text-[10px] font-bold">Excel productividad</button>
+          </div>
+          <div class="overflow-x-auto -mx-1">
+            <table class="w-full text-[10px] border-collapse min-w-[560px]">
+              <thead><tr class="bg-slate-100 text-slate-700"><th class="p-2 text-left">Fecha</th><th class="p-2 text-left">Obstetra</th><th class="p-2 text-left">Sectores</th><th class="p-2 text-right">Pacientes</th><th class="p-2 text-center">Primera</th><th class="p-2 text-center">Última</th></tr></thead>
+              <tbody>${productividad.map(function (p) { return '<tr class="border-b border-slate-100"><td class="p-2 font-mono">' + esc(fechaDdMmYyyy(p.fecha_salida)) + '</td><td class="p-2"><div class="font-bold">' + esc(p.nombre_obstetra) + '</div><div class="font-mono text-slate-500">' + esc(p.codpsal_obstetra) + '</div></td><td class="p-2">' + esc(p.sectores || '—') + '</td><td class="p-2 text-right font-extrabold">' + Number(p.total_pacientes || 0) + '</td><td class="p-2 text-center font-mono">' + esc(horaDeFecha(p.primera_hora)) + '</td><td class="p-2 text-center font-mono">' + esc(horaDeFecha(p.ultima_hora)) + '</td></tr>'; }).join('') || '<tr><td colspan="6" class="p-4 text-center text-slate-500">Sin salidas registradas para los filtros seleccionados.</td></tr>'}</tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="p-4 rounded-2xl bg-white border border-slate-200 space-y-2">
+          <div class="flex items-center justify-between gap-2">
+            <div><h3 class="text-xs font-bold text-slate-900">Pacientes Registradas en el Periodo</h3><p class="text-[10px] text-slate-500">${Number(pag.total || 0)} registros · página ${Number(pag.page || 1)} de ${Number(pag.pages || 1)}</p></div>
+            <button type="button" onclick="exportarReporteCampo('pacientes')" class="min-h-[38px] px-3 rounded-xl bg-emerald-700 text-white text-[10px] font-bold">Excel detallado</button>
+          </div>
+          <div class="overflow-x-auto -mx-1">
+            <table class="w-full text-[10px] border-collapse min-w-[980px]">
+              <thead><tr class="bg-slate-100 text-slate-700"><th class="p-2 text-left">Fecha y hora</th><th class="p-2 text-left">Sector</th><th class="p-2 text-left">DNI</th><th class="p-2 text-left">Paciente</th><th class="p-2 text-center">Edad</th><th class="p-2 text-left">Celular</th><th class="p-2 text-left">Dirección / Distrito</th><th class="p-2 text-center">Estado</th><th class="p-2 text-center">99208</th><th class="p-2 text-left">Último método / Próxima cita</th><th class="p-2 text-left">Obstetra / Establecimiento</th></tr></thead>
+              <tbody>${filas.map(function (p) { return '<tr class="border-b border-slate-100 align-top"><td class="p-2 font-mono whitespace-nowrap">' + esc(p.fecha_registro_ddmmyyyy_hhmmss || p.fecha_registro) + '</td><td class="p-2">' + esc(p.sector) + '</td><td class="p-2 font-mono font-bold">' + esc(p.dni) + '</td><td class="p-2"><div class="font-bold">' + esc(p.paciente_nombre) + '</div></td><td class="p-2 text-center">' + Number(p.edad || 0) + '</td><td class="p-2 font-mono">' + esc(p.celular || '—') + '</td><td class="p-2">' + esc(p.direccion || '—') + '<div class="text-slate-500">' + esc(p.distrito || '') + '</div></td><td class="p-2 text-center"><span class="inline-block px-2 py-1 rounded-lg border text-[9px] font-bold ' + estadoPacienteBadge(p.estado_paciente) + '">' + esc(estadoPacienteTexto(p.estado_paciente)) + '</span></td><td class="p-2 text-center font-bold ' + (p.atencion_99208 ? 'text-emerald-700' : 'text-slate-400') + '">' + (p.atencion_99208 ? 'SÍ' : 'NO') + '</td><td class="p-2">' + esc(p.ultimo_metodo_nombre || 'Sin método') + '<div class="text-slate-500 font-mono">' + esc(p.fecha_proxima_cita || '—') + '</div></td><td class="p-2">' + esc(p.nombre_obstetra) + '<div class="text-slate-500">' + esc(p.estab_nombre) + '</div></td></tr>'; }).join('') || '<tr><td colspan="11" class="p-4 text-center text-slate-500">No hay pacientes para los filtros seleccionados.</td></tr>'}</tbody>
+            </table>
+          </div>
+          <div class="flex items-center justify-between pt-1">
+            <button type="button" onclick="paginaCampo(-1)" ${Number(pag.page || 1) <= 1 || state.campoLoading ? 'disabled' : ''} class="min-h-[38px] px-3 rounded-xl border border-slate-300 text-[10px] font-bold disabled:opacity-40">Anterior</button>
+            <span class="text-[10px] text-slate-500">${Number(pag.total || 0)} pacientes</span>
+            <button type="button" onclick="paginaCampo(1)" ${Number(pag.page || 1) >= Number(pag.pages || 1) || state.campoLoading ? 'disabled' : ''} class="min-h-[38px] px-3 rounded-xl border border-slate-300 text-[10px] font-bold disabled:opacity-40">Siguiente</button>
+          </div>
+        </div>`;
+    }
+
+    function renderReporteMetodos() {
+      const f = state.metodosFiltros;
+      const d = state.metodosData;
+      const resumen = (d && d.resumen) || { vigente: 0, proxima: 0, vencida: 0, sin_metodo: 0, total: 0 };
+      const catalogo = (d && d.catalogo) || [];
+      const sectores = (d && d.sectores) || [];
+      const pag = (d && d.paginacion) || { page: 1, pages: 1, total: 0 };
+      const filas = (d && d.filas) || [];
+      return `
+        <div class="p-4 rounded-2xl bg-white border border-slate-200 space-y-3">
+          <h3 class="text-sm font-bold text-slate-900">2. Indicadores y Seguimiento por Método</h3>
+          <p class="text-[11px] text-slate-500">Configure los días de ciclo del manual y controle los vencimientos por método anticonceptivo.</p>
+          <div class="grid grid-cols-2 gap-2">
+            <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Desde</label><input type="date" value="${esc(f.fecha_desde)}" onchange="actualizarFiltroMetodos('fecha_desde', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs font-mono" /></div>
+            <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Hasta</label><input type="date" value="${esc(f.fecha_hasta)}" onchange="actualizarFiltroMetodos('fecha_hasta', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs font-mono" /></div>
+          </div>
+          <div class="grid grid-cols-2 gap-2">
+            <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Mes / Año rápido</label><input type="month" onchange="aplicarMesMetodos(this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs font-mono" /></div>
+            <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Método</label><select onchange="actualizarFiltroMetodos('codigo_metodo', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white"><option value="TODOS">Todos los métodos</option>${catalogo.map(function (m) { return '<option value="' + esc(m.codigo_dx) + '"' + (f.codigo_metodo === m.codigo_dx ? ' selected' : '') + '>' + esc(m.nombre_metodo) + ' (' + Number(m.dias_ciclo) + 'd)</option>'; }).join('')}</select></div>
+          </div>
+          <div class="grid grid-cols-2 gap-2">
+            <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Estado de vencimiento</label><select onchange="actualizarFiltroMetodos('estado_vencimiento', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white">
+              <option value="TODOS" ${f.estado_vencimiento === 'TODOS' ? 'selected' : ''}>Todos</option>
+              <option value="VIGENTE" ${f.estado_vencimiento === 'VIGENTE' ? 'selected' : ''}>Vigente / al día</option>
+              <option value="PROXIMA" ${f.estado_vencimiento === 'PROXIMA' ? 'selected' : ''}>Próxima a vencer ≤ 7 días</option>
+              <option value="VENCIDA" ${f.estado_vencimiento === 'VENCIDA' ? 'selected' : ''}>Vencida</option>
+              <option value="SIN_METODO" ${f.estado_vencimiento === 'SIN_METODO' ? 'selected' : ''}>Sin método</option>
+            </select></div>
+            <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Sector</label><select onchange="actualizarFiltroMetodos('sector', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white"><option value="TODOS">Todos</option>${sectores.map(function (s) { return '<option value="' + esc(s) + '"' + (f.sector === s ? ' selected' : '') + '>' + esc(s) + '</option>'; }).join('')}</select></div>
+          </div>
+          <button type="button" onclick="cargarReporteMetodos(true)" ${state.metodosLoading ? 'disabled' : ''} class="w-full min-h-[46px] rounded-xl bg-sky-700 hover:bg-sky-800 text-white text-xs font-bold disabled:opacity-60">${state.metodosLoading ? 'Consultando indicadores...' : 'Aplicar filtros y actualizar'}</button>
+          ${state.metodosError ? '<div class="p-3 rounded-xl bg-red-50 border border-red-200 text-[11px] text-red-800">' + esc(state.metodosError) + '</div>' : ''}
+        </div>
+
+        <div class="grid grid-cols-2 gap-2">
+          <div class="p-3 rounded-2xl bg-emerald-50 border border-emerald-200"><div class="text-[10px] font-bold text-emerald-700 uppercase">Vigentes</div><div class="text-2xl font-extrabold text-emerald-950">${Number(resumen.vigente || 0)}</div></div>
+          <div class="p-3 rounded-2xl bg-amber-50 border border-amber-200"><div class="text-[10px] font-bold text-amber-700 uppercase">Próximas ≤ 7 días</div><div class="text-2xl font-extrabold text-amber-950">${Number(resumen.proxima || 0)}</div></div>
+          <div class="p-3 rounded-2xl bg-red-50 border border-red-200"><div class="text-[10px] font-bold text-red-700 uppercase">Vencidas</div><div class="text-2xl font-extrabold text-red-950">${Number(resumen.vencida || 0)}</div></div>
+          <div class="p-3 rounded-2xl bg-slate-100 border border-slate-300"><div class="text-[10px] font-bold text-slate-700 uppercase">Sin método</div><div class="text-2xl font-extrabold text-slate-900">${Number(resumen.sin_metodo || 0)}</div></div>
+        </div>
+
+        <div class="p-4 rounded-2xl bg-white border border-slate-200 space-y-2">
+          <h3 class="text-xs font-bold text-slate-900">Configuración de Tiempos por Método (manual MINSA)</h3>
+          <p class="text-[10px] text-slate-500">Edite los días de ciclo y guarde: el reporte se recalcula en el siguiente clic.</p>
+          <div class="overflow-x-auto -mx-1">
+            <table class="w-full text-[10px] border-collapse min-w-[520px]">
+              <thead><tr class="bg-slate-100 text-slate-700"><th class="p-2 text-left">Código</th><th class="p-2 text-left">Método</th><th class="p-2 text-center">Días</th><th class="p-2 text-center">Activo</th><th class="p-2 text-center">Acción</th></tr></thead>
+              <tbody>${catalogo.map(function (m) { return '<tr class="border-b border-slate-100"><td class="p-2 font-mono font-bold">' + esc(m.codigo_dx) + '</td><td class="p-2">' + esc(m.nombre_metodo) + '</td><td class="p-2 text-center"><input id="metodo-dias-' + esc(m.codigo_dx) + '" type="number" min="0" max="3650" value="' + Number(m.dias_ciclo) + '" class="w-20 min-h-[36px] px-2 rounded-lg border border-slate-300 text-center font-mono" /></td><td class="p-2 text-center"><input id="metodo-activo-' + esc(m.codigo_dx) + '" type="checkbox" ' + (Number(m.activo) === 1 ? 'checked' : '') + ' /></td><td class="p-2 text-center"><button type="button" onclick="guardarTiempoMetodo(\'' + esc(m.codigo_dx) + '\')" ' + (state.guardandoMetodo ? 'disabled' : '') + ' class="min-h-[34px] px-2 rounded-lg bg-slate-900 text-white text-[9px] font-bold">Guardar</button></td></tr>'; }).join('') || '<tr><td colspan="5" class="p-3 text-center text-slate-500">Cargue el reporte para ver el catálogo.</td></tr>'}</tbody>
+            </table>
+          </div>
+          <div class="pt-2 border-t border-slate-100 space-y-2">
+            <div class="text-[10px] font-bold text-slate-700">Agregar / actualizar código HIS-CPT</div>
+            <div class="grid grid-cols-2 gap-2">
+              <input id="nuevo-metodo-codigo" placeholder="Código (ej. 90782)" class="min-h-[40px] px-2 rounded-xl border border-slate-300 text-xs font-mono uppercase" />
+              <input id="nuevo-metodo-dias" type="number" min="0" max="3650" placeholder="Días ciclo" class="min-h-[40px] px-2 rounded-xl border border-slate-300 text-xs font-mono" />
+            </div>
+            <input id="nuevo-metodo-nombre" placeholder="Nombre del método" class="w-full min-h-[40px] px-2 rounded-xl border border-slate-300 text-xs" />
+            <button type="button" onclick="agregarMetodoCatalogo()" ${state.guardandoMetodo ? 'disabled' : ''} class="w-full min-h-[42px] rounded-xl bg-emerald-700 text-white text-xs font-bold disabled:opacity-60">${state.guardandoMetodo ? 'Guardando...' : 'Guardar método y recalcular'}</button>
+          </div>
+        </div>
+
+        <div class="p-4 rounded-2xl bg-white border border-slate-200 space-y-2">
+          <div class="flex items-center justify-between gap-2">
+            <div><h3 class="text-xs font-bold text-slate-900">Seguimiento por Método</h3><p class="text-[10px] text-slate-500">${Number(pag.total || 0)} pacientes · página ${Number(pag.page || 1)} de ${Number(pag.pages || 1)}</p></div>
+            <button type="button" onclick="exportarReporteMetodos()" class="min-h-[38px] px-3 rounded-xl bg-emerald-700 text-white text-[10px] font-bold">Exportar Excel</button>
+          </div>
+          <div class="overflow-x-auto -mx-1">
+            <table class="w-full text-[10px] border-collapse min-w-[980px]">
+              <thead><tr class="bg-slate-100 text-slate-700"><th class="p-2 text-left">Paciente</th><th class="p-2 text-left">Sector</th><th class="p-2 text-left">Método actual</th><th class="p-2 text-center">Ciclo</th><th class="p-2 text-left">Última atención</th><th class="p-2 text-left">Próxima atención</th><th class="p-2 text-center">Indicador</th><th class="p-2 text-left">Obstetra / Establecimiento</th></tr></thead>
+              <tbody>${filas.map(function (p) { return '<tr class="border-b border-slate-100 align-top"><td class="p-2"><div class="font-bold">' + esc(p.paciente_nombre) + '</div><div class="font-mono text-slate-500">' + esc(p.dni) + ' · ' + Number(p.edad || 0) + ' años</div><div class="font-mono text-slate-500">' + esc(p.celular || '—') + '</div></td><td class="p-2">' + esc(p.sector || '—') + '</td><td class="p-2">' + esc(p.nombre_metodo || 'Sin método') + '<div class="font-mono text-slate-500">' + esc(p.codigo_metodo || '—') + '</div></td><td class="p-2 text-center font-bold">' + Number(p.dias_ciclo || 0) + ' d</td><td class="p-2 font-mono">' + esc(fechaDdMmYyyy(p.fecha_ultima_atencion) || '—') + '</td><td class="p-2 font-mono"><div>' + esc(fechaDdMmYyyy(p.fecha_proxima_cita) || '—') + '</div><div class="text-[9px] text-slate-500">' + (p.dias_restantes === null ? '' : (Number(p.dias_restantes) < 0 ? 'Vencida hace ' + Math.abs(Number(p.dias_restantes)) + ' d' : 'Faltan ' + Number(p.dias_restantes) + ' d')) + '</div></td><td class="p-2 text-center"><span class="inline-block px-2 py-1 rounded-lg border text-[9px] font-bold ' + estadoIndicadorBadge(p.estado_indicador) + '">' + esc(p.estado_indicador_etiqueta) + '</span></td><td class="p-2">' + esc(p.nombre_obstetra) + '<div class="text-slate-500">' + esc(p.estab_nombre) + '</div></td></tr>'; }).join('') || '<tr><td colspan="8" class="p-4 text-center text-slate-500">No hay pacientes para los filtros seleccionados.</td></tr>'}</tbody>
+            </table>
+          </div>
+          <div class="flex items-center justify-between pt-1">
+            <button type="button" onclick="paginaMetodos(-1)" ${Number(pag.page || 1) <= 1 || state.metodosLoading ? 'disabled' : ''} class="min-h-[38px] px-3 rounded-xl border border-slate-300 text-[10px] font-bold disabled:opacity-40">Anterior</button>
+            <span class="text-[10px] text-slate-500">${Number(pag.total || 0)} pacientes</span>
+            <button type="button" onclick="paginaMetodos(1)" ${Number(pag.page || 1) >= Number(pag.pages || 1) || state.metodosLoading ? 'disabled' : ''} class="min-h-[38px] px-3 rounded-xl border border-slate-300 text-[10px] font-bold disabled:opacity-40">Siguiente</button>
+          </div>
+        </div>`;
+    }
+
+    function setVistaReporte(vista) {
+      state.reporteVista = vista;
+      render();
+      if (vista === 'CAMPO' && !state.campoData) cargarReporteCampo(true);
+      if (vista === 'METODOS' && !state.metodosData) cargarReporteMetodos(true);
+    }
+
+    function actualizarFiltroCampo(campo, valor) {
+      state.campoFiltros[campo] = valor;
+      state.campoFiltros.page = 1;
+      cargarReporteCampo(false);
+    }
+
+    function actualizarFiltroMetodos(campo, valor) {
+      state.metodosFiltros[campo] = valor;
+      state.metodosFiltros.page = 1;
+      cargarReporteMetodos(false);
+    }
+
+    function aplicarMesCampo(valor) {
+      if (!valor || !/^\d{4}-\d{2}$/.test(valor)) return;
+      const partes = valor.split('-');
+      const ultimo = new Date(Number(partes[0]), Number(partes[1]), 0).getDate();
+      state.campoFiltros.fecha_desde = valor + '-01';
+      state.campoFiltros.fecha_hasta = valor + '-' + String(ultimo).padStart(2, '0');
+      state.campoFiltros.page = 1;
+      cargarReporteCampo(false);
+    }
+
+    function aplicarMesMetodos(valor) {
+      if (!valor || !/^\d{4}-\d{2}$/.test(valor)) return;
+      const partes = valor.split('-');
+      const ultimo = new Date(Number(partes[0]), Number(partes[1]), 0).getDate();
+      state.metodosFiltros.fecha_desde = valor + '-01';
+      state.metodosFiltros.fecha_hasta = valor + '-' + String(ultimo).padStart(2, '0');
+      state.metodosFiltros.page = 1;
+      cargarReporteMetodos(false);
+    }
+
+    let campoBuscarTimer = null;
+    function buscarCampoDebounce(valor) {
+      state.campoFiltros.q = valor;
+      state.campoFiltros.page = 1;
+      if (campoBuscarTimer) clearTimeout(campoBuscarTimer);
+      campoBuscarTimer = setTimeout(function () { cargarReporteCampo(false); }, 420);
+    }
+
+    function parametrosReporte(filtros) {
+      return Object.assign({}, filtros);
+    }
+
+    async function cargarReporteCampo(mostrarSkeleton) {
+      if (!state.token) return;
+      state.campoLoading = true;
+      state.campoError = '';
+      if (mostrarSkeleton) render();
+      try {
+        const data = await apiGet('reporte_campo', parametrosReporte(state.campoFiltros));
+        state.campoData = data;
+      } catch (error) {
+        state.campoError = error.message;
+      } finally {
+        state.campoLoading = false;
+        render();
+      }
+    }
+
+    async function cargarReporteMetodos(mostrarSkeleton) {
+      if (!state.token) return;
+      state.metodosLoading = true;
+      state.metodosError = '';
+      if (mostrarSkeleton) render();
+      try {
+        const data = await apiGet('reporte_metodos', parametrosReporte(state.metodosFiltros));
+        state.metodosData = data;
+      } catch (error) {
+        state.metodosError = error.message;
+      } finally {
+        state.metodosLoading = false;
+        render();
+      }
+    }
+
+    function paginaCampo(delta) {
+      const pag = state.campoData && state.campoData.paginacion;
+      if (!pag) return;
+      const nueva = Math.max(1, Math.min(Number(pag.pages || 1), Number(pag.page || 1) + Number(delta)));
+      if (nueva === Number(pag.page || 1)) return;
+      state.campoFiltros.page = nueva;
+      cargarReporteCampo(false);
+    }
+
+    function paginaMetodos(delta) {
+      const pag = state.metodosData && state.metodosData.paginacion;
+      if (!pag) return;
+      const nueva = Math.max(1, Math.min(Number(pag.pages || 1), Number(pag.page || 1) + Number(delta)));
+      if (nueva === Number(pag.page || 1)) return;
+      state.metodosFiltros.page = nueva;
+      cargarReporteMetodos(false);
+    }
+
+    async function guardarTiempoMetodo(codigo) {
+      if (state.guardandoMetodo || !state.metodosData) return;
+      const actual = (state.metodosData.catalogo || []).find(function (m) { return m.codigo_dx === codigo; });
+      if (!actual) return;
+      const diasInput = document.getElementById('metodo-dias-' + codigo);
+      const activoInput = document.getElementById('metodo-activo-' + codigo);
+      state.guardandoMetodo = true;
+      try {
+        const data = await apiPost('save_metodo', {
+          codigo_dx: codigo,
+          nombre_metodo: actual.nombre_metodo,
+          dias_ciclo: Number(diasInput ? diasInput.value : actual.dias_ciclo),
+          requiere_cita: actual.requiere_cita,
+          activo: activoInput && activoInput.checked ? 1 : 0
+        });
+        state.metodosData.catalogo = data.catalogo || state.metodosData.catalogo;
+        showFeedback('success', 'Tiempo de ciclo actualizado para ' + codigo + '.');
+        await cargarReporteMetodos(false);
+      } catch (error) {
+        showFeedback('error', error.message);
+      } finally {
+        state.guardandoMetodo = false;
+        render();
+      }
+    }
+
+    async function agregarMetodoCatalogo() {
+      if (state.guardandoMetodo) return;
+      const codigo = (document.getElementById('nuevo-metodo-codigo') || {}).value || '';
+      const nombre = (document.getElementById('nuevo-metodo-nombre') || {}).value || '';
+      const dias = (document.getElementById('nuevo-metodo-dias') || {}).value || '';
+      state.guardandoMetodo = true;
+      try {
+        const data = await apiPost('save_metodo', {
+          codigo_dx: String(codigo).toUpperCase().trim(),
+          nombre_metodo: nombre,
+          dias_ciclo: Number(dias),
+          requiere_cita: 1,
+          activo: 1
+        });
+        if (state.metodosData) state.metodosData.catalogo = data.catalogo || state.metodosData.catalogo;
+        showFeedback('success', 'Método ' + codigo + ' guardado correctamente.');
+        await cargarReporteMetodos(false);
+      } catch (error) {
+        showFeedback('error', error.message);
+      } finally {
+        state.guardandoMetodo = false;
+        render();
+      }
+    }
+
+    async function descargarReporteExcel(action, parametros, nombreArchivo) {
+      try {
+        const query = new URLSearchParams(Object.assign({ action: action }, parametros || {}));
+        const res = await fetch(API + '?' + query.toString(), { headers: authHeaders(), cache: 'no-store' });
+        if (res.status === 401) {
+          clearSession();
+          render();
+          throw new Error('Sesión expirada. Inicie sesión nuevamente.');
+        }
+        if (!res.ok) {
+          const data = await res.json().catch(function () { return {}; });
+          throw new Error(data.error || 'No se pudo generar el archivo Excel.');
+        }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = nombreArchivo;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        setTimeout(function () { URL.revokeObjectURL(url); }, 4000);
+        showFeedback('success', 'Archivo Excel generado: ' + nombreArchivo);
+      } catch (error) {
+        showFeedback('error', error.message);
+        render();
+      }
+    }
+
+    function exportarReporteCampo(tipo) {
+      descargarReporteExcel('export_reporte_campo', Object.assign({}, state.campoFiltros, { tipo: tipo }), 'reporte_campo_' + tipo + '_' + localIsoDate(0) + '.csv');
+    }
+
+    function exportarReporteMetodos() {
+      descargarReporteExcel('export_reporte_metodos', Object.assign({}, state.metodosFiltros), 'reporte_metodos_' + localIsoDate(0) + '.csv');
+    }
+
+    // ---------------------------------------------------------------------
     // Handlers de autenticación
     // ---------------------------------------------------------------------
     function setAuthTab(tab) {
@@ -1196,16 +1623,10 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
       state.activeTab = tab;
       state.feedback = null;
       render();
-    }
-    function backToCredentials() {
-      state.authStep = 'CREDENTIALS';
-      state.demoCode = '';
-      state.feedback = null;
-      render();
-    }
-    function useDemoCode() {
-      const input = document.getElementById('totp-input');
-      if (input) input.value = state.demoCode;
+      if (tab === 'REPORTES') {
+        if (state.reporteVista === 'CAMPO' && !state.campoData) cargarReporteCampo(true);
+        if (state.reporteVista === 'METODOS' && !state.metodosData) cargarReporteMetodos(true);
+      }
     }
 
     async function enterApp(session) {
@@ -1230,15 +1651,10 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
       const password = document.getElementById('login-pass').value;
       try {
         const data = await apiPost('login', { dni: dni, password: password });
-        if (data.session && data.session.token) {
-          await enterApp(data.session);
-          return;
+        if (!data.session || !data.session.token) {
+          throw new Error('El servidor no emitió la sesión. Intente nuevamente.');
         }
-        state.challengeId = data.challengeId;
-        state.pendingUser = data.userPreview || { dni: data.dni, nombreCompleto: data.nombreCompleto, estab_nombre: data.estab_nombre };
-        state.demoCode = (data.userPreview && (data.userPreview.demoCurrentCode || data.userPreview.currentTotpCode)) || data.demoCurrentCode || '';
-        state.authStep = 'VERIFY_2FA';
-        render();
+        await enterApp(data.session);
       } catch (error) {
         showFeedback('error', error.message);
       }
@@ -1259,26 +1675,9 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
       };
       try {
         const data = await apiPost('register_obstetra', payload);
-        if (data.session && data.session.token) {
-          await enterApp(data.session);
-          return;
+        if (!data.session || !data.session.token) {
+          throw new Error('El servidor no emitió la sesión. Intente nuevamente.');
         }
-        state.challengeId = data.challengeId;
-        state.pendingUser = data.userPreview || { dni: data.dni, nombreCompleto: data.nombreCompleto, estab_nombre: data.estab_nombre };
-        state.demoCode = (data.userPreview && (data.userPreview.demoCurrentCode || data.userPreview.currentTotpCode)) || data.demoCurrentCode || '';
-        state.authStep = 'VERIFY_2FA';
-        render();
-      } catch (error) {
-        showFeedback('error', error.message);
-      }
-    }
-
-    async function handleVerify2FA(event) {
-      event.preventDefault();
-      state.feedback = null;
-      const code = document.getElementById('totp-input').value.replace(/\D/g, '');
-      try {
-        const data = await apiPost('verify_2fa', { challengeId: state.challengeId, code: code });
         await enterApp(data.session);
       } catch (error) {
         showFeedback('error', error.message);
@@ -1318,6 +1717,8 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
         state.formVisible = false;
         state.nombresDesbloqueados = false;
         state.reporteProgramacion = null;
+        state.campoData = null;
+        state.metodosData = null;
         state.feedback = { type: 'success', text: 'Establecimiento activo: ' + data.session.estab_nombre + '. Las búsquedas de DNI revisan toda la Red y registran en su establecimiento activo.' };
         await loadOverview();
       } catch (error) {
@@ -1659,19 +2060,36 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
       });
     }
 
-    // Restaurar sesión guardada y validar contra la API.
+    // Restaurar sesión persistente (7 días) desde localStorage o cookie HttpOnly.
     (async function boot() {
       if (isIos() && !isStandalone()) state.iosBanner = true;
       state.offlinePending = readQueueRaw().length;
-      if (state.token) {
-        try {
-          const saved = sessionStorage.getItem(SESSION_KEY);
-          state.session = saved ? JSON.parse(saved) : null;
+      let sesionGuardada = null;
+      try {
+        const raw = localStorage.getItem(SESSION_KEY) || sessionStorage.getItem(SESSION_KEY) || '';
+        if (raw) sesionGuardada = JSON.parse(raw);
+      } catch (e) {
+        sesionGuardada = null;
+      }
+      if (sesionGuardada && sesionGuardada.token) {
+        state.token = sesionGuardada.token;
+        state.session = sesionGuardada;
+      }
+      try {
+        // Valida el Bearer de localStorage o la cookie HttpOnly y renueva la
+        // sesión 7 días (sliding expiration) sin pedir login.
+        const data = await apiGet('session_restore');
+        if (data && data.session && data.session.token) {
+          state.token = data.session.token;
+          state.session = data.session;
+          persistSession();
           await loadOverview();
           startOfflineSync();
-        } catch (e) {
-          clearSession();
         }
+      } catch (e) {
+        // Sin sesión válida se muestra el login. Si el fallo es de red y la
+        // sesión local sigue presente, se conserva para operar offline.
+        if (!state.token || !state.session) clearSession();
       }
       render();
       updatePendingIndicators();
