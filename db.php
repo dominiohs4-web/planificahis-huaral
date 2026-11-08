@@ -498,7 +498,7 @@ final class HospitalHuaralDB
         $pdo = self::getConnection();
         $stmt = $pdo->prepare("
             INSERT INTO app_sesiones (token_hash, dni, cod_estab, plataforma, created_at, last_activity, expires_at)
-            VALUES (:hash, :dni, :estab, :platform, :created, :created, :expires)
+            VALUES (:hash, :dni, :estab, :platform, :created, :last_activity, :expires)
         ");
         $stmt->execute([
             ':hash' => hash('sha256', $token),
@@ -506,6 +506,7 @@ final class HospitalHuaralDB
             ':estab' => $codEstab,
             ':platform' => $platform,
             ':created' => $now,
+            ':last_activity' => $now,
             ':expires' => $now + $ttlSeconds,
         ]);
         return $token;

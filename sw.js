@@ -3,15 +3,15 @@
  * - Nunca cachea api.php, sync_cloud_to_local.php ni respuestas clínicas.
  * - No intercepta métodos distintos de GET.
  */
-const SW_VERSION = 'planificahis-php-v1.1.0';
+const SW_VERSION = 'planificahis-php-v1.1.2';
 const PRECACHE = [
   './index.php',
   './manifest.webmanifest',
   './public/icon.svg',
   './public/apple-touch-icon.png',
-  './public/pwa-192x192.png',
-  './public/pwa-512x512.png',
-  './public/pwa-maskable-512x512.png',
+  './public/pwa-192x192.png?v=2',
+  './public/pwa-512x512.png?v=2',
+  './public/pwa-maskable-512x512.png?v=2',
 ];
 
 self.addEventListener('install', (event) => {
