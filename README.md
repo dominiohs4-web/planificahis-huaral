@@ -2,8 +2,9 @@
 
 Aplicación web/PWA de captación y seguimiento de Planificación Familiar para el
 Hospital San Juan Bautista Huaral y la Red Huaral-Chancay. La variante de
-producción es **PHP 8.2 + Apache + MariaDB/TiDB Cloud**; los archivos React/Vite
-de AI Studio que aún viven en el repositorio no se usan en el contenedor.
+producción es **PHP 8.2 + Apache + MariaDB/TiDB Cloud**. El repositorio contiene
+únicamente la aplicación PHP y sus recursos PWA; el prototipo React/Vite de
+AI Studio fue retirado.
 
 ## Seguridad
 

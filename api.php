@@ -761,6 +761,292 @@ function resolver_nombre_establecimiento(PDO $pdo, ?string $codigo, ?string $fal
 }
 
 /**
+ * Catálogo clínico de métodos y ciclos. Lee `app_catalogo_metodos`; si la tabla
+ * todavía no existe (instalación mínima o bootstrap pendiente) usa el mismo
+ * catálogo embebido en PHP definido por la app.
+ *
+ * @return array<string, array{codigo_dx: string, nombre_metodo: string, dias_ciclo: int, requiere_cita: int, activo: int}>
+ */
+function catalogo_metodos_planificacion(PDO $pdo): array
+{
+    static $catalogo = null;
+    if (is_array($catalogo)) {
+        return $catalogo;
+    }
+
+    $fallback = [
+        '90782' => ['codigo_dx' => '90782', 'nombre_metodo' => 'Inyectable Hormonal Mensual (Ampolla 1 mes)', 'dias_ciclo' => 30, 'requiere_cita' => 1, 'activo' => 1],
+        '9920801' => ['codigo_dx' => '9920801', 'nombre_metodo' => 'Administración de Inyectable Mensual', 'dias_ciclo' => 30, 'requiere_cita' => 1, 'activo' => 1],
+        'Z304' => ['codigo_dx' => 'Z304', 'nombre_metodo' => 'Inyectable Hormonal Trimestral (Ampolla 3 meses)', 'dias_ciclo' => 90, 'requiere_cita' => 1, 'activo' => 1],
+        '9920802' => ['codigo_dx' => '9920802', 'nombre_metodo' => 'Administración de Inyectable Trimestral', 'dias_ciclo' => 90, 'requiere_cita' => 1, 'activo' => 1],
+        '99208' => ['codigo_dx' => '99208', 'nombre_metodo' => 'Atención / Procedimiento en Planificación Familiar (99208)', 'dias_ciclo' => 30, 'requiere_cita' => 1, 'activo' => 1],
+        '9940204' => ['codigo_dx' => '9940204', 'nombre_metodo' => 'Orientación y Consejería en Planificación Familiar', 'dias_ciclo' => 30, 'requiere_cita' => 1, 'activo' => 1],
+        'Z301' => ['codigo_dx' => 'Z301', 'nombre_metodo' => 'Inserción de DIU / T de Cobre (Control)', 'dias_ciclo' => 365, 'requiere_cita' => 1, 'activo' => 1],
+        '58300' => ['codigo_dx' => '58300', 'nombre_metodo' => 'Inserción de DIU', 'dias_ciclo' => 365, 'requiere_cita' => 1, 'activo' => 1],
+        '11981' => ['codigo_dx' => '11981', 'nombre_metodo' => 'Implante Subdérmico (Control)', 'dias_ciclo' => 1095, 'requiere_cita' => 1, 'activo' => 1],
+        'Z300' => ['codigo_dx' => 'Z300', 'nombre_metodo' => 'Consejería General sin Método Activo', 'dias_ciclo' => 15, 'requiere_cita' => 1, 'activo' => 1],
+    ];
+
+    $catalogo = [];
+    $tablaDisponible = false;
+    try {
+        $stmt = $pdo->query('SELECT codigo_dx, nombre_metodo, dias_ciclo, requiere_cita, activo FROM app_catalogo_metodos');
+        foreach ($stmt->fetchAll() as $row) {
+            $codigo = trim((string)($row['codigo_dx'] ?? ''));
+            if ($codigo === '') {
+                continue;
+            }
+            $catalogo[$codigo] = [
+                'codigo_dx' => $codigo,
+                'nombre_metodo' => trim((string)($row['nombre_metodo'] ?? $codigo)),
+                'dias_ciclo' => max(0, (int)($row['dias_ciclo'] ?? 30)),
+                'requiere_cita' => (int)($row['requiere_cita'] ?? 1) === 1 ? 1 : 0,
+                'activo' => (int)($row['activo'] ?? 1) === 1 ? 1 : 0,
+            ];
+        }
+        $tablaDisponible = true;
+    } catch (Throwable $e) {
+        // La tabla se crea en bootstrapSchema; el fallback mantiene la app operativa.
+    }
+
+    if (!$tablaDisponible || !$catalogo) {
+        $catalogo = $fallback;
+    } else {
+        foreach ($fallback as $codigo => $meta) {
+            if (!isset($catalogo[$codigo])) {
+                $catalogo[$codigo] = $meta;
+            }
+        }
+    }
+
+    return $catalogo;
+}
+
+/**
+ * @return array<int, string>
+ */
+function codigos_metodos_activos(array $catalogo): array
+{
+    $codigos = [];
+    foreach ($catalogo as $codigo => $meta) {
+        if ((int)($meta['activo'] ?? 1) === 1 && (int)($meta['dias_ciclo'] ?? 0) > 0) {
+            $codigos[] = (string)$codigo;
+        }
+    }
+    return $codigos ?: array_map('strval', array_keys($catalogo));
+}
+
+/**
+ * Fecha real de aplicación en his_dl: DIA/MES/ANO válidos o, como respaldo,
+ * fecha_reg / fecha_reg del detalle.
+ *
+ * @param array<string, mixed> $row
+ */
+function fecha_aplicacion_his(array $row): string
+{
+    $dia = (int)($row['DIA'] ?? 0);
+    $mes = (int)($row['MES'] ?? 0);
+    $ano = (int)($row['ANO'] ?? 0);
+    if ($dia >= 1 && $dia <= 31 && $mes >= 1 && $mes <= 12 && $ano >= 1900 && $ano <= 2100) {
+        $fecha = sprintf('%04d-%02d-%02d', $ano, $mes, $dia);
+        if (checkdate($mes, $dia, $ano)) {
+            return $fecha;
+        }
+    }
+
+    foreach (['fecha_dx', 'fecha_reg'] as $campo) {
+        $raw = trim((string)($row[$campo] ?? ''));
+        if ($raw === '' || str_starts_with($raw, '0000-00-00')) {
+            continue;
+        }
+        $timestamp = strtotime($raw);
+        if ($timestamp !== false) {
+            return date('Y-m-d', $timestamp);
+        }
+    }
+    return '';
+}
+
+function fecha_para_mostrar(?string $iso): string
+{
+    $iso = trim((string)$iso);
+    if ($iso === '') {
+        return '';
+    }
+    $dt = DateTimeImmutable::createFromFormat('!Y-m-d', $iso);
+    return $dt instanceof DateTimeImmutable ? $dt->format('d/m/Y') : '';
+}
+
+/**
+ * Última atención de Planificación Familiar de la paciente en TODA la red.
+ * Prioriza la última atención con método del catálogo; si no existe, conserva
+ * la última atención de la UPS 302304 para contextualizar el origen.
+ *
+ * @param array<string, array<string, mixed>> $catalogo
+ * @param array<int, string> $codigosUps
+ * @return array<string, mixed>
+ */
+function programacion_planificacion_paciente(
+    PDO $pdo,
+    string $dni,
+    string $codEstabActual,
+    array $catalogo,
+    array $codigosUps = ['302304']
+): array {
+    $codigosActivos = codigos_metodos_activos($catalogo);
+
+    $codigosUps = array_values(array_unique(array_filter(array_map(
+        static fn ($codigo): string => trim((string)$codigo),
+        $codigosUps
+    ), static fn (string $codigo): bool => $codigo !== '')));
+    if (!$codigosUps) {
+        $codigosUps = ['302304'];
+    }
+
+    $placeholdersDx = implode(',', array_fill(0, count($codigosActivos), '?'));
+    $placeholdersUps = implode(',', array_fill(0, count($codigosUps), '?'));
+    $select = "
+        SELECT h.ID, h.DNI, h.COD_ESTAB, h.COD_SERVSA, h.CODPSAL,
+               h.ANO, h.MES, h.DIA, h.fecha_reg, h.HCLFAM, h.FICHAFAM,
+               h.Apellido_p, h.Apellido_m, h.Pnombre, h.Dnombres, h.EDAD,
+               dt.DX, dt.id_dosis, dt.fecha_reg AS fecha_dx
+        FROM his_dl h
+        INNER JOIN his_dl_dt dt ON dt.ID = h.ID
+    ";
+    $order = ' ORDER BY h.ANO DESC, h.MES DESC, h.DIA DESC, h.ID DESC LIMIT 40';
+
+    $rows = [];
+    try {
+        $stmt = $pdo->prepare(
+            $select .
+            " WHERE h.DNI = ? AND (h.COD_SERVSA IN ({$placeholdersUps}) OR dt.DX IN ({$placeholdersDx}))" .
+            $order
+        );
+        $stmt->execute(array_merge([$dni], $codigosUps, $codigosActivos));
+        $rows = $stmt->fetchAll();
+    } catch (Throwable $e) {
+        try {
+            $stmt = $pdo->prepare(
+                $select .
+                " WHERE h.DNI = ? AND dt.DX IN ({$placeholdersDx})" .
+                $order
+            );
+            $stmt->execute(array_merge([$dni], $codigosActivos));
+            $rows = $stmt->fetchAll();
+        } catch (Throwable $e2) {
+            $rows = [];
+        }
+    }
+
+    $ultimaAtencion = null;
+    $ultimaConMetodo = null;
+    foreach ($rows as $row) {
+        $fecha = fecha_aplicacion_his($row);
+        if ($fecha === '') {
+            continue;
+        }
+        if ($ultimaAtencion === null) {
+            $ultimaAtencion = $row;
+            $ultimaAtencion['_fecha_aplicacion'] = $fecha;
+        }
+        $dx = trim((string)($row['DX'] ?? ''));
+        if (isset($catalogo[$dx]) && (int)($catalogo[$dx]['dias_ciclo'] ?? 0) > 0) {
+            if ($ultimaConMetodo === null) {
+                $ultimaConMetodo = $row;
+                $ultimaConMetodo['_fecha_aplicacion'] = $fecha;
+            }
+        }
+        if ($ultimaAtencion !== null && $ultimaConMetodo !== null) {
+            break;
+        }
+    }
+
+    $codigo = $ultimaConMetodo !== null ? trim((string)($ultimaConMetodo['DX'] ?? '')) : '';
+    $diasCiclo = $codigo !== '' ? max(0, (int)($catalogo[$codigo]['dias_ciclo'] ?? 0)) : 0;
+    $fechaAplicacionIso = $ultimaConMetodo !== null ? (string)($ultimaConMetodo['_fecha_aplicacion'] ?? '') : '';
+    $fechaProximoIso = '';
+    $diasParaProximo = null;
+    $hoy = new DateTimeImmutable('today');
+    if ($codigo !== '' && $diasCiclo > 0 && $fechaAplicacionIso !== '') {
+        $proximo = (new DateTimeImmutable($fechaAplicacionIso))->modify('+' . $diasCiclo . ' days');
+        $fechaProximoIso = $proximo->format('Y-m-d');
+        $diasParaProximo = (int)$hoy->diff($proximo)->format('%r%a');
+    }
+
+    if ($codigo === '' || $fechaProximoIso === '') {
+        $estado = 'SIN_METODO';
+    } elseif ($diasParaProximo === 0) {
+        $estado = 'TOCA_HOY';
+    } elseif ($diasParaProximo !== null && $diasParaProximo > 0 && $diasParaProximo <= 7) {
+        $estado = 'PROXIMO_7_DIAS';
+    } elseif ($diasParaProximo !== null && $diasParaProximo < 0) {
+        $estado = 'VENCIDO_ABANDONO';
+    } else {
+        $estado = 'AL_DIA';
+    }
+
+    $estabReferencia = '';
+    if ($ultimaConMetodo !== null) {
+        $estabReferencia = trim((string)($ultimaConMetodo['COD_ESTAB'] ?? ''));
+    } elseif ($ultimaAtencion !== null) {
+        $estabReferencia = trim((string)($ultimaAtencion['COD_ESTAB'] ?? ''));
+    }
+    $estabCanonico = $estabReferencia !== '' ? hospital_codigo_canonico($estabReferencia) : '';
+    $estabActualCanonico = hospital_codigo_canonico($codEstabActual);
+    $esMismoEstablecimiento = $estabCanonico !== '' && $estabCanonico === $estabActualCanonico;
+    $nombreOrigen = $estabReferencia !== '' ? resolver_nombre_establecimiento($pdo, $estabReferencia) : '';
+    $nombreActual = hospital_nombre_establecimiento($codEstabActual);
+    $nombreMetodo = $codigo !== '' ? (string)($catalogo[$codigo]['nombre_metodo'] ?? $codigo) : '';
+    $fechaProximoMostrar = fecha_para_mostrar($fechaProximoIso);
+    $fechaAplicacionMostrar = fecha_para_mostrar($fechaAplicacionIso);
+    $diasVencidos = $diasParaProximo !== null && $diasParaProximo < 0 ? abs($diasParaProximo) : 0;
+
+    if ($codigo === '') {
+        $recomendacion = $estabReferencia !== ''
+            ? 'Registra atenciones de Planificación Familiar en ' . $nombreOrigen . ', pero no se identifica un método anticonceptivo vigente. Realice consejería y registre la captación en ' . $nombreActual . '.'
+            : 'No registra método anticonceptivo en la Red Huaral-Chancay. Realice consejería en ' . $nombreActual . ' y registre la captación.';
+    } elseif ($estado === 'TOCA_HOY') {
+        $recomendacion = 'Le corresponde HOY (' . $fechaProximoMostrar . ') el método ' . $nombreMetodo . ' (código ' . $codigo . '). Confirme el control/administración y actualice sus datos de contacto.';
+        if (!$esMismoEstablecimiento && $nombreOrigen !== '') {
+            $recomendacion .= ' Última aplicación registrada en ' . $nombreOrigen . '; coordine la continuidad en ' . $nombreActual . '.';
+        }
+    } elseif ($estado === 'VENCIDO_ABANDONO') {
+        $recomendacion = 'Paciente VENCIDA: el método ' . $nombreMetodo . ' correspondía desde el ' . $fechaProximoMostrar . ' (hace ' . $diasVencidos . ' días). Priorice el contacto telefónico y el seguimiento domiciliario para evitar abandono.';
+        if (!$esMismoEstablecimiento && $nombreOrigen !== '') {
+            $recomendacion .= ' Última aplicación en ' . $nombreOrigen . '.';
+        }
+    } elseif ($estado === 'PROXIMO_7_DIAS') {
+        $recomendacion = 'Próximo método ' . $nombreMetodo . ' en ' . (int)$diasParaProximo . ' día(s), para el ' . $fechaProximoMostrar . '. Programe la cita y confirme la disponibilidad del insumo.';
+    } else {
+        $recomendacion = 'Paciente al día con ' . $nombreMetodo . '. Próximo método el ' . $fechaProximoMostrar . ' (faltan ' . (int)$diasParaProximo . ' días).';
+        if (!$esMismoEstablecimiento && $nombreOrigen !== '') {
+            $recomendacion .= ' Seguimiento registrado en ' . $nombreOrigen . '.';
+        }
+    }
+
+    return [
+        'tieneMetodoRegistrado' => $codigo !== '',
+        'codigoMetodo' => $codigo,
+        'nombreMetodo' => $nombreMetodo,
+        'dosis' => $ultimaConMetodo !== null ? (string)($ultimaConMetodo['id_dosis'] ?? '') : '',
+        'fechaUltimaAplicacion' => $fechaAplicacionMostrar,
+        'fechaUltimaAplicacionIso' => $fechaAplicacionIso,
+        'diasCiclo' => $diasCiclo,
+        'fechaProximoMetodo' => $fechaProximoMostrar,
+        'fechaProximoMetodoIso' => $fechaProximoIso,
+        'diasParaProximo' => $diasParaProximo,
+        'estadoProgramacion' => $estado,
+        'establecimientoUltimoMetodo' => [
+            'codigo' => $estabCanonico !== '' ? $estabCanonico : $estabReferencia,
+            'nombre' => $nombreOrigen,
+            'esMismoEstablecimiento' => $esMismoEstablecimiento,
+        ],
+        'fechaUltimaAtencionPf' => $ultimaAtencion !== null ? fecha_para_mostrar((string)($ultimaAtencion['_fecha_aplicacion'] ?? '')) : '',
+        'recomendacionClinica' => $recomendacion,
+    ];
+}
+
+/**
  * Determina si una fila HIS corresponde realmente a la UPS de Planificación
  * Familiar. Se prioriza COD_SERVSA 302304 (o equivalentes) y, solo cuando el
  * campo está vacío, se aceptan los DX históricos de métodos anticonceptivos.
@@ -775,7 +1061,7 @@ function atencion_ups_es_planificacion_familiar(array $row, array $codigosUps): 
         return in_array($codServsa, $codigosUps, true);
     }
     $dx = trim((string)($row['DX'] ?? ''));
-    return in_array($dx, ['90782', 'Z304', 'Z301', 'Z300'], true);
+    return in_array($dx, ['90782', '9920801', 'Z304', '9920802', '99208', '9940204', 'Z301', '58300', '11981', 'Z300'], true);
 }
 
 /**
@@ -885,7 +1171,9 @@ function consultar_ups_planificacion_familiar(PDO $pdo, string $dni, string $cod
         $codigosUps = ['302304'];
     }
 
-    $dxCodes = ['99208', '90782', 'Z304', 'Z301', 'Z300'];
+    // Se incluyen todos los códigos del catálogo clínico (DIU, implante,
+    // consejería y administraciones) además de los históricos de la app.
+    $dxCodes = ['99208', '90782', '9920801', 'Z304', '9920802', '9940204', 'Z301', '58300', '11981', 'Z300'];
     $placeholdersEstab = implode(',', array_fill(0, count($codigosEstab), '?'));
     $placeholdersUps = implode(',', array_fill(0, count($codigosUps), '?'));
     $placeholdersDx = implode(',', array_fill(0, count($dxCodes), '?'));
@@ -1087,13 +1375,59 @@ if ($action === 'lookup_dni') {
     }
 
     $hasActiveMethod = false;
-    $ciclos = ['90782' => 30, 'Z304' => 90, 'Z301' => 1095, '99208' => 30, 'Z300' => 0];
+    $catalogoMetodos = catalogo_metodos_planificacion($pdo);
     foreach ($hisDetails as $dt) {
-        $dias = $ciclos[(string)($dt['DX'] ?? '')] ?? 0;
+        $codigoDx = (string)($dt['DX'] ?? '');
+        $dias = isset($catalogoMetodos[$codigoDx]) ? (int)$catalogoMetodos[$codigoDx]['dias_ciclo'] : 0;
         if ($dias > 0) {
             $hasActiveMethod = true;
             break;
         }
+    }
+
+    // 7.5 Programación clínica en toda la red: última atención con método y
+    // cálculo del próximo vencimiento. Es independiente de la última fila
+    // general de his_dl y también contempla atenciones en otras IPRESS.
+    $programacionPaciente = programacion_planificacion_paciente($pdo, $dni, $codEstab, $catalogoMetodos, $codigosUps);
+    if ($programacionPaciente['tieneMetodoRegistrado']) {
+        $hasActiveMethod = true;
+    }
+
+    $estabOrigenCodigo = (string)($programacionPaciente['establecimientoUltimoMetodo']['codigo'] ?? '');
+    if ($estabOrigenCodigo === '' && $hisRecord) {
+        $estabOrigenCodigo = (string)($hisRecord['COD_ESTAB'] ?? '');
+    }
+    $esMismoEstablecimiento = $estabOrigenCodigo !== ''
+        && hospital_codigo_canonico($estabOrigenCodigo) === $codEstab;
+
+    $tieneAtencionPfRed = $programacionPaciente['tieneMetodoRegistrado']
+        || (string)($programacionPaciente['fechaUltimaAtencionPf'] ?? '') !== '';
+    if (!$hisRecord && !$tieneAtencionPfRed) {
+        $casoFlujo = 'NUEVA';
+    } elseif ($esMismoEstablecimiento && ($tieneUps || $programacionPaciente['tieneMetodoRegistrado'])) {
+        $casoFlujo = 'MISMO_ESTABLECIMIENTO';
+    } elseif (!$esMismoEstablecimiento && ($hisRecord || $tieneAtencionPfRed)) {
+        $casoFlujo = 'OTRO_ESTABLECIMIENTO';
+    } else {
+        $casoFlujo = 'MISMO_SIN_UPS';
+    }
+
+    $mensajeCambioEstablecimiento = '';
+    if ($casoFlujo === 'OTRO_ESTABLECIMIENTO') {
+        $nombreOrigen = (string)($programacionPaciente['establecimientoUltimoMetodo']['nombre'] ?? '');
+        if ($nombreOrigen === '' && $estabOrigenCodigo !== '') {
+            $nombreOrigen = resolver_nombre_establecimiento($pdo, $estabOrigenCodigo);
+        }
+        $fechaOrigen = (string)($programacionPaciente['fechaUltimaAtencionPf'] ?? '');
+        if ($fechaOrigen === '' && $hisRecord) {
+            $fechaOrigen = fecha_dd_mm_yyyy($hisRecord);
+        }
+        $mensajeCambioEstablecimiento = sprintf(
+            '🔄 Paciente atendida previamente en %s (Última atención: %s). Se han autorrellenado sus datos de identidad. Verifique y actualice su Distrito, Dirección, Sector y Celular para registrarla en %s.',
+            $nombreOrigen !== '' ? $nombreOrigen : 'otro establecimiento de la Red',
+            $fechaOrigen !== '' ? $fechaOrigen : 'sin fecha registrada',
+            $nombreEstab
+        );
     }
 
     // Caso B: datos mínimos para que el formulario se abra precargado desde HIS.
@@ -1111,7 +1445,7 @@ if ($action === 'lookup_dni') {
     HospitalHuaralDB::registrarAuditoria(
         $session['dni'],
         'VALIDACION_DNI_HIS',
-        'Consulta DNI ' . $dni . ' en ' . $nombreEstab . '. 99208: ' . ($tiene99208 ? 'SÍ' : 'NO') . '. UPS PF previa: ' . ($tieneUps ? 'SÍ (Caso A)' : 'NO (Caso B)') . '.',
+        'Consulta DNI ' . $dni . ' en ' . $nombreEstab . '. 99208: ' . ($tiene99208 ? 'SÍ' : 'NO') . '. UPS PF previa: ' . ($tieneUps ? 'SÍ' : 'NO') . '. Caso: ' . $casoFlujo . '. Programación: ' . $programacionPaciente['estadoProgramacion'] . '.',
         $codEstab,
         $session['platform']
     );
@@ -1133,6 +1467,10 @@ if ($action === 'lookup_dni') {
         'hisDetails' => $hisDetails,
         'existingCaptacion' => $existing,
         'precargaDesdeHis' => $precargaDesdeHis,
+        'programacionPaciente' => $programacionPaciente,
+        'casoFlujo' => $casoFlujo,
+        'esMismoEstablecimiento' => $esMismoEstablecimiento,
+        'mensajeCambioEstablecimiento' => $mensajeCambioEstablecimiento,
         'establecimiento' => [
             'codigo' => $codEstab,
             'nombre' => $nombreEstab,
@@ -1156,6 +1494,395 @@ if ($action === 'lookup_dni') {
             'caso' => $tieneUps ? 'A' : 'B',
             'mensaje' => $mensajeUps,
             'atenciones' => $upsAtenciones,
+        ],
+    ]);
+}
+
+// ---------------------------------------------------------------------------
+// 7-B. REPORTE DE PROGRAMACIÓN POR FECHA
+// ---------------------------------------------------------------------------
+if ($action === 'reporte_programacion') {
+    $session = require_session();
+
+    // Anti-scraping: el reporte contiene PII descifrada. Máximo 30 consultas/min.
+    $bucket = 'reporte_prog:' . hash('sha256', (string)($session['token'] ?? ($session['dni'] . '|' . HospitalHuaralDB::clientIp())));
+    $limit = HospitalHuaralDB::rateLimitStatus($bucket, 30, 60);
+    if (!$limit['allowed']) {
+        json_error('Límite de 30 reportes por minuto alcanzado. Espere y vuelva a intentar.', 429, [
+            'retryAfter' => $limit['retryAfter'],
+        ]);
+    }
+    HospitalHuaralDB::rateLimitHit($bucket, 60);
+
+    $catalogo = catalogo_metodos_planificacion($pdo);
+
+    // 7-B.1 Validación estricta de parámetros.
+    $fechaObjetivo = trim((string)($_GET['fecha_objetivo'] ?? ''));
+    if ($fechaObjetivo === '') {
+        $fechaObjetivo = date('Y-m-d');
+    }
+    $fechaBase = DateTimeImmutable::createFromFormat('!Y-m-d', $fechaObjetivo);
+    if (!$fechaBase instanceof DateTimeImmutable || $fechaBase->format('Y-m-d') !== $fechaObjetivo) {
+        json_error('La fecha_objetivo debe tener el formato YYYY-MM-DD y ser una fecha real.', 400);
+    }
+
+    $rangoModo = strtolower(trim((string)($_GET['rango_modo'] ?? 'exacto')));
+    if (!in_array($rangoModo, ['exacto', 'ventana_7d', 'vencidas', 'todos'], true)) {
+        $rangoModo = 'exacto';
+    }
+
+    $alcance = strtolower(trim((string)($_GET['alcance'] ?? 'establecimiento')));
+    if (!in_array($alcance, ['establecimiento', 'red'], true)) {
+        $alcance = 'establecimiento';
+    }
+
+    $codigoMetodoRaw = strtoupper(trim((string)($_GET['codigo_metodo'] ?? 'TODOS')));
+    $codigosFiltro = [];
+    if ($codigoMetodoRaw !== '' && $codigoMetodoRaw !== 'TODOS') {
+        foreach (explode(',', $codigoMetodoRaw) as $codigo) {
+            $codigo = trim($codigo);
+            if ($codigo === '') {
+                continue;
+            }
+            if (!isset($catalogo[$codigo])) {
+                json_error('El código de método solicitado no existe en el catálogo clínico.', 400, [
+                    'code' => 'METODO_NO_CATALOGADO',
+                    'codigo' => $codigo,
+                ]);
+            }
+            $codigosFiltro[] = $codigo;
+        }
+        $codigosFiltro = array_values(array_unique($codigosFiltro));
+    }
+    $codigosConsulta = $codigosFiltro ?: codigos_metodos_activos($catalogo);
+
+    // 7-B.2 Ventanas de fecha de aplicación por método. Al calcular
+    // fecha_proximo = fecha_aplicacion + dias_ciclo, la consulta se acota a los
+    // días exactos en que cada método pudo aplicarse para vencer en el rango.
+    $lookbackVencidas = 1825; // 5 años de abandonos recuperables
+    $lookbackTodos = 365;     // "vencidas recientes" al combinar todos los modos
+    $ventanas = [];
+    foreach ($codigosConsulta as $codigo) {
+        $dias = max(1, (int)($catalogo[$codigo]['dias_ciclo'] ?? 30));
+        if ($rangoModo === 'exacto') {
+            $desde = $fechaBase->modify('-' . $dias . ' days')->format('Y-m-d');
+            $hasta = $desde;
+        } elseif ($rangoModo === 'ventana_7d') {
+            $desde = $fechaBase->modify('-' . $dias . ' days')->format('Y-m-d');
+            $hasta = $fechaBase->modify('+' . (7 - $dias) . ' days')->format('Y-m-d');
+        } elseif ($rangoModo === 'vencidas') {
+            $desde = $fechaBase->modify('-' . ($dias + $lookbackVencidas) . ' days')->format('Y-m-d');
+            $hasta = $fechaBase->modify('-' . ($dias + 1) . ' days')->format('Y-m-d');
+        } else {
+            $desde = $fechaBase->modify('-' . ($dias + $lookbackTodos) . ' days')->format('Y-m-d');
+            $hasta = $fechaBase->modify('+' . (7 - $dias) . ' days')->format('Y-m-d');
+        }
+        $ventanas[$codigo] = ['desde' => $desde, 'hasta' => $hasta];
+    }
+
+    // 7-B.3 Expresión SQL única para la fecha real de aplicación. Se usa tanto
+    // en la selección como en el filtro SARGable de las ventanas.
+    $exprAplicacion = static function (string $aliasH, string $aliasDt): string {
+        return "COALESCE(
+            CASE
+              WHEN {$aliasH}.DIA BETWEEN 1 AND 31
+               AND {$aliasH}.MES BETWEEN 1 AND 12
+               AND {$aliasH}.ANO BETWEEN 1900 AND 2100
+              THEN STR_TO_DATE(
+                     CONCAT({$aliasH}.ANO, '-', LPAD({$aliasH}.MES, 2, '0'), '-', LPAD({$aliasH}.DIA, 2, '0')),
+                     '%Y-%m-%d'
+                   )
+            END,
+            DATE({$aliasH}.fecha_reg),
+            DATE({$aliasDt}.fecha_reg)
+        )";
+    };
+    $exprH = $exprAplicacion('h', 'dt');
+    $expr0 = $exprAplicacion('h0', 'dt0');
+
+    $placeholdersCodigos = implode(',', array_fill(0, count($codigosConsulta), '?'));
+    $paramsCodigos = array_map('strval', $codigosConsulta);
+
+    $condicionEstab = '';
+    $paramsEstab = [];
+    if ($alcance === 'establecimiento') {
+        $variantes = hospital_codigos_busqueda_establecimiento($session['cod_estab']);
+        if (!$variantes) {
+            $variantes = [trim((string)$session['cod_estab'])];
+        }
+        $placeholdersEstab = implode(',', array_fill(0, count($variantes), '?'));
+        $condicionEstab = " AND h0.COD_ESTAB IN ({$placeholdersEstab}) ";
+        $paramsEstab = $variantes;
+    }
+
+    $condicionesVentana = [];
+    $paramsVentana = [];
+    foreach ($ventanas as $codigo => $rango) {
+        $condicionesVentana[] = "(dt0.DX = ? AND {$expr0} BETWEEN ? AND ?)";
+        $paramsVentana[] = $codigo;
+        $paramsVentana[] = $rango['desde'];
+        $paramsVentana[] = $rango['hasta'];
+    }
+    $condicionVentana = '(' . implode(' OR ', $condicionesVentana) . ')';
+
+    // El primer subquery identifica solo las pacientes candidatas dentro de la
+    // ventana (máximo 800). El segundo recupera su última atención con método
+    // usando el índice de DNI, evitando escanear millones de filas del HIS.
+    $limiteCandidatos = 800;
+    $sql = "
+        SELECT
+            h.ID AS id_his,
+            h.DNI AS dni,
+            h.COD_ESTAB AS cod_estab,
+            TRIM(h.Apellido_p) AS apellido_paterno,
+            TRIM(h.Apellido_m) AS apellido_materno,
+            TRIM(COALESCE(NULLIF(h.Dnombres, ''), h.Pnombre)) AS nombres,
+            h.EDAD AS edad,
+            h.HCLFAM AS historia_clinica,
+            h.FICHAFAM AS ficha_familiar,
+            h.CODPSAL AS obstetra_dni,
+            h.DIA, h.MES, h.ANO, h.fecha_reg,
+            dt.DX AS codigo_metodo,
+            dt.id_dosis AS dosis,
+            dt.fecha_reg AS fecha_dx,
+            {$exprH} AS fecha_aplicacion
+        FROM his_dl h
+        INNER JOIN his_dl_dt dt ON dt.ID = h.ID
+        INNER JOIN (
+            SELECT h0.DNI AS dni
+            FROM his_dl h0
+            INNER JOIN his_dl_dt dt0 ON dt0.ID = h0.ID
+            WHERE dt0.DX IN ({$placeholdersCodigos})
+              {$condicionEstab}
+              AND {$condicionVentana}
+            GROUP BY h0.DNI
+            ORDER BY MAX(h0.ANO) DESC, MAX(h0.MES) DESC, MAX(h0.DIA) DESC
+            LIMIT {$limiteCandidatos}
+        ) cand ON cand.dni = h.DNI
+        WHERE dt.DX IN ({$placeholdersCodigos})
+        ORDER BY h.DNI ASC, h.ANO DESC, h.MES DESC, h.DIA DESC, h.ID DESC
+        LIMIT 12000
+    ";
+
+    $params = array_merge($paramsCodigos, $paramsEstab, $paramsVentana, $paramsCodigos);
+    $filasBase = [];
+    try {
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($params);
+        $filasBase = $stmt->fetchAll();
+    } catch (Throwable $e) {
+        error_log('[PlanificaHIS] reporte_programacion query failure: ' . $e->getMessage());
+        json_error('No se pudo calcular la programación. Verifique los índices clínicos del HIS e intente nuevamente.', 503, [
+            'code' => 'REPORTE_QUERY_FAILED',
+        ]);
+    }
+
+    // 7-B.4 Se elige la última atención con método por DNI. Si una misma
+    // atención tiene varios códigos, gana el ciclo más largo (método real).
+    $seleccionados = [];
+    foreach ($filasBase as $row) {
+        $dniKey = trim((string)($row['dni'] ?? ''));
+        $codigo = trim((string)($row['codigo_metodo'] ?? ''));
+        if ($dniKey === '' || !isset($catalogo[$codigo])) {
+            continue;
+        }
+        $diasCiclo = (int)($catalogo[$codigo]['dias_ciclo'] ?? 0);
+        if ($diasCiclo <= 0) {
+            continue;
+        }
+        $fechaAplicacion = trim((string)($row['fecha_aplicacion'] ?? ''));
+        if ($fechaAplicacion === '' || str_starts_with($fechaAplicacion, '0000-00-00')) {
+            $fechaAplicacion = fecha_aplicacion_his($row);
+        }
+        if ($fechaAplicacion === '') {
+            continue;
+        }
+        try {
+            $fechaProximo = (new DateTimeImmutable($fechaAplicacion))->modify('+' . $diasCiclo . ' days');
+        } catch (Throwable $e) {
+            continue;
+        }
+        $score = $fechaAplicacion
+            . '|' . str_pad((string)$diasCiclo, 4, '0', STR_PAD_LEFT)
+            . '|' . str_pad((string)(int)($row['id_his'] ?? 0), 12, '0', STR_PAD_LEFT);
+        if (isset($seleccionados[$dniKey]) && strcmp($score, $seleccionados[$dniKey]['_score']) <= 0) {
+            continue;
+        }
+        $seleccionados[$dniKey] = [
+            '_score' => $score,
+            'row' => $row,
+            'codigo' => $codigo,
+            'dias_ciclo' => $diasCiclo,
+            'fecha_aplicacion' => $fechaAplicacion,
+            'fecha_proximo' => $fechaProximo->format('Y-m-d'),
+        ];
+    }
+
+    // 7-B.5 Filtro clínico final y cálculo de días restantes respecto de la
+    // fecha objetivo (positivo = falta; 0 = hoy; negativo = vencida).
+    $dnis = [];
+    $candidatos = [];
+    foreach ($seleccionados as $dniKey => $sel) {
+        $diasRestantes = (int)$fechaBase->diff(new DateTimeImmutable($sel['fecha_proximo']))->format('%r%a');
+        $aplica = match ($rangoModo) {
+            'exacto' => $diasRestantes === 0,
+            'ventana_7d' => $diasRestantes >= 0 && $diasRestantes <= 7,
+            'vencidas' => $diasRestantes < 0 && $diasRestantes >= -$lookbackVencidas,
+            'todos' => $diasRestantes <= 7 && $diasRestantes >= -$lookbackTodos,
+            default => false,
+        };
+        if (!$aplica) {
+            continue;
+        }
+        if ($diasRestantes === 0) {
+            $estado = 'TOCA_EN_FECHA';
+        } elseif ($diasRestantes > 0 && $diasRestantes <= 7) {
+            $estado = 'PROXIMO_7_DIAS';
+        } elseif ($diasRestantes < 0) {
+            $estado = 'VENCIDO_ABANDONO';
+        } else {
+            $estado = 'AL_DIA';
+        }
+        $sel['dias_restantes'] = $diasRestantes;
+        $sel['estado'] = $estado;
+        $candidatos[$dniKey] = $sel;
+        $dnis[] = $dniKey;
+    }
+
+    // 7-B.6 Cruce por DNI con pacientes_sin_metodo para adjuntar contacto y
+    // domicilio descifrados (AES-256-GCM) solo dentro de la sesión 2FA.
+    $captaciones = [];
+    if ($dnis) {
+        try {
+            $placeholdersDnis = implode(',', array_fill(0, count($dnis), '?'));
+            $stmtCap = $pdo->prepare("
+                SELECT dni, apellido_paterno, apellido_materno, nombres, edad,
+                       celular, correo, distrito, direccion, sector, estado_paciente, cod_estab
+                FROM pacientes_sin_metodo
+                WHERE dni IN ({$placeholdersDnis})
+            ");
+            $stmtCap->execute($dnis);
+            foreach ($stmtCap->fetchAll() as $cap) {
+                $captaciones[trim((string)$cap['dni'])] = $cap;
+            }
+        } catch (Throwable $e) {
+            $captaciones = [];
+        }
+    }
+
+    $filas = [];
+    foreach ($candidatos as $dniKey => $sel) {
+        $row = $sel['row'];
+        $cap = $captaciones[$dniKey] ?? [];
+        $codEstab = trim((string)($row['cod_estab'] ?? ($cap['cod_estab'] ?? '')));
+        $estInfo = hospital_establecimiento($codEstab);
+
+        $apellidosHis = trim(
+            trim((string)($row['apellido_paterno'] ?? '')) . ' ' .
+            trim((string)($row['apellido_materno'] ?? ''))
+        );
+        $nombresHis = trim((string)($row['nombres'] ?? ''));
+        $nombreHis = trim($apellidosHis . ($apellidosHis !== '' && $nombresHis !== '' ? ', ' : '') . $nombresHis);
+        $apellidosCap = trim(
+            trim((string)($cap['apellido_paterno'] ?? '')) . ' ' .
+            trim((string)($cap['apellido_materno'] ?? ''))
+        );
+        $nombresCap = trim((string)($cap['nombres'] ?? ''));
+        $nombreCap = trim($apellidosCap . ($apellidosCap !== '' && $nombresCap !== '' ? ', ' : '') . $nombresCap);
+        $pacienteNombre = strtoupper($nombreHis !== '' ? $nombreHis : $nombreCap);
+
+        $edad = (int)($row['edad'] ?? 0);
+        if ($edad <= 0) {
+            $edad = (int)($cap['edad'] ?? 0);
+        }
+
+        $distrito = trim((string)($cap['distrito'] ?? ''));
+        if ($distrito === '') {
+            $distrito = (string)($estInfo['DISTRITO'] ?? '');
+        }
+
+        $filas[] = [
+            'dni' => $dniKey,
+            'paciente_nombre' => $pacienteNombre,
+            'edad' => $edad,
+            'historia_clinica' => (string)($row['historia_clinica'] ?? ''),
+            'ficha_familiar' => (string)($row['ficha_familiar'] ?? ''),
+            'cod_estab' => $codEstab,
+            'establecimiento' => resolver_nombre_establecimiento($pdo, $codEstab),
+            'codigo_metodo' => $sel['codigo'],
+            'nombre_metodo' => (string)($catalogo[$sel['codigo']]['nombre_metodo'] ?? $sel['codigo']),
+            'dosis' => (string)($row['dosis'] ?? ''),
+            'fecha_aplicacion' => fecha_para_mostrar($sel['fecha_aplicacion']),
+            'fecha_aplicacion_iso' => $sel['fecha_aplicacion'],
+            'dias_ciclo' => (int)$sel['dias_ciclo'],
+            'fecha_proximo_metodo' => fecha_para_mostrar($sel['fecha_proximo']),
+            'fecha_proximo_metodo_iso' => $sel['fecha_proximo'],
+            'dias_restantes' => (int)$sel['dias_restantes'],
+            'estado_programacion' => $sel['estado'],
+            'celular' => HospitalHuaralDB::decryptPII((string)($cap['celular'] ?? '')),
+            'direccion' => HospitalHuaralDB::decryptPII((string)($cap['direccion'] ?? '')),
+            'distrito' => $distrito,
+            'sector' => (string)($cap['sector'] ?? ''),
+            'obstetra_dni' => (string)($row['obstetra_dni'] ?? ''),
+        ];
+    }
+
+    usort($filas, static function (array $a, array $b): int {
+        $cmp = $a['dias_restantes'] <=> $b['dias_restantes'];
+        return $cmp !== 0 ? $cmp : strcmp($a['paciente_nombre'], $b['paciente_nombre']);
+    });
+
+    $resumen = [
+        'total' => count($filas),
+        'toca_en_fecha' => 0,
+        'proximo_7_dias' => 0,
+        'vencido_abandono' => 0,
+        'al_dia' => 0,
+    ];
+    foreach ($filas as $fila) {
+        $clave = match ($fila['estado_programacion']) {
+            'TOCA_EN_FECHA' => 'toca_en_fecha',
+            'PROXIMO_7_DIAS' => 'proximo_7_dias',
+            'VENCIDO_ABANDONO' => 'vencido_abandono',
+            default => 'al_dia',
+        };
+        $resumen[$clave]++;
+    }
+
+    $establecimientoActual = [
+        'codigo' => (string)$session['cod_estab'],
+        'nombre' => (string)$session['estab_nombre'],
+        'distrito' => '',
+    ];
+    $estInfoActual = hospital_establecimiento((string)$session['cod_estab']);
+    $establecimientoActual['distrito'] = (string)($estInfoActual['DISTRITO'] ?? '');
+
+    HospitalHuaralDB::registrarAuditoria(
+        $session['dni'],
+        'REPORTE_PROGRAMACION',
+        'Reporte de programación PF fecha ' . $fechaObjetivo . ' modo ' . $rangoModo . ' alcance ' . $alcance . ': ' . count($filas) . ' pacientes.',
+        (string)$session['cod_estab'],
+        (string)$session['platform']
+    );
+
+    json_out([
+        'success' => true,
+        'fecha_objetivo' => $fechaObjetivo,
+        'fecha_objetivo_ddmmyyyy' => $fechaBase->format('d/m/Y'),
+        'rango_modo' => $rangoModo,
+        'alcance' => $alcance,
+        'codigo_metodo' => $codigoMetodoRaw !== '' ? $codigoMetodoRaw : 'TODOS',
+        'establecimiento' => $establecimientoActual,
+        'resumen' => $resumen,
+        'catalogo' => array_values($catalogo),
+        'filas' => $filas,
+        'metadata' => [
+            'generado_en' => date('c'),
+            'limite_candidatos' => $limiteCandidatos,
+            'lookback_vencidas_dias' => $lookbackVencidas,
+            'lookback_todos_dias' => $lookbackTodos,
+            'ventanas_aplicacion' => $ventanas,
+            'fuente_catalogo' => 'app_catalogo_metodos',
         ],
     ]);
 }

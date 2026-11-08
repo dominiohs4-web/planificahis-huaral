@@ -65,7 +65,7 @@ final class HospitalHuaralDB
         return $value;
     }
 
-    /** Clave maestra compartida con server.ts (ENCRYPTION_SECRET / HUARAL_AES_SECRET). */
+    /** Clave maestra para el cifrado AES-256-GCM (HUARAL_AES_SECRET / ENCRYPTION_SECRET). */
     public static function masterSecret(): string
     {
         return self::configuredSecret(
@@ -136,7 +136,7 @@ final class HospitalHuaralDB
             // (semáforo en /tmp) salvo que DB_AUTO_MIGRATE=1.
             $autoMigrate = getenv('DB_AUTO_MIGRATE') === '1';
             $schemaLock = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR)
-                . DIRECTORY_SEPARATOR . 'planificahis_schema_v2.lock';
+                . DIRECTORY_SEPARATOR . 'planificahis_schema_v3.lock';
             if ($autoMigrate || !is_file($schemaLock)) {
                 try {
                     self::bootstrapSchema(self::$pdo);
@@ -180,6 +180,34 @@ final class HospitalHuaralDB
               INDEX `idx_obstetra`(`codpsal_obstetra` ASC) USING BTREE,
               INDEX `idx_estab`(`cod_estab` ASC) USING BTREE
             ) ENGINE = InnoDB CHARACTER SET = utf8 COLLATE = utf8_general_ci ROW_FORMAT = Dynamic;
+        ");
+
+        // Catálogo propio de métodos anticonceptivos y ciclos clínicos.
+        // Permite calcular la fecha del próximo método sin tocar las tablas del HIS.
+        $pdo->exec("
+            CREATE TABLE IF NOT EXISTS `app_catalogo_metodos` (
+              `codigo_dx` varchar(15) NOT NULL,
+              `nombre_metodo` varchar(120) NOT NULL,
+              `dias_ciclo` int NOT NULL DEFAULT 30,
+              `requiere_cita` tinyint(1) DEFAULT 1,
+              `activo` tinyint(1) DEFAULT 1,
+              PRIMARY KEY (`codigo_dx`)
+            ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+        ");
+        $pdo->exec("
+            INSERT IGNORE INTO `app_catalogo_metodos`
+                (`codigo_dx`, `nombre_metodo`, `dias_ciclo`, `requiere_cita`, `activo`)
+            VALUES
+                ('90782',   'Inyectable Hormonal Mensual (Ampolla 1 mes)', 30, 1, 1),
+                ('9920801', 'Administración de Inyectable Mensual', 30, 1, 1),
+                ('Z304',    'Inyectable Hormonal Trimestral (Ampolla 3 meses)', 90, 1, 1),
+                ('9920802', 'Administración de Inyectable Trimestral', 90, 1, 1),
+                ('99208',   'Atención / Procedimiento en Planificación Familiar (99208)', 30, 1, 1),
+                ('9940204', 'Orientación y Consejería en Planificación Familiar', 30, 1, 1),
+                ('Z301',    'Inserción de DIU / T de Cobre (Control)', 365, 1, 1),
+                ('58300',   'Inserción de DIU', 365, 1, 1),
+                ('11981',   'Implante Subdérmico (Control)', 1095, 1, 1),
+                ('Z300',    'Consejería General sin Método Activo', 15, 1, 1)
         ");
 
         // Tabla de auditoría con cadena inmutable SHA-256.

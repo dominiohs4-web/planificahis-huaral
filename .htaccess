@@ -1,7 +1,7 @@
 # PlanificaHIS — Apache (XAMPP / Render)
-# Sirve index.php antes que el index.html del frontend React/Vite.
+# Sirve index.php como única entrada de la aplicación PHP.
 Options -Indexes
-DirectoryIndex index.php index.html
+DirectoryIndex index.php
 AddDefaultCharset UTF-8
 
 # Tipos MIME necesarios para PWA (Android/iPhone).

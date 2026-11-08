@@ -1,6 +1,0 @@
-{
-  "name": "PlanificaSalud HIS — Captación y Seguimiento Obstétrico",
-  "description": "Aplicación móvil y web (Android, iOS y Escritorio) de Planificación Familiar integrada con la base de datos hospitalaria HIS y tabla pacientes_sin_metodo, protegida con cifrado AES-256-GCM, prevención SQLi/XSS, autenticación de dos factores (2FA) y auditoría criptográfica.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}
