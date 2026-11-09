@@ -109,7 +109,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
 
     // Logo oficial del Hospital San Juan Bautista Huaral (public/logo.png).
     // Se usa SIEMPRE la imagen original, sin SVG inventados ni filtros.
-    const HOSPITAL_LOGO_HTML = '<img src="' + HOSPITAL_LOGO_DATA_URI + '" alt="Hospital San Juan Bautista Huaral" class="w-full h-full object-contain" />';
+    const HOSPITAL_LOGO_HTML = '<img src="' + HOSPITAL_LOGO_DATA_URI + '" alt="Hospital San Juan Bautista Huaral" style="width:100%;height:100%;object-fit:contain;" />';
 
 
     function localIsoDate(offsetDays) {
