@@ -73,6 +73,7 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
     const QUEUE_KEY = 'planificahis.php.offline.queue.v1';
     const DEVICE_KEY = 'planificahis.php.offline.device-key.v1';
     const IOS_DISMISS_KEY = 'planificahis.php.ios-install-dismissed.v1';
+    const LOGO_REPORTES_KEY = 'planificahis.php.logo.reportes.v1';
     const ESTADOS = {
       INSATISFECHA_SIN_METODO: 'Sin Método (Insatisfecha)',
       SEGUIMIENTO_DOMICILIARIO: 'En Seguimiento',
@@ -104,21 +105,52 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
         <text x="120" y="152" text-anchor="middle" fill="#0F172A" font-family="Georgia, serif" font-weight="bold" font-size="48">SJB</text>
       </svg>`;
 
-    // Escudo institucional referencial (Gobierno Regional de Lima / Perú) para
-    // el membrete oficial de los 4 reportes. Se usa en pantalla, PDF y Excel.
-    const ESCUDO_SVG = `
-      <svg viewBox="0 0 100 122" fill="none" xmlns="http://www.w3.org/2000/svg" class="w-full h-full">
-        <path d="M50 3 L94 17 V60 C94 88 74 107 50 118 C26 107 6 88 6 60 V17 Z" fill="#FFFFFF" stroke="#9F1239" stroke-width="4" />
-        <path d="M50 3 L94 17 V60 C94 88 74 107 50 118 C26 107 6 88 6 60 V17 Z" fill="none" stroke="#F59E0B" stroke-width="1.5" />
-        <path d="M12 23 L50 11 L88 23 V44 H12 Z" fill="#B91C1C" />
-        <path d="M12 44 H50 V66 H12 Z" fill="#FFFFFF" />
-        <path d="M50 44 H88 V66 H50 Z" fill="#B91C1C" />
-        <path d="M12 66 H50 V82 H12 Z" fill="#B91C1C" />
-        <path d="M50 66 H88 V82 H50 Z" fill="#FFFFFF" />
-        <circle cx="50" cy="47" r="7" fill="#F59E0B" stroke="#92400E" stroke-width="1.5" />
-        <path d="M50 40 L53 44 L58 45 L54 49 L55 54 L50 51 L45 54 L46 49 L42 45 L47 44 Z" fill="#92400E" />
-        <text x="50" y="101" text-anchor="middle" fill="#0F172A" font-family="Arial, sans-serif" font-weight="900" font-size="15">PERU</text>
+    // Logo oficial DIRESA Lima: Chakana/ cruz andina escalonada con bordes
+    // dorados y bloques multicolor. Se usa en el lado izquierdo de los 4
+    // reportes (pantalla, PDF y Excel). El logo UEI/Hospital permanece a la
+    // derecha. También se conserva public/logo-diresa-lima.jpg como respaldo
+    // institucional para personalizaciones del Administrador.
+    const DIRESA_SVG = `
+      <svg viewBox="0 0 240 280" fill="none" xmlns="http://www.w3.org/2000/svg" class="w-full h-full">
+        <rect x="2" y="2" width="236" height="276" rx="8" fill="#FFFFFF" stroke="#B8860B" stroke-width="4" />
+        <rect x="8" y="8" width="224" height="264" rx="5" fill="none" stroke="#F5D061" stroke-width="1.5" />
+        <clipPath id="chakanaClip">
+          <path d="M100 20 H140 V42 H162 V64 H184 V146 H162 V168 H140 V190 H100 V168 H78 V146 H56 V64 H78 V42 H100 Z" />
+        </clipPath>
+        <path d="M100 20 H140 V42 H162 V64 H184 V146 H162 V168 H140 V190 H100 V168 H78 V146 H56 V64 H78 V42 H100 Z" fill="#D4AF37" stroke="#9A7B1C" stroke-width="4" />
+        <g clip-path="url(#chakanaClip)">
+          <rect x="56" y="20" width="128" height="44" fill="#F2C200" />
+          <rect x="56" y="64" width="34" height="82" fill="#E30613" />
+          <rect x="150" y="64" width="34" height="82" fill="#0057B8" />
+          <rect x="56" y="146" width="128" height="44" fill="#0B7A3E" />
+          <rect x="90" y="64" width="60" height="82" fill="#FFFFFF" />
+          <rect x="90" y="64" width="20" height="20" fill="#6B3FA0" />
+          <rect x="110" y="64" width="20" height="20" fill="#F28C28" />
+          <rect x="130" y="64" width="20" height="20" fill="#0057B8" />
+          <rect x="90" y="84" width="20" height="20" fill="#F2C200" />
+          <rect x="110" y="84" width="20" height="20" fill="#8BC34A" />
+          <rect x="130" y="84" width="20" height="20" fill="#E30613" />
+          <rect x="90" y="104" width="20" height="20" fill="#0B7A3E" />
+          <rect x="110" y="104" width="20" height="20" fill="#8BC34A" />
+          <rect x="130" y="104" width="20" height="20" fill="#6B3FA0" />
+          <rect x="90" y="124" width="60" height="22" fill="#FFFFFF" />
+          <path d="M101 137 V120 H111 V132 H119 V120 H129 V137" stroke="#8BC34A" stroke-width="7" stroke-linecap="square" fill="none" />
+          <g stroke="#D4AF37" stroke-width="2.5">
+            <path d="M56 64 H184 M56 146 H184 M90 64 V146 M150 64 V146 M90 84 H150 M90 104 H150 M90 124 H150 M110 64 V146 M130 64 V146" />
+          </g>
+        </g>
+        <g>
+          <rect x="24" y="200" width="192" height="28" fill="#FFFFFF" stroke="#B8860B" stroke-width="2" />
+          <text x="120" y="219" text-anchor="middle" fill="#111827" font-family="Arial Black, Arial, sans-serif" font-weight="900" font-size="12.5">GOBIERNO REGIONAL DE LIMA</text>
+          <rect x="34" y="233" width="172" height="4" fill="#C8102E" />
+          <rect x="24" y="242" width="192" height="24" fill="#FFFFFF" stroke="#B8860B" stroke-width="2" />
+          <text x="120" y="258" text-anchor="middle" fill="#111827" font-family="Arial Black, Arial, sans-serif" font-weight="900" font-size="10.5">DIRECCION REGIONAL DE SALUD</text>
+        </g>
       </svg>`;
+
+    // Escudo institucional referencial para el membrete oficial de los 4 reportes.
+    const ESCUDO_SVG = DIRESA_SVG;
+
 
     function localIsoDate(offsetDays) {
       const d = new Date();
@@ -198,6 +230,7 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
       syncingOffline: false,
       changingEstab: false,
       canInstall: false,
+      logoPersonalizadoData: (function () { try { return localStorage.getItem(LOGO_REPORTES_KEY) || ''; } catch (e) { return ''; } })(),
       iosBanner: false,
       iosStep: 1,
       showSecurity: true,
@@ -222,14 +255,24 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
       accesosData: null,
       accesosLoading: false,
       accesosError: '',
-      accesosFiltros: { q: '', rol: 'TODOS' },
-      accesoForm: { dni: '', nombre_completo: '', rol: 'OBSTETRA', cod_estab: '', pin: '', activo: 1 },
+      accesosFiltros: { q: '', rol: 'TODOS', cod_estab: 'TODOS', activo: 'TODOS' },
+      accesoForm: { dni: '', nombre_completo: '', nombres: '', apellido_paterno: '', apellido_materno: '', rol: 'OBSTETRA', cod_estab: '', pin: '', email: '', celular: '', activo: 1 },
       personasSugeridas: [],
+      showAccesoModal: false,
+      adminTab: 'DIRECTORIO',
+      movimientosData: null,
+      movimientosLoading: false,
+      movimientosError: '',
+      movimientosFiltros: { q: '', accion: 'TODAS', cod_estab: 'TODOS', fecha_desde: '', fecha_hasta: '' },
+      equipoData: null,
+      equipoLoading: false,
       resetDni: '',
       guardandoMetodo: false,
       reporteFecha: localIsoDate(0),
       reporteModo: 'exacto',
       reporteAlcance: 'establecimiento',
+      reporteAmbito: 'mis_atenciones',
+      reporteObstetra: '',
       reporteMetodo: 'TODOS',
       reporteProgramacion: null,
       reporteLoading: false,
@@ -553,9 +596,10 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
             <div class="w-9 h-9 shrink-0">${LOGO_SVG}</div>
             <div class="min-w-0 flex-1">
               <div class="text-xs font-bold text-slate-900 truncate">${esc(s.nombreCompleto || 'Hospital SJB Huaral')}</div>
-              <select aria-label="Establecimiento activo" onchange="cambiarEstablecimiento(this.value)" ${state.changingEstab ? 'disabled' : ''} class="mt-0.5 w-full max-w-[250px] min-h-[30px] px-2 py-0.5 rounded-lg border border-sky-200 bg-sky-50 text-[10px] text-sky-950 font-medium truncate">
+              ${s.isAdmin ? `<select aria-label="Establecimiento activo" onchange="cambiarEstablecimiento(this.value)" ${state.changingEstab ? 'disabled' : ''} class="mt-0.5 w-full max-w-[250px] min-h-[30px] px-2 py-0.5 rounded-lg border border-sky-200 bg-sky-50 text-[10px] text-sky-950 font-medium truncate">
                 ${optionsEstablecimientos(s.cod_estab || '000005481')}
-              </select>
+              </select>` : `<div class="mt-0.5 w-full max-w-[250px] min-h-[30px] px-2 py-1 rounded-lg border border-slate-200 bg-slate-50 text-[10px] text-slate-700 font-medium truncate" title="Establecimiento fijo asignado a su cuenta">🏥 ${esc(s.estab_nombre || establishName(s.cod_estab))}</div>`}
+
             </div>
           </div>
           <div class="flex items-center gap-1 shrink-0">
@@ -911,17 +955,19 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
       const filas = (r && r.filas) || [];
       const visibles = filas.slice(0, 120);
       const resumen = (r && r.resumen) || {};
-      const puedeEditar = Boolean(state.session && state.session.puedeVerRed);
+      const puedeEditar = Boolean(state.session && (state.session.isAdmin || state.session.isJefa));
       return `
         ${membreteOficialHtml({
           titulo: 'REPORTE 03 · PROGRAMACIÓN Y SEGUIMIENTO POR MÉTODO',
           subtitulo: 'Próximo control calculado desde la última atención HIS + días de ciclo del método',
           periodo: r ? descripcionRangoReporte(r) : ('Consulta al ' + fechaDdMmYyyy(state.reporteFecha)),
-          establecimiento: r && r.establecimiento && r.establecimiento.nombre
+          establecimiento: r && r.establecimiento && r.establecimiento.nombre,
+          obstetra: (r && r.obstetra_nombre) || (state.session && state.session.rol === 'OBSTETRA' ? state.session.nombreCompleto : 'TODAS LAS OBSTETRAS DEL ESTABLECIMIENTO')
         })}
         ${renderBotonesOficiales('PROGRAMACION')}
         <div class="p-4 rounded-2xl bg-white border border-slate-200 space-y-3">
           <h3 class="text-sm font-bold text-slate-900">Filtros de programación</h3>
+          <p class="text-[10px] text-slate-500 leading-relaxed">Los accesos rápidos <b>“Le toca Mañana +1”</b> y <b>“Hoy”</b> calculan automáticamente las pacientes que cumplen su próximo control en esa fecha, usando los 14 métodos oficiales del HIS.</p>
           <div class="grid grid-cols-4 gap-1.5">
             <button type="button" onclick="aplicarRapidoReporte('manana')" class="min-h-[40px] rounded-xl text-[9px] font-bold leading-tight ${state.reporteModo === 'exacto' && state.reporteFecha === manana ? 'bg-sky-700 text-white' : 'bg-slate-100 text-slate-700'}">Le toca<br/>Mañana +1</button>
             <button type="button" onclick="aplicarRapidoReporte('hoy')" class="min-h-[40px] rounded-xl text-[9px] font-bold leading-tight ${state.reporteModo === 'exacto' && state.reporteFecha === hoy ? 'bg-sky-700 text-white' : 'bg-slate-100 text-slate-700'}">Hoy</button>
@@ -929,7 +975,7 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
             <button type="button" onclick="aplicarRapidoReporte('vencidas')" class="min-h-[40px] rounded-xl text-[9px] font-bold leading-tight ${state.reporteModo === 'vencidas' ? 'bg-red-700 text-white' : 'bg-slate-100 text-slate-700'}">Vencidas</button>
           </div>
           <div class="grid grid-cols-2 gap-2">
-            <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Fecha exacta</label><input id="rep-fecha" type="date" value="${esc(state.reporteFecha)}" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs font-mono" /></div>
+            <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Fecha en que le toca su control / aplicación</label><input id="rep-fecha" type="date" value="${esc(state.reporteFecha)}" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs font-mono" /></div>
             <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Método oficial (14 HIS)</label><select id="rep-metodo" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-[10px] bg-white"><option value="TODOS">Todos los métodos</option>${catalogo.map(function (m) { return '<option value="' + esc(m.codigo_dx) + '"' + (state.reporteMetodo === m.codigo_dx ? ' selected' : '') + '>' + esc(m.nombre_metodo) + ' (' + Number(m.dias_ciclo) + 'd)</option>'; }).join('')}</select></div>
           </div>
           <div class="grid grid-cols-2 gap-2">
@@ -941,9 +987,14 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
             </select></div>
             <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Alcance</label><select id="rep-alcance" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-[10px] bg-white">
               <option value="establecimiento" ${state.reporteAlcance === 'establecimiento' ? 'selected' : ''}>Mi establecimiento</option>
-              ${state.session && state.session.puedeVerRed ? '<option value="red" ' + (state.reporteAlcance === 'red' ? 'selected' : '') + '>Toda la Red</option>' : ''}
+              ${state.session && state.session.isAdmin ? '<option value="red" ' + (state.reporteAlcance === 'red' ? 'selected' : '') + '>Toda la Red</option>' : ''}
             </select></div>
           </div>
+          ${state.session && !state.session.isAdmin ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">Pacientes a programar</label><select id="rep-ambito" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-[10px] bg-white">
+            ${state.session.rol === 'OBSTETRA' ? '<option value="mis_atenciones" ' + (state.reporteAmbito === 'mis_atenciones' ? 'selected' : '') + '>Mis atenciones (solo pacientes que atendí)</option>' : ''}
+            <option value="establecimiento" ${state.reporteAmbito === 'establecimiento' ? 'selected' : ''}>Mi establecimiento (padrón histórico de mi IPRESS)</option>
+          </select></div>` : ''}
+          ${state.session && (state.session.isAdmin || state.session.isJefa) ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">Obstetra (opcional, DNI o vacío = todas)</label><input id="rep-obstetra" type="text" inputmode="numeric" maxlength="11" value="${esc(state.reporteObstetra)}" placeholder="DNI de la obstetra" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs font-mono" /></div>` : ''}
           <button type="button" onclick="buscarProgramacion()" ${state.reporteLoading ? 'disabled' : ''} class="w-full min-h-[46px] rounded-xl bg-slate-900 hover:bg-slate-800 disabled:opacity-60 text-white text-xs font-bold">${state.reporteLoading ? 'Calculando programación...' : 'Buscar Programación'}</button>
           ${state.reporteError ? '<div class="p-3 rounded-xl bg-red-50 border border-red-200 text-[11px] text-red-800">' + esc(state.reporteError) + '</div>' : ''}
         </div>
@@ -1064,10 +1115,14 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
       const metodoInput = document.getElementById('rep-metodo');
       const alcanceInput = document.getElementById('rep-alcance');
       const rangoInput = document.getElementById('rep-rango');
+      const ambitoInput = document.getElementById('rep-ambito');
+      const obstetraInput = document.getElementById('rep-obstetra');
       if (fechaInput && fechaInput.value) state.reporteFecha = fechaInput.value;
       if (metodoInput) state.reporteMetodo = metodoInput.value || 'TODOS';
       if (alcanceInput) state.reporteAlcance = alcanceInput.value || 'establecimiento';
       if (rangoInput) state.reporteModo = rangoInput.value || 'exacto';
+      if (ambitoInput) state.reporteAmbito = ambitoInput.value || 'establecimiento';
+      if (obstetraInput) state.reporteObstetra = obstetraInput.value.replace(/[^0-9]/g, '');
       if (!state.reporteFecha) {
         state.reporteError = 'Seleccione una fecha válida para consultar la programación.';
         render();
@@ -1082,6 +1137,8 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
           fecha_objetivo: state.reporteFecha,
           rango_modo: state.reporteModo,
           alcance: state.reporteAlcance,
+          ambito: state.reporteAmbito,
+          obstetra: state.reporteObstetra || '',
           codigo_metodo: state.reporteMetodo || 'TODOS'
         });
         state.reporteProgramacion = data;
@@ -1310,15 +1367,8 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
     function renderPerfil() {
       const s = state.session;
       const esAdmin = Boolean(s.isAdmin);
+      const esJefa = Boolean(s.isJefa);
       const puedeReset = Boolean(s.puedeResetearObstetra);
-      const roles = (state.accesosData && state.accesosData.roles) || [
-        { codigo: 'OBSTETRA', etiqueta: 'Obstetra' },
-        { codigo: 'JEFA_OBSTETRAS', etiqueta: 'Jefa de Obstetras' },
-        { codigo: 'ADMIN_ESTADISTICA', etiqueta: 'Administrador de Estadística' }
-      ];
-      const accesos = (state.accesosData && state.accesosData.accesos) || [];
-      const form = state.accesoForm || {};
-      const estabForm = form.cod_estab || s.cod_estab || '000005481';
       return `<div class="p-4 rounded-2xl bg-white border border-slate-200 space-y-3">
         <div class="flex items-center gap-3"><div class="w-12 h-12 shrink-0">${LOGO_SVG}</div><div class="min-w-0"><div class="text-sm font-bold text-slate-900">${esc(s.nombreCompleto)}</div><div class="text-xs text-slate-500 font-mono">DNI / CODPSAL: ${esc(s.dni)}</div><div class="text-xs text-sky-700">${esc(s.estab_nombre || establishName(s.cod_estab))}</div><div class="text-[10px] font-bold text-slate-600 mt-0.5">Rol: ${esc(s.rol_etiqueta || s.rol || 'OBSTETRA')}</div></div></div>
         <div class="pt-3 border-t border-slate-100 flex items-center justify-between text-xs"><span class="text-slate-600">Instalación en celular</span><button type="button" onclick="installPwa()" class="min-h-[38px] px-3 rounded-xl bg-slate-900 text-white text-xs font-semibold">Instalar App</button></div>
@@ -1332,17 +1382,23 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
         ${APK_URL ? `<a href="${APK_URL}" download class="block text-center w-full min-h-[44px] leading-[44px] rounded-xl bg-emerald-700 text-white text-xs font-bold">Descargar APK Android</a>` : ''}
         <div class="flex items-center justify-between text-[11px] text-slate-600"><span>${state.offlinePending > 0 ? state.offlinePending + ' captación(es) cifradas pendientes' : 'Cola offline vacía'}</span><button type="button" onclick="sincronizarOffline()" ${state.syncingOffline ? 'disabled' : ''} class="px-2.5 py-1.5 rounded-lg bg-slate-900 text-white font-semibold">${state.syncingOffline ? 'Sincronizando...' : 'Sincronizar'}</button></div>
       </div>
+      ${esJefa ? renderEquipoJefatura() : ''}
       <div class="p-4 rounded-2xl bg-white border-2 border-sky-200 space-y-3">
         <div>
           <h3 class="text-sm font-bold text-slate-900">Mis Datos Personales y Seguridad</h3>
-          <p class="text-[10px] text-slate-500">Actualice su nombre, celular, correo, PIN de recuperación (4 dígitos) y contraseña. Deje vacío lo que no desea cambiar.</p>
+          <p class="text-[10px] text-slate-500">Actualice sus nombres y apellidos, celular, correo, establecimiento (53 IPRESS), PIN de recuperación de 4 dígitos y contraseña. Deje vacío lo que no desea cambiar.</p>
         </div>
         <form onsubmit="handlePerfil(event)" class="space-y-2.5">
-          <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Nombre completo</label><input id="per-nombre" type="text" value="${esc(s.nombreCompleto)}" class="w-full min-h-[42px] px-3 rounded-xl border border-slate-300 text-xs" /></div>
           <div class="grid grid-cols-2 gap-2">
-            <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Celular</label><input id="per-cel" type="tel" inputmode="numeric" placeholder="987654321" class="w-full min-h-[42px] px-3 rounded-xl border border-slate-300 text-xs font-mono" /></div>
-            <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Correo</label><input id="per-email" type="email" placeholder="opcional" class="w-full min-h-[42px] px-3 rounded-xl border border-slate-300 text-xs" /></div>
+            <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Nombres</label><input id="per-nombres" type="text" value="${esc(s.nombres || '')}" placeholder="NOMBRES" class="w-full min-h-[42px] px-3 rounded-xl border border-slate-300 text-xs" /></div>
+            <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Apellido paterno</label><input id="per-ap" type="text" value="${esc(s.apellido_paterno || '')}" placeholder="APELLIDO PATERNO" class="w-full min-h-[42px] px-3 rounded-xl border border-slate-300 text-xs" /></div>
           </div>
+          <div class="grid grid-cols-2 gap-2">
+            <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Apellido materno</label><input id="per-am" type="text" value="${esc(s.apellido_materno || '')}" placeholder="APELLIDO MATERNO" class="w-full min-h-[42px] px-3 rounded-xl border border-slate-300 text-xs" /></div>
+            <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Celular</label><input id="per-cel" type="tel" inputmode="numeric" value="${esc(s.celular || '')}" placeholder="987654321" class="w-full min-h-[42px] px-3 rounded-xl border border-slate-300 text-xs font-mono" /></div>
+          </div>
+          <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Correo electrónico</label><input id="per-email" type="email" value="${esc(s.email || '')}" placeholder="obstetra@hospitalhuaral.gob.pe" class="w-full min-h-[42px] px-3 rounded-xl border border-slate-300 text-xs" /></div>
+          <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Establecimiento (53 IPRESS)</label><select id="per-estab" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white">${optionsEstablecimientos(s.cod_estab || '000005481')}</select></div>
           <div class="grid grid-cols-2 gap-2">
             <div><label class="block text-[10px] font-bold text-slate-600 mb-1">PIN recuperación (4 dígitos)</label><input id="per-pin" type="password" inputmode="numeric" maxlength="4" placeholder="Solo si desea cambiarlo" class="w-full min-h-[42px] px-3 rounded-xl border border-slate-300 text-xs font-mono" /></div>
             <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Nueva contraseña</label><input id="per-pass" type="password" minlength="8" placeholder="Mínimo 8 caracteres" class="w-full min-h-[42px] px-3 rounded-xl border border-slate-300 text-xs" /></div>
@@ -1359,62 +1415,181 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
           <button type="button" onclick="resetearClaveManual()" class="min-h-[42px] px-3 rounded-xl bg-amber-700 text-white text-xs font-bold shrink-0">Restablecer</button>
         </div>
       </div>` : ''}
-      ${esAdmin ? `<div class="p-4 rounded-2xl bg-white border border-slate-200 space-y-3">
+      ${esAdmin ? renderAdminPanel() : ''}
+      <button type="button" onclick="logout()" class="w-full min-h-[48px] rounded-2xl border border-red-200 bg-red-50 text-red-700 text-sm font-semibold">Cerrar Sesión</button>`;
+    }
+
+    function renderEquipoJefatura() {
+      const d = state.equipoData;
+      const obstetras = (d && d.obstetras) || [];
+      return `<div class="p-4 rounded-2xl bg-white border-2 border-emerald-200 space-y-3">
+        <div class="flex items-start justify-between gap-2">
+          <div>
+            <h3 class="text-sm font-bold text-slate-900">👩‍⚕️ Equipo de Obstetras de mi Establecimiento</h3>
+            <p class="text-[10px] text-slate-500">${esc((d && d.establecimiento && d.establecimiento.nombre) || state.session.estab_nombre || '')}</p>
+          </div>
+          <span class="px-2.5 py-1 rounded-xl bg-emerald-700 text-white text-xs font-extrabold shrink-0">${obstetras.length}</span>
+        </div>
+        <button type="button" onclick="cargarEquipoJefatura(true)" ${state.equipoLoading ? 'disabled' : ''} class="w-full min-h-[38px] rounded-xl bg-emerald-700 text-white text-[10px] font-bold disabled:opacity-60">${state.equipoLoading ? 'Cargando equipo...' : 'Actualizar equipo de obstetras'}</button>
+        <div class="space-y-2">
+          ${obstetras.length ? obstetras.map(function (o) { return `<div class="p-2.5 rounded-xl border ${Number(o.activo) === 1 ? 'border-emerald-200 bg-emerald-50/50' : 'border-red-200 bg-red-50/50'} space-y-1">
+            <div class="flex items-start justify-between gap-2"><div class="min-w-0"><div class="text-[11px] font-bold text-slate-900 truncate">${esc(o.nombre_completo || (o.nombres + ' ' + o.apellido_paterno + ' ' + o.apellido_materno))}</div><div class="font-mono text-[9px] text-slate-600">DNI ${esc(o.dni)} · ${Number(o.activo) === 1 ? 'ACTIVA' : 'INACTIVA'}</div></div><span class="px-2 py-0.5 rounded-lg bg-slate-900 text-white text-[8px] font-extrabold">${Number(o.captadas_mes || 0)} este mes</span></div>
+            <div class="grid grid-cols-4 gap-1 text-center text-[9px] font-mono">
+              <div class="p-1 rounded-lg bg-white border border-slate-200"><div class="text-slate-500">Hoy</div><b>${Number(o.captadas_hoy || 0)}</b></div>
+              <div class="p-1 rounded-lg bg-white border border-slate-200"><div class="text-slate-500">Mes</div><b>${Number(o.captadas_mes || 0)}</b></div>
+              <div class="p-1 rounded-lg bg-white border border-slate-200"><div class="text-slate-500">Total</div><b>${Number(o.total_captadas || 0)}</b></div>
+              <div class="p-1 rounded-lg bg-white border border-slate-200"><div class="text-slate-500">Últ. act.</div><b>${esc((o.ultima_actividad || '—').slice(0, 10))}</b></div>
+            </div>
+            <div class="flex items-center justify-between gap-2 text-[9px] text-slate-500"><span>Último login: ${esc(o.ultimo_login || '—')}</span><button type="button" onclick="resetearClaveUsuario('${esc(o.dni)}','${esc(String(o.nombre_completo || o.dni).replace(/'/g, ' '))}')" class="min-h-[28px] px-2 rounded-lg bg-amber-700 text-white text-[8px] font-bold">Restablecer clave</button></div>
+          </div>`; }).join('') : '<div class="p-3 text-[10px] text-slate-500 text-center">No hay obstetras registradas en su establecimiento.</div>'}
+        </div>
+      </div>`;
+    }
+
+    function renderAdminPanel() {
+      const tabs = [
+        { id: 'DIRECTORIO', label: 'Directorio / Control' },
+        { id: 'MOVIMIENTOS', label: 'Movimientos' },
+        { id: 'SYNC_LOGO', label: 'Sync y Logo' }
+      ];
+      return `<div class="p-4 rounded-2xl bg-white border-2 border-slate-300 space-y-3">
         <div>
-          <h3 class="text-sm font-bold text-slate-900">Gestión de Accesos y Roles</h3>
-          <p class="text-[10px] text-slate-500">Solo Administrador de Estadística. Roles: ADMIN_ESTADISTICA, JEFA_OBSTETRAS y OBSTETRA.</p>
+          <h3 class="text-sm font-bold text-slate-900">Panel del Administrador de Estadística</h3>
+          <p class="text-[10px] text-slate-500">Control total de las 53 IPRESS: usuarios, roles, establecimientos, movimientos y personalización del logo.</p>
         </div>
-        <div class="grid grid-cols-3 gap-1.5">
-          <input id="acc-q" type="search" value="${esc(state.accesosFiltros.q)}" oninput="state.accesosFiltros.q=this.value" placeholder="DNI o nombre" class="col-span-2 min-h-[38px] px-2 rounded-xl border border-slate-300 text-[10px]" />
+        <div class="grid grid-cols-3 gap-1 p-1 bg-slate-100 rounded-xl">
+          ${tabs.map(function (t) { return '<button type="button" onclick="setAdminTab(\'' + t.id + '\')" class="min-h-[38px] rounded-lg text-[9px] font-bold ' + (state.adminTab === t.id ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600') + '">' + esc(t.label) + '</button>'; }).join('')}
+        </div>
+        ${state.adminTab === 'DIRECTORIO' ? renderAdminDirectorio() : ''}
+        ${state.adminTab === 'MOVIMIENTOS' ? renderAdminMovimientos() : ''}
+        ${state.adminTab === 'SYNC_LOGO' ? renderAdminSyncLogo() : ''}
+      </div>`;
+    }
+
+    function renderAdminDirectorio() {
+      const roles = (state.accesosData && state.accesosData.roles) || [
+        { codigo: 'OBSTETRA', etiqueta: 'Obstetra' },
+        { codigo: 'JEFA_OBSTETRAS', etiqueta: 'Jefa de Obstetras' },
+        { codigo: 'ADMIN_ESTADISTICA', etiqueta: 'Administrador de Estadística' }
+      ];
+      const accesos = (state.accesosData && state.accesosData.accesos) || [];
+      const filtros = state.accesosFiltros || {};
+      return `<div class="space-y-3">
+        <div class="grid grid-cols-2 gap-2">
+          <input id="acc-q" type="search" value="${esc(filtros.q || '')}" oninput="state.accesosFiltros.q=this.value" placeholder="DNI o nombre" class="col-span-2 min-h-[38px] px-2 rounded-xl border border-slate-300 text-[10px]" />
           <select onchange="state.accesosFiltros.rol=this.value" class="min-h-[38px] px-1 rounded-xl border border-slate-300 text-[9px] bg-white">
-            <option value="TODOS" ${state.accesosFiltros.rol === 'TODOS' ? 'selected' : ''}>Todos</option>
-            ${roles.map(function (r) { return '<option value="' + esc(r.codigo) + '"' + (state.accesosFiltros.rol === r.codigo ? ' selected' : '') + '>' + esc(r.etiqueta) + '</option>'; }).join('')}
+            <option value="TODOS" ${filtros.rol === 'TODOS' ? 'selected' : ''}>Todos los roles</option>
+            ${roles.map(function (r) { return '<option value="' + esc(r.codigo) + '"' + (filtros.rol === r.codigo ? ' selected' : '') + '>' + esc(r.etiqueta) + '</option>'; }).join('')}
           </select>
+          <select onchange="state.accesosFiltros.cod_estab=this.value" class="min-h-[38px] px-1 rounded-xl border border-slate-300 text-[9px] bg-white"><option value="TODOS" ${filtros.cod_estab === 'TODOS' ? 'selected' : ''}>Todos los establecimientos</option>${optionsEstablecimientos(filtros.cod_estab && filtros.cod_estab !== 'TODOS' ? filtros.cod_estab : '')}</select>
+          <select onchange="state.accesosFiltros.activo=this.value" class="min-h-[38px] px-1 rounded-xl border border-slate-300 text-[9px] bg-white">
+            <option value="TODOS" ${filtros.activo === 'TODOS' ? 'selected' : ''}>Activos e inactivos</option>
+            <option value="1" ${filtros.activo === '1' ? 'selected' : ''}>Solo activos</option>
+            <option value="0" ${filtros.activo === '0' ? 'selected' : ''}>Solo inactivos</option>
+          </select>
+          <button type="button" onclick="cargarAccesos(true)" ${state.accesosLoading ? 'disabled' : ''} class="min-h-[38px] rounded-xl bg-slate-900 text-white text-[10px] font-bold disabled:opacity-60">${state.accesosLoading ? 'Buscando...' : 'Buscar / Actualizar'}</button>
         </div>
-        <button type="button" onclick="cargarAccesos(true)" ${state.accesosLoading ? 'disabled' : ''} class="w-full min-h-[38px] rounded-xl bg-slate-900 text-white text-[10px] font-bold disabled:opacity-60">${state.accesosLoading ? 'Cargando accesos...' : 'Buscar / Actualizar accesos'}</button>
+        <button type="button" onclick="abrirAccesoModal()" class="w-full min-h-[42px] rounded-xl bg-emerald-700 text-white text-xs font-bold">+ Agregar / Activar Usuario o Jefa</button>
         ${state.accesosError ? '<div class="p-2 rounded-xl bg-red-50 border border-red-200 text-[10px] text-red-800">' + esc(state.accesosError) + '</div>' : ''}
-        <div class="rounded-xl bg-slate-50 border border-slate-200 p-2.5 space-y-2">
-          <div class="text-[10px] font-bold text-slate-700">Registrar / actualizar acceso</div>
+        <div class="space-y-2">
+          ${accesos.length ? accesos.map(function (a) { return `<div class="p-2.5 rounded-xl border ${Number(a.activo) === 1 ? 'border-emerald-200 bg-emerald-50/50' : 'border-red-200 bg-red-50/50'} space-y-1.5">
+            <div class="flex items-start justify-between gap-2"><div class="min-w-0"><div class="text-[11px] font-bold text-slate-900 truncate">${esc(a.nombre_completo)}</div><div class="font-mono text-[9px] text-slate-600">DNI ${esc(a.dni)} · ${esc(a.rol_etiqueta || a.rol)}</div><div class="text-[9px] text-slate-500">${esc(a.estab_nombre || '')}</div></div><span class="px-2 py-0.5 rounded-lg text-[8px] font-extrabold ${Number(a.activo) === 1 ? 'bg-emerald-700 text-white' : 'bg-red-700 text-white'}">${Number(a.activo) === 1 ? 'ACTIVO' : 'INACTIVO'}</span></div>
+            <div class="grid grid-cols-3 gap-1 text-center text-[9px] font-mono">
+              <div class="p-1 rounded-lg bg-white border border-slate-200"><div class="text-slate-500">Captadas</div><b>${Number(a.total_captadas || 0)}</b></div>
+              <div class="p-1 rounded-lg bg-white border border-slate-200"><div class="text-slate-500">Últ. captura</div><b>${esc((a.ultima_captura || '—').slice(0, 10))}</b></div>
+              <div class="p-1 rounded-lg bg-white border border-slate-200"><div class="text-slate-500">Últ. login</div><b>${esc((a.ultimo_login || '—').slice(0, 10))}</b></div>
+            </div>
+            <div class="grid grid-cols-2 gap-1">
+              <select onchange="cambiarRolUsuario('${esc(a.dni)}', this.value)" class="min-h-[30px] px-1 rounded-lg border border-slate-300 bg-white text-[8px] font-bold">${roles.map(function (r) { return '<option value="' + esc(r.codigo) + '"' + (a.rol === r.codigo ? ' selected' : '') + '>' + esc(r.etiqueta) + '</option>'; }).join('')}</select>
+              <button type="button" onclick="editarAcceso('${esc(a.dni)}')" class="min-h-[30px] rounded-lg border border-slate-300 bg-white text-[8px] font-bold">Editar datos</button>
+              <button type="button" onclick="cambiarEstadoAcceso('${esc(a.dni)}',${Number(a.activo) === 1 ? 0 : 1})" class="min-h-[30px] rounded-lg ${Number(a.activo) === 1 ? 'bg-red-700' : 'bg-emerald-700'} text-white text-[8px] font-bold">${Number(a.activo) === 1 ? 'Desactivar' : 'Activar'}</button>
+              <button type="button" onclick="resetearClaveUsuario('${esc(a.dni)}','${esc(String(a.nombre_completo).replace(/'/g, ' '))}')" class="min-h-[30px] rounded-lg bg-amber-700 text-white text-[8px] font-bold">Clave = DNI</button>
+            </div>
+            <div class="text-[9px] text-slate-500 truncate">✉️ ${esc(a.email || '—')} · 📞 ${esc(a.celular || '—')}</div>
+          </div>`; }).join('') : '<div class="p-3 text-[10px] text-slate-500 text-center">Presione “Buscar / Actualizar” para listar usuarios.</div>'}
+        </div>
+        ${state.showAccesoModal ? renderAccesoModal() : ''}
+      </div>`;
+    }
+
+    function renderAccesoModal() {
+      const roles = (state.accesosData && state.accesosData.roles) || [
+        { codigo: 'OBSTETRA', etiqueta: 'Obstetra' },
+        { codigo: 'JEFA_OBSTETRAS', etiqueta: 'Jefa de Obstetras' },
+        { codigo: 'ADMIN_ESTADISTICA', etiqueta: 'Administrador de Estadística' }
+      ];
+      const form = state.accesoForm || {};
+      return `<div class="fixed inset-0 z-50 bg-slate-900/60 flex items-end sm:items-center justify-center p-3">
+        <div class="w-full max-w-[420px] max-h-[88vh] overflow-y-auto rounded-2xl bg-white border border-slate-300 p-4 space-y-3">
+          <div class="flex items-center justify-between"><h3 class="text-sm font-bold text-slate-900">Agregar / Activar Usuario o Jefa</h3><button type="button" onclick="cerrarAccesoModal()" class="min-h-[34px] min-w-[34px] rounded-lg bg-slate-100 text-slate-700 font-bold">×</button></div>
           <div class="grid grid-cols-2 gap-2">
             <input id="acc-dni" type="text" inputmode="numeric" maxlength="11" value="${esc(form.dni || '')}" oninput="buscarPersonaDebounce(this.value)" placeholder="DNI" class="min-h-[38px] px-2 rounded-xl border border-slate-300 text-[10px] font-mono" />
-            <input id="acc-nombre" type="text" value="${esc(form.nombre_completo || '')}" oninput="state.accesoForm.nombre_completo=this.value" placeholder="Nombres completos" class="min-h-[38px] px-2 rounded-xl border border-slate-300 text-[10px]" />
+            <input id="acc-email" type="email" value="${esc(form.email || '')}" placeholder="Correo" class="min-h-[38px] px-2 rounded-xl border border-slate-300 text-[10px]" />
+          </div>
+          <div class="grid grid-cols-2 gap-2">
+            <input id="acc-nombres" type="text" value="${esc(form.nombres || '')}" placeholder="Nombres" class="min-h-[38px] px-2 rounded-xl border border-slate-300 text-[10px]" />
+            <input id="acc-ap" type="text" value="${esc(form.apellido_paterno || '')}" placeholder="Apellido paterno" class="min-h-[38px] px-2 rounded-xl border border-slate-300 text-[10px]" />
+            <input id="acc-am" type="text" value="${esc(form.apellido_materno || '')}" placeholder="Apellido materno" class="min-h-[38px] px-2 rounded-xl border border-slate-300 text-[10px]" />
+            <input id="acc-cel" type="tel" inputmode="numeric" value="${esc(form.celular || '')}" placeholder="Celular" class="min-h-[38px] px-2 rounded-xl border border-slate-300 text-[10px] font-mono" />
           </div>
           ${state.personasSugeridas.length ? `<div class="space-y-1 max-h-32 overflow-y-auto">${state.personasSugeridas.map(function (p) { return '<button type="button" onclick="seleccionarPersona(\'' + esc(p.dni) + '\',\'' + esc(String(p.nombre).replace(/'/g, ' ')) + '\')" class="block w-full text-left px-2 py-1.5 rounded-lg bg-white border border-slate-200 text-[10px]"><b>' + esc(p.dni) + '</b> · ' + esc(p.nombre) + ' <span class="text-slate-400">(' + esc(p.origen) + ')</span></button>'; }).join('')}</div>` : ''}
           <div class="grid grid-cols-2 gap-2">
             <select onchange="state.accesoForm.rol=this.value" class="min-h-[38px] px-1 rounded-xl border border-slate-300 text-[9px] bg-white">${roles.map(function (r) { return '<option value="' + esc(r.codigo) + '"' + (form.rol === r.codigo ? ' selected' : '') + '>' + esc(r.etiqueta) + '</option>'; }).join('')}</select>
-            <input id="acc-pin" type="password" inputmode="numeric" maxlength="4" value="${esc(form.pin || '')}" oninput="state.accesoForm.pin=this.value" placeholder="PIN 4 dígitos (opcional)" class="min-h-[38px] px-2 rounded-xl border border-slate-300 text-[10px] font-mono" />
+            <input id="acc-pin" type="password" inputmode="numeric" maxlength="4" value="${esc(form.pin || '')}" placeholder="PIN 4 dígitos (opcional)" class="min-h-[38px] px-2 rounded-xl border border-slate-300 text-[10px] font-mono" />
           </div>
-          <select onchange="state.accesoForm.cod_estab=this.value" class="w-full min-h-[38px] px-1 rounded-xl border border-slate-300 text-[9px] bg-white">${optionsEstablecimientos(estabForm)}</select>
+          <select onchange="state.accesoForm.cod_estab=this.value" class="w-full min-h-[38px] px-1 rounded-xl border border-slate-300 text-[9px] bg-white">${optionsEstablecimientos(form.cod_estab || state.session.cod_estab || '000005481')}</select>
+          <input id="acc-pass" type="password" minlength="8" value="${esc(form.password || '')}" placeholder="Contraseña inicial (opcional, mínimo 8)" class="w-full min-h-[38px] px-2 rounded-xl border border-slate-300 text-[10px]" />
           <label class="flex items-center gap-2 text-[10px] font-semibold text-slate-700"><input type="checkbox" ${Number(form.activo || 0) === 1 ? 'checked' : ''} onchange="state.accesoForm.activo=this.checked?1:0" /> Acceso activo</label>
-          <button type="button" onclick="guardarAcceso()" class="w-full min-h-[40px] rounded-xl bg-emerald-700 text-white text-[10px] font-bold">Guardar Acceso</button>
+          <button type="button" onclick="guardarAcceso()" class="w-full min-h-[42px] rounded-xl bg-emerald-700 text-white text-[11px] font-bold">Guardar en app_usuarios</button>
         </div>
-        <div class="space-y-2">
-          ${accesos.length ? accesos.map(function (a) { return `<div class="p-2.5 rounded-xl border ${Number(a.activo) === 1 ? 'border-emerald-200 bg-emerald-50/50' : 'border-red-200 bg-red-50/50'} space-y-1">
-            <div class="flex items-start justify-between gap-2"><div class="min-w-0"><div class="text-[11px] font-bold text-slate-900 truncate">${esc(a.nombre_completo)}</div><div class="font-mono text-[9px] text-slate-600">DNI ${esc(a.dni)} · ${esc(a.rol_etiqueta || a.rol)}</div><div class="text-[9px] text-slate-500">${esc(a.estab_nombre || '')} · PIN: ${a.pin_configurado ? 'sí' : 'no'}</div></div><span class="px-2 py-0.5 rounded-lg text-[8px] font-extrabold ${Number(a.activo) === 1 ? 'bg-emerald-700 text-white' : 'bg-red-700 text-white'}">${Number(a.activo) === 1 ? 'ACTIVO' : 'INACTIVO'}</span></div>
-            <div class="grid grid-cols-3 gap-1 pt-1">
-              <button type="button" onclick="editarAcceso('${esc(a.dni)}')" class="min-h-[30px] rounded-lg border border-slate-300 bg-white text-[8px] font-bold">Editar</button>
-              <button type="button" onclick="cambiarEstadoAcceso('${esc(a.dni)}',${Number(a.activo) === 1 ? 0 : 1})" class="min-h-[30px] rounded-lg ${Number(a.activo) === 1 ? 'bg-red-700' : 'bg-emerald-700'} text-white text-[8px] font-bold">${Number(a.activo) === 1 ? 'Desactivar' : 'Activar'}</button>
-              <button type="button" onclick="resetearClaveUsuario('${esc(a.dni)}','${esc(String(a.nombre_completo).replace(/'/g, ' '))}')" class="min-h-[30px] rounded-lg bg-amber-700 text-white text-[8px] font-bold">Clave = DNI</button>
-            </div>
-          </div>`; }).join('') : '<div class="p-3 text-[10px] text-slate-500 text-center">Presione “Buscar / Actualizar accesos” para listar.</div>'}
+      </div>`;
+    }
+
+    function renderAdminMovimientos() {
+      const f = state.movimientosFiltros || {};
+      const d = state.movimientosData;
+      const movimientos = (d && d.movimientos) || [];
+      const acciones = (d && d.acciones) || [];
+      return `<div class="space-y-3">
+        <div class="grid grid-cols-2 gap-2">
+          <input id="mov-q" type="search" value="${esc(f.q || '')}" oninput="state.movimientosFiltros.q=this.value" placeholder="DNI o nombre del obstetra" class="col-span-2 min-h-[38px] px-2 rounded-xl border border-slate-300 text-[10px]" />
+          <select onchange="state.movimientosFiltros.accion=this.value" class="min-h-[38px] px-1 rounded-xl border border-slate-300 text-[9px] bg-white"><option value="TODAS" ${f.accion === 'TODAS' ? 'selected' : ''}>Todos los movimientos</option>${acciones.map(function (a) { return '<option value="' + esc(a) + '"' + (f.accion === a ? ' selected' : '') + '>' + esc(a) + '</option>'; }).join('')}</select>
+          <select onchange="state.movimientosFiltros.cod_estab=this.value" class="min-h-[38px] px-1 rounded-xl border border-slate-300 text-[9px] bg-white"><option value="TODOS" ${f.cod_estab === 'TODOS' ? 'selected' : ''}>Todos los establecimientos</option>${optionsEstablecimientos(f.cod_estab && f.cod_estab !== 'TODOS' ? f.cod_estab : '')}</select>
+          <input id="mov-desde" type="date" value="${esc(f.fecha_desde || '')}" onchange="state.movimientosFiltros.fecha_desde=this.value" class="min-h-[38px] px-2 rounded-xl border border-slate-300 text-[10px] font-mono" />
+          <input id="mov-hasta" type="date" value="${esc(f.fecha_hasta || '')}" onchange="state.movimientosFiltros.fecha_hasta=this.value" class="min-h-[38px] px-2 rounded-xl border border-slate-300 text-[10px] font-mono" />
+          <button type="button" onclick="cargarMovimientos(true)" ${state.movimientosLoading ? 'disabled' : ''} class="col-span-2 min-h-[40px] rounded-xl bg-slate-900 text-white text-[10px] font-bold disabled:opacity-60">${state.movimientosLoading ? 'Consultando movimientos...' : 'Buscar movimientos'}</button>
         </div>
-      </div>` : ''}
-      ${esAdmin ? `<div class="p-4 rounded-2xl bg-white border border-slate-200 space-y-2.5">
-        <div class="text-xs font-bold text-slate-900">Últimos Registros de Actividad (${state.auditLogs.length})</div>
-        <div class="divide-y divide-slate-100 max-h-64 overflow-y-auto">${state.auditLogs.slice(0, 8).map(function (log) { return '<div class="py-2 text-xs"><div class="flex items-center justify-between font-mono text-[11px] text-slate-500"><span>' + esc(log.accion) + '</span><span>' + esc(log.fecha_hora) + '</span></div><p class="text-slate-700 mt-0.5">' + esc(log.detalle) + '</p></div>'; }).join('') || '<div class="py-2 text-xs text-slate-500">Sin actividad reciente.</div>'}</div>
-      </div>
-      <div class="p-4 rounded-2xl bg-white border border-slate-200 space-y-3">
-        <h3 class="text-sm font-bold text-slate-900">Exportación Nube → Local (5 GB)</h3>
-        <p class="text-[11px] text-slate-500">Solo administrador. INSERT ... ON DUPLICATE KEY UPDATE, sin DROP/DELETE.</p>
-        <select id="sync-mode" class="w-full min-h-[42px] px-3 rounded-xl border border-slate-300 text-xs bg-white">
-          <option value="directo" ${state.syncMode === 'directo' ? 'selected' : ''}>Directo · ON DUPLICATE KEY UPDATE</option>
-          <option value="puente" ${state.syncMode === 'puente' ? 'selected' : ''}>Puente · r_his_dl + sp_get_recepcion()</option>
-        </select>
-        <button type="button" onclick="generarExportacion()" class="w-full min-h-[42px] rounded-xl bg-slate-900 text-white text-xs font-semibold">${state.loadingSync ? 'Generando...' : 'Generar exportación SQL'}</button>
-        ${state.syncExport ? `<div class="p-3 rounded-xl bg-slate-50 border border-slate-200 text-[11px] space-y-1"><div class="font-semibold">${esc(state.syncExport.filename)} · ${state.syncExport.rows} filas</div><div class="text-slate-600">${esc((state.syncExport.tables || []).join(', ') || 'Sin tablas locales')}</div><div class="flex gap-2 pt-1"><button type="button" onclick="descargarExportacion()" class="px-3 py-1.5 rounded-lg bg-teal-700 text-white font-semibold">Descargar SQL</button><button type="button" onclick="descargarIndices()" class="px-3 py-1.5 rounded-lg bg-slate-800 text-white font-semibold">Descargar índices</button></div></div>` : ''}
-        <button type="button" onclick="descargarIndices()" class="w-full min-h-[40px] rounded-xl border border-slate-300 text-slate-800 text-xs font-semibold">Descargar optimizar_indices_5gb.sql</button>
-      </div>` : ''}
-      <button type="button" onclick="logout()" class="w-full min-h-[48px] rounded-2xl border border-red-200 bg-red-50 text-red-700 text-sm font-semibold">Cerrar Sesión</button>`;
+        ${state.movimientosError ? '<div class="p-2 rounded-xl bg-red-50 border border-red-200 text-[10px] text-red-800">' + esc(state.movimientosError) + '</div>' : ''}
+        <div class="text-[10px] text-slate-500">${d ? (Number(d.total || 0) + ' movimientos encontrados · página ' + Number(d.pagina || 1)) : 'Seleccione filtros y presione Buscar.'}</div>
+        <div class="divide-y divide-slate-100 max-h-[420px] overflow-y-auto">
+          ${movimientos.length ? movimientos.map(function (m) { return '<div class="py-2 text-[10px] space-y-0.5"><div class="flex items-center justify-between gap-2 font-mono text-slate-500"><span class="font-bold text-slate-800">' + esc(m.accion) + '</span><span>' + esc(m.fecha_hora) + '</span></div><div class="text-slate-700">' + esc(m.detalle) + '</div><div class="text-slate-500 font-mono">' + esc(m.actor_nombre || m.actor_dni) + ' · DNI ' + esc(m.actor_dni) + ' · ' + esc(m.estab_nombre || m.actor_estab) + ' · ' + esc(m.plataforma || '') + '</div></div>'; }).join('') : '<div class="py-3 text-[10px] text-slate-500 text-center">Sin movimientos para los filtros seleccionados.</div>'}
+        </div>
+      </div>`;
+    }
+
+    function renderAdminSyncLogo() {
+      return `<div class="space-y-3">
+        <div class="rounded-xl border border-slate-200 p-3 space-y-2">
+          <h4 class="text-xs font-bold text-slate-900">Exportación Nube → Local (5 GB)</h4>
+          <p class="text-[10px] text-slate-500">Solo INSERT ... ON DUPLICATE KEY UPDATE, sin DROP/DELETE. Las tablas app_* nunca se exportan.</p>
+          <select id="sync-mode" class="w-full min-h-[38px] px-2 rounded-xl border border-slate-300 text-[10px] bg-white">
+            <option value="directo" ${state.syncMode === 'directo' ? 'selected' : ''}>Directo · ON DUPLICATE KEY UPDATE</option>
+            <option value="puente" ${state.syncMode === 'puente' ? 'selected' : ''}>Puente · r_his_dl + sp_get_recepcion()</option>
+          </select>
+          <button type="button" onclick="generarExportacion()" class="w-full min-h-[40px] rounded-xl bg-slate-900 text-white text-[10px] font-bold">${state.loadingSync ? 'Generando...' : 'Generar exportación SQL'}</button>
+          ${state.syncExport ? `<div class="p-2 rounded-xl bg-slate-50 border border-slate-200 text-[10px] space-y-1"><div class="font-semibold">${esc(state.syncExport.filename)} · ${state.syncExport.rows} filas</div><div class="text-slate-600">${esc((state.syncExport.tables || []).join(', ') || 'Sin tablas locales')}</div><div class="flex gap-2 pt-1"><button type="button" onclick="descargarExportacion()" class="px-2 py-1.5 rounded-lg bg-teal-700 text-white font-semibold">Descargar SQL</button><button type="button" onclick="descargarIndices()" class="px-2 py-1.5 rounded-lg bg-slate-800 text-white font-semibold">Descargar índices</button></div></div>` : ''}
+        </div>
+        <div class="rounded-xl border border-slate-200 p-3 space-y-2">
+          <h4 class="text-xs font-bold text-slate-900">Personalización del logo de reportes</h4>
+          <p class="text-[10px] text-slate-500">Por defecto se usa el logo oficial DIRESA Lima (SVG Chakana). Puede reemplazarlo con una imagen JPG/PNG; se guarda en este navegador y se aplica a pantalla, PDF y Excel.</p>
+          <div class="flex items-center gap-2">
+            <div class="w-14 h-16 rounded-lg border border-slate-300 bg-white overflow-hidden flex items-center justify-center">${logoReportesHtml()}</div>
+            <label class="min-h-[38px] px-3 rounded-xl bg-slate-900 text-white text-[10px] font-bold flex items-center cursor-pointer">Subir logo<input type="file" accept="image/png,image/jpeg" class="hidden" onchange="guardarLogoPersonalizado(this)" /></label>
+            <button type="button" onclick="restablecerLogoPersonalizado()" class="min-h-[38px] px-3 rounded-xl border border-slate-300 text-[10px] font-bold">Oficial</button>
+          </div>
+          <p class="text-[9px] text-slate-400 font-mono">Respaldo institucional: public/logo-diresa-lima.jpg</p>
+        </div>
+      </div>`;
     }
 
     // ---------------------------------------------------------------------
@@ -1471,6 +1646,7 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
             <h2 class="text-base font-bold">4 reportes con membrete institucional</h2>
             <p class="text-[11px] text-slate-300 mt-0.5">Hospital San Juan Bautista de Huaral · Red de Salud Huaral-Chancay</p>
           </div>
+          ${state.session && state.session.isJefa ? renderEquipoJefatura() : ''}
           <div class="grid grid-cols-2 gap-1 p-1 bg-slate-100 rounded-xl">
             ${vistas.map(function (v) {
               return '<button type="button" onclick="setVistaReporte(\'' + v.id + '\')" class="min-h-[44px] rounded-lg text-[10px] font-bold ' + (state.reporteVista === v.id ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600') + '">' + esc(v.label) + '</button>';
@@ -1497,7 +1673,8 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
           titulo: 'REPORTE 01 · PACIENTES CAPTADAS EN CAMPO / BARRIDO',
           subtitulo: 'Captación domiciliaria y barrido de Planificación Familiar',
           periodo: fechaDdMmYyyy(f.fecha_desde) + ' al ' + fechaDdMmYyyy(f.fecha_hasta),
-          establecimiento: (d && d.establecimiento && d.establecimiento.nombre) || ''
+          establecimiento: (d && d.establecimiento && d.establecimiento.nombre) || '',
+          obstetra: (d && d.obstetra_nombre) || (f.obstetra !== 'TODOS' ? f.obstetra : '')
         })}
         ${renderBotonesOficiales('CAMPO')}
         <div class="p-4 rounded-2xl bg-white border border-slate-200 space-y-3">
@@ -1654,6 +1831,39 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
       } catch (e) { return ''; }
     }
 
+    function logoReportesHtml() {
+      if (state.logoPersonalizadoData) {
+        return '<img src="' + esc(state.logoPersonalizadoData) + '" alt="Logo institucional" style="max-width:100%;max-height:100%;object-fit:contain" />';
+      }
+      return DIRESA_SVG;
+    }
+
+    function logoReportesDataUri() {
+      return state.logoPersonalizadoData || svgDataUri(DIRESA_SVG);
+    }
+
+    function guardarLogoPersonalizado(input) {
+      const file = input && input.files && input.files[0];
+      if (!file) return;
+      if (file.size > 2 * 1024 * 1024) {
+        showFeedback('error', 'El logo no debe superar 2 MB.');
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = function () {
+        state.logoPersonalizadoData = String(reader.result || '');
+        try { localStorage.setItem(LOGO_REPORTES_KEY, state.logoPersonalizadoData); } catch (e) {}
+        showFeedback('success', 'Logo personalizado aplicado a los reportes de este navegador.');
+      };
+      reader.readAsDataURL(file);
+    }
+
+    function restablecerLogoPersonalizado() {
+      state.logoPersonalizadoData = '';
+      try { localStorage.removeItem(LOGO_REPORTES_KEY); } catch (e) {}
+      showFeedback('success', 'Se restauró el logo oficial DIRESA Lima.');
+    }
+
     function metaOficial(titulo, subtitulo, periodo, establecimiento, obstetra) {
       const s = state.session || {};
       return {
@@ -1674,9 +1884,9 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
       return `<div style="border:2px solid #0f172a;border-radius:14px;background:#ffffff;overflow:hidden">
         <div style="display:grid;grid-template-columns:82px 1fr 82px;gap:6px;padding:9px;align-items:start;border-bottom:2px solid #0f172a">
           <div style="text-align:center">
-            <div style="width:44px;height:52px;margin:0 auto 3px">${ESCUDO_SVG}</div>
+            <div style="width:54px;height:64px;margin:0 auto 3px">${logoReportesHtml()}</div>
             <div style="font-size:6.5px;line-height:1.3;font-weight:800;color:#7f1d1d;text-transform:uppercase">Gobierno Regional de Lima</div>
-            <div style="font-size:6px;line-height:1.25;color:#334155;text-transform:uppercase">Dirección Regional de Salud Lima</div>
+            <div style="font-size:6px;line-height:1.25;color:#334155;text-transform:uppercase">Dirección Regional de Salud</div>
           </div>
           <div style="text-align:center;min-width:0">
             <div style="font-size:10.5px;line-height:1.2;font-weight:900;color:#0f172a;text-transform:uppercase">${esc(m.titulo)}</div>
@@ -1709,7 +1919,7 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
     function construirExcelOficial(meta, columnas, filas, resumenLineas) {
       const m = meta || metaOficial();
       const totalCols = Math.max(1, columnas.length);
-      const escudo = svgDataUri(ESCUDO_SVG);
+      const escudo = logoReportesDataUri();
       const logo = svgDataUri(LOGO_SVG);
       const filasHtml = (filas || []).map(function (fila, indice) {
         return '<tr>' + columnas.map(function (col, i) {
@@ -1759,7 +1969,7 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
 
     function construirDocumentoOficial(meta, columnas, filas, resumenLineas) {
       const m = meta || metaOficial();
-      const escudo = svgDataUri(ESCUDO_SVG);
+      const escudo = logoReportesDataUri();
       const logo = svgDataUri(LOGO_SVG);
       const filasHtml = (filas || []).map(function (fila) {
         return '<tr>' + columnas.map(function (col, i) {
@@ -2037,8 +2247,8 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
         const f = base.filtros || state.campoFiltros;
         const periodo = fechaDdMmYyyy(f.fecha_desde) + ' al ' + fechaDdMmYyyy(f.fecha_hasta);
         const obstetraNombre = (f.obstetra && f.obstetra !== 'TODOS')
-          ? ((base.obstetras || []).filter(function (o) { return o.codpsal_obstetra === f.obstetra; }).map(function (o) { return o.nombre_obstetra; })[0] || f.obstetra)
-          : '';
+          ? ((base.obstetras || []).filter(function (o) { return o.codpsal_obstetra === f.obstetra; }).map(function (o) { return o.nombre_obstetra; })[0] || base.obstetra_nombre || f.obstetra)
+          : (base.obstetra_nombre || '');
         const meta = metaOficial(
           'REPORTE 01 · PACIENTES CAPTADAS EN CAMPO / BARRIDO',
           'Captación domiciliaria y barrido de Planificación Familiar',
@@ -2071,7 +2281,7 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
           'Salidas a campo, sectores visitados y pacientes captadas por día',
           periodo,
           (d.establecimiento && d.establecimiento.nombre) || '',
-          obstetraFiltro
+          d.obstetra_nombre || obstetraFiltro
         );
         const lista = d.productividad || [];
         return {
@@ -2116,7 +2326,7 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
           'Próximo control por método anticonceptivo oficial HIS',
           descripcionRangoReporte(r),
           (r.establecimiento && r.establecimiento.nombre) || '',
-          ''
+          r.obstetra_nombre || ''
         );
         return {
           meta: meta,
@@ -2141,7 +2351,8 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
           'REPORTE 04 · PADRÓN DE PACIENTES POR LLAMAR',
           'Listado oficial con prioridad de llamada y datos de contacto',
           'Corte al ' + (d.fecha_corte_ddmmyyyy || fechaDdMmYyyy(localIsoDate(0))),
-          (d.establecimiento && d.establecimiento.nombre) || ''
+          (d.establecimiento && d.establecimiento.nombre) || '',
+          d.obstetra_nombre || ''
         );
         return {
           meta: meta,
@@ -2175,7 +2386,8 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
           titulo: 'REPORTE 02 · PRODUCTIVIDAD DIARIA POR OBSTETRA',
           subtitulo: 'Salidas a campo, sectores visitados y pacientes captadas por día',
           periodo: periodo,
-          establecimiento: (d && d.establecimiento && d.establecimiento.nombre) || ''
+          establecimiento: (d && d.establecimiento && d.establecimiento.nombre) || '',
+          obstetra: (d && d.obstetra_nombre) || (f.obstetra !== 'TODOS' ? f.obstetra : '')
         })}
         ${renderBotonesOficiales('PRODUCTIVIDAD')}
         <div class="p-4 rounded-2xl bg-white border border-slate-200 space-y-3">
@@ -2223,7 +2435,8 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
           titulo: 'REPORTE 04 · PADRÓN DE PACIENTES POR LLAMAR',
           subtitulo: 'Listado oficial con prioridad de llamada y datos de contacto',
           periodo: 'Corte al ' + ((d && d.fecha_corte_ddmmyyyy) || fechaDdMmYyyy(localIsoDate(0))),
-          establecimiento: (d && d.establecimiento && d.establecimiento.nombre) || ''
+          establecimiento: (d && d.establecimiento && d.establecimiento.nombre) || '',
+          obstetra: (d && d.obstetra_nombre) || ''
         })}
         ${renderBotonesOficiales('PADRON')}
         <div class="p-4 rounded-2xl bg-white border border-slate-200 space-y-3">
@@ -2561,9 +2774,12 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
         if (state.reporteVista === 'CAMPO' && !state.campoData) cargarReporteCampo(true);
         if (state.reporteVista === 'PRODUCTIVIDAD' && !state.productividadData) cargarReporteProductividad(true);
         if (state.reporteVista === 'PADRON' && !state.padronData) cargarReportePadron(true);
+        if (state.session && state.session.isJefa && !state.equipoData) cargarEquipoJefatura(true);
       }
-      if (tab === 'PERFIL' && state.session && state.session.puedeGestionarAccesos && !state.accesosData) {
-        cargarAccesos(true);
+      if (tab === 'PERFIL' && state.session) {
+        if (state.session.isJefa && !state.equipoData) cargarEquipoJefatura(true);
+        if (state.session.isAdmin && !state.accesosData) cargarAccesos(true);
+        if (state.session.isAdmin && !state.movimientosData) cargarMovimientos(true);
       }
     }
 
@@ -2958,9 +3174,12 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
         return;
       }
       const payload = {
-        nombre_completo: (document.getElementById('per-nombre') || {}).value || '',
+        nombres: (document.getElementById('per-nombres') || {}).value || '',
+        apellido_paterno: (document.getElementById('per-ap') || {}).value || '',
+        apellido_materno: (document.getElementById('per-am') || {}).value || '',
         celular: (document.getElementById('per-cel') || {}).value || '',
         email: (document.getElementById('per-email') || {}).value || '',
+        cod_estab: (document.getElementById('per-estab') || {}).value || '',
         pin: (document.getElementById('per-pin') || {}).value || '',
         password: password
       };
@@ -2971,10 +3190,37 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
           persistSession();
         }
         state.feedback = { type: 'success', text: data.message || 'Datos actualizados correctamente.' };
+        await loadOverview();
+        if (state.session && state.session.isJefa) await cargarEquipoJefatura(false);
         render();
       } catch (error) {
         showFeedback('error', error.message);
       }
+    }
+
+    function setAdminTab(tab) {
+      state.adminTab = tab || 'DIRECTORIO';
+      state.feedback = null;
+      if (tab === 'DIRECTORIO' && !state.accesosData) cargarAccesos(true);
+      if (tab === 'MOVIMIENTOS' && !state.movimientosData) cargarMovimientos(true);
+      render();
+    }
+
+    function abrirAccesoModal() {
+      state.showAccesoModal = true;
+      state.personasSugeridas = [];
+      state.accesoForm = {
+        dni: '', nombre_completo: '', nombres: '', apellido_paterno: '', apellido_materno: '',
+        rol: 'OBSTETRA', cod_estab: (state.session && state.session.cod_estab) || '000005481',
+        pin: '', email: '', celular: '', password: '', activo: 1
+      };
+      render();
+    }
+
+    function cerrarAccesoModal() {
+      state.showAccesoModal = false;
+      state.personasSugeridas = [];
+      render();
     }
 
     async function cargarAccesos(mostrarSkeleton) {
@@ -2988,6 +3234,35 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
         state.accesosError = error.message;
       } finally {
         state.accesosLoading = false;
+        render();
+      }
+    }
+
+    async function cargarMovimientos(mostrarSkeleton) {
+      if (!state.token || !state.session || !state.session.isAdmin) return;
+      state.movimientosLoading = true;
+      state.movimientosError = '';
+      if (mostrarSkeleton) render();
+      try {
+        state.movimientosData = await apiGet('auditoria_movimientos', state.movimientosFiltros);
+      } catch (error) {
+        state.movimientosError = error.message;
+      } finally {
+        state.movimientosLoading = false;
+        render();
+      }
+    }
+
+    async function cargarEquipoJefatura(mostrarSkeleton) {
+      if (!state.token || !state.session) return;
+      state.equipoLoading = true;
+      if (mostrarSkeleton) render();
+      try {
+        state.equipoData = await apiGet('equipo_jefatura');
+      } catch (error) {
+        state.equipoData = null;
+      } finally {
+        state.equipoLoading = false;
         render();
       }
     }
@@ -3013,6 +3288,12 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
     function seleccionarPersona(dni, nombre) {
       state.accesoForm.dni = String(dni || '');
       state.accesoForm.nombre_completo = String(nombre || '');
+      const partes = String(nombre || '').trim().split(/\s+/);
+      if (partes.length >= 3) {
+        state.accesoForm.apellido_paterno = partes[0];
+        state.accesoForm.apellido_materno = partes[1];
+        state.accesoForm.nombres = partes.slice(2).join(' ');
+      }
       state.personasSugeridas = [];
       render();
     }
@@ -3024,37 +3305,80 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
       state.accesoForm = {
         dni: String(a.dni || ''),
         nombre_completo: String(a.nombre_completo || ''),
+        nombres: String(a.nombres || ''),
+        apellido_paterno: String(a.apellido_paterno || ''),
+        apellido_materno: String(a.apellido_materno || ''),
         rol: String(a.rol || 'OBSTETRA'),
         cod_estab: String(a.cod_estab || ''),
         pin: '',
+        email: String(a.email || ''),
+        celular: String(a.celular || ''),
+        password: '',
         activo: Number(a.activo) === 1 ? 1 : 0
       };
       state.personasSugeridas = [];
+      state.showAccesoModal = true;
       render();
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
 
+    async function cambiarRolUsuario(dni, rol) {
+      const lista = (state.accesosData && state.accesosData.accesos) || [];
+      const a = lista.find(function (item) { return String(item.dni) === String(dni); });
+      if (!a) return;
+      if (!window.confirm('¿Cambiar el rol de ' + (a.nombre_completo || dni) + ' a ' + rol + '?')) {
+        render();
+        return;
+      }
+      try {
+        await apiPost('guardar_acceso', {
+          dni: a.dni,
+          nombre_completo: a.nombre_completo,
+          nombres: a.nombres || '',
+          apellido_paterno: a.apellido_paterno || '',
+          apellido_materno: a.apellido_materno || '',
+          rol: rol,
+          cod_estab: a.cod_estab,
+          email: a.email || '',
+          celular: a.celular || '',
+          activo: Number(a.activo) === 1 ? 1 : 0
+        });
+        state.feedback = { type: 'success', text: 'Rol actualizado a ' + rol + '.' };
+        await cargarAccesos(false);
+        render();
+      } catch (error) {
+        showFeedback('error', error.message);
+      }
+    }
+
     async function guardarAcceso() {
-      const form = state.accesoForm || {};
-      const dni = soloDigitos(form.dni || '');
+      const dni = soloDigitos((document.getElementById('acc-dni') || {}).value || state.accesoForm.dni || '');
       if (dni.length < 8) {
         showFeedback('error', 'Ingrese un DNI válido de 8 a 11 dígitos.');
         return;
       }
-      if (!form.cod_estab) {
+      const codEstab = state.accesoForm.cod_estab || (state.session && state.session.cod_estab) || '';
+      if (!codEstab) {
         showFeedback('error', 'Seleccione el establecimiento del acceso.');
         return;
       }
       try {
         const data = await apiPost('guardar_acceso', {
           dni: dni,
-          nombre_completo: form.nombre_completo || '',
-          rol: form.rol || 'OBSTETRA',
-          cod_estab: form.cod_estab,
-          pin: form.pin || '',
-          activo: Number(form.activo) === 1 ? 1 : 0
+          nombre_completo: state.accesoForm.nombre_completo || '',
+          nombres: (document.getElementById('acc-nombres') || {}).value || state.accesoForm.nombres || '',
+          apellido_paterno: (document.getElementById('acc-ap') || {}).value || state.accesoForm.apellido_paterno || '',
+          apellido_materno: (document.getElementById('acc-am') || {}).value || state.accesoForm.apellido_materno || '',
+          rol: state.accesoForm.rol || 'OBSTETRA',
+          cod_estab: codEstab,
+          email: (document.getElementById('acc-email') || {}).value || state.accesoForm.email || '',
+          celular: (document.getElementById('acc-cel') || {}).value || state.accesoForm.celular || '',
+          pin: (document.getElementById('acc-pin') || {}).value || state.accesoForm.pin || '',
+          password: (document.getElementById('acc-pass') || {}).value || state.accesoForm.password || '',
+          activo: Number(state.accesoForm.activo) === 1 ? 1 : 0
         });
-        state.accesoForm = { dni: '', nombre_completo: '', rol: 'OBSTETRA', cod_estab: (state.session && state.session.cod_estab) || '', pin: '', activo: 1 };
+        state.showAccesoModal = false;
+        state.accesoForm = { dni: '', nombre_completo: '', nombres: '', apellido_paterno: '', apellido_materno: '', rol: 'OBSTETRA', cod_estab: (state.session && state.session.cod_estab) || '', pin: '', email: '', celular: '', password: '', activo: 1 };
         state.personasSugeridas = [];
         state.feedback = { type: 'success', text: data.message || 'Acceso guardado correctamente.' };
         await cargarAccesos(false);
@@ -3083,6 +3407,7 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
         const data = await apiPost('resetear_clave_usuario', { dni: dni });
         state.feedback = { type: 'success', text: data.message || ('Clave de ' + dni + ' restablecida a su DNI.') };
         if (state.session && state.session.puedeGestionarAccesos) await cargarAccesos(false);
+        if (state.session && state.session.isJefa) await cargarEquipoJefatura(false);
         render();
       } catch (error) {
         showFeedback('error', error.message);

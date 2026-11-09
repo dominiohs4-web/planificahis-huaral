@@ -180,6 +180,7 @@ $neverTables = [
     'pacientes_sin_metodo',
     'auditoria_seguridad_app',
     'app_catalogo_metodos',
+    'app_usuarios',
     'app_usuarios_accesos',
     'app_2fa_challenges',
     'app_obstetra_establecimiento',

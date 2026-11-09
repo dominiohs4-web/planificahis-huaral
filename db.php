@@ -129,6 +129,8 @@ final class HospitalHuaralDB
     public const SESSION_COOKIE = 'planificahis_session';
 
     private static ?PDO $pdo = null;
+    /** @var array<string, array<string, mixed>|null> */
+    private static array $accesosCache = [];
 
     private static function isProductionEnvironment(): bool
     {
@@ -248,7 +250,7 @@ final class HospitalHuaralDB
             // (semáforo en /tmp) salvo que DB_AUTO_MIGRATE=1.
             $autoMigrate = getenv('DB_AUTO_MIGRATE') === '1';
             $schemaLock = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR)
-                . DIRECTORY_SEPARATOR . 'planificahis_schema_v5_'
+                . DIRECTORY_SEPARATOR . 'planificahis_schema_v6_'
                 . substr(hash('sha256', $host . '|' . $dbname), 0, 12) . '.lock';
             if ($autoMigrate || !is_file($schemaLock)) {
                 try {
@@ -322,40 +324,83 @@ final class HospitalHuaralDB
         }
         self::ensureCatalogoOficial($pdo);
 
-        // RBAC propio de la app: rol, establecimiento y PIN de recuperación.
-        // Es una tabla exclusiva de la nube; jamás se sincroniza al HIS local.
+        // Tabla única e independiente de usuarios de la app. Es la ÚNICA fuente
+        // de autenticación, roles y recuperación de clave. Nunca se sincroniza
+        // al HIS local y jamás escribe en la tabla original `usuario`.
         $pdo->exec("
-            CREATE TABLE IF NOT EXISTS `app_usuarios_accesos` (
+            CREATE TABLE IF NOT EXISTS `app_usuarios` (
+              `id` int NOT NULL AUTO_INCREMENT,
               `dni` varchar(15) NOT NULL,
+              `nombres` varchar(120) NOT NULL DEFAULT '',
+              `apellido_paterno` varchar(80) NOT NULL DEFAULT '',
+              `apellido_materno` varchar(80) NOT NULL DEFAULT '',
               `nombre_completo` varchar(190) NOT NULL DEFAULT '',
+              `email` varchar(190) NOT NULL DEFAULT '',
+              `celular` varchar(20) NOT NULL DEFAULT '',
+              `clave_hash` varchar(255) NOT NULL DEFAULT '',
+              `pin_recuperacion` varchar(64) NOT NULL DEFAULT '',
               `rol` varchar(30) NOT NULL DEFAULT 'OBSTETRA',
               `cod_estab` varchar(9) NOT NULL DEFAULT '000005481',
+              `puede_ver_red` tinyint(1) NOT NULL DEFAULT 0,
               `activo` tinyint(1) NOT NULL DEFAULT 1,
-              `pin_hash` varchar(255) NOT NULL DEFAULT '',
-              `celular` varchar(20) NOT NULL DEFAULT '',
-              `email` varchar(190) NOT NULL DEFAULT '',
+              `creado_por` varchar(40) NOT NULL DEFAULT '',
+              `ultimo_login` timestamp NULL DEFAULT NULL,
               `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
               `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
-              PRIMARY KEY (`dni`),
-              INDEX `idx_acceso_rol`(`rol`),
-              INDEX `idx_acceso_estab`(`cod_estab`),
-              INDEX `idx_acceso_activo`(`activo`)
+              PRIMARY KEY (`id`),
+              UNIQUE KEY `uk_app_usuarios_dni` (`dni`),
+              INDEX `idx_app_usuarios_rol` (`rol`),
+              INDEX `idx_app_usuarios_estab` (`cod_estab`),
+              INDEX `idx_app_usuarios_activo` (`activo`)
             ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
         ");
+
+        // Migración desde la tabla antigua de accesos (si existiera) y limpieza:
+        // a partir de esta versión solo existe `app_usuarios`.
         try {
-            $stmtAcceso = $pdo->prepare("
-                INSERT INTO `app_usuarios_accesos` (`dni`, `nombre_completo`, `rol`, `cod_estab`, `activo`)
-                VALUES (:dni, :nombre, :rol, :estab, 1)
+            $stmtLegacy = $pdo->query("
+                SELECT COUNT(*) FROM information_schema.TABLES
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'app_usuarios_accesos'
+            ");
+            if ((int)$stmtLegacy->fetchColumn() > 0) {
+                $pdo->exec("
+                    INSERT INTO `app_usuarios`
+                        (`dni`, `nombre_completo`, `rol`, `cod_estab`, `activo`,
+                         `pin_recuperacion`, `celular`, `email`, `puede_ver_red`, `creado_por`)
+                    SELECT `dni`, `nombre_completo`, `rol`, `cod_estab`, `activo`,
+                           LEFT(`pin_hash`, 64), `celular`, `email`,
+                           IF(`rol` = 'ADMIN_ESTADISTICA', 1, 0), 'MIGRACION'
+                    FROM `app_usuarios_accesos`
+                    ON DUPLICATE KEY UPDATE
+                        nombre_completo = IF(VALUES(nombre_completo) <> '', VALUES(nombre_completo), nombre_completo),
+                        rol = IF(rol IN ('', 'OBSTETRA'), VALUES(rol), rol),
+                        cod_estab = IF(VALUES(cod_estab) <> '', VALUES(cod_estab), cod_estab),
+                        pin_recuperacion = IF(VALUES(pin_recuperacion) <> '', VALUES(pin_recuperacion), pin_recuperacion),
+                        celular = IF(VALUES(celular) <> '', VALUES(celular), celular),
+                        email = IF(VALUES(email) <> '', VALUES(email), email),
+                        puede_ver_red = GREATEST(puede_ver_red, VALUES(puede_ver_red))
+                ");
+            }
+            $pdo->exec('DROP TABLE IF EXISTS `app_usuarios_accesos`');
+        } catch (Throwable $e) {
+            error_log('[PlanificaHIS] migracion app_usuarios: ' . $e->getMessage());
+        }
+
+        try {
+            $stmtUsuario = $pdo->prepare("
+                INSERT INTO `app_usuarios`
+                    (`dni`, `nombre_completo`, `rol`, `cod_estab`, `activo`, `puede_ver_red`, `creado_por`)
+                VALUES (:dni, :nombre, :rol, :estab, 1, :red, 'BOOTSTRAP')
                 ON DUPLICATE KEY UPDATE
-                    nombre_completo = IF(nombre_completo = '', VALUES(nombre_completo), nombre_completo),
-                    rol = IF(rol IN ('', 'OBSTETRA'), VALUES(rol), rol)
+                    nombre_completo = IF(nombre_completo = '', VALUES(nombre_completo), nombre_completo)
             ");
             foreach (hospital_dnis_preactivados() as $dniPre => $metaPre) {
-                $stmtAcceso->execute([
+                $stmtUsuario->execute([
                     ':dni' => $dniPre,
                     ':nombre' => $metaPre['nombre'],
                     ':rol' => $metaPre['rol'],
                     ':estab' => '000005481',
+                    ':red' => $metaPre['rol'] === 'ADMIN_ESTADISTICA' ? 1 : 0,
                 ]);
             }
         } catch (Throwable $e) {
@@ -551,23 +596,30 @@ final class HospitalHuaralDB
     /** @return array<string, mixed>|null */
     public static function accesoUsuario(string $dni): ?array
     {
-        static $cache = [];
         $dni = preg_replace('/[^0-9A-Za-z]/', '', $dni) ?? '';
         if ($dni === '') {
             return null;
         }
-        if (array_key_exists($dni, $cache)) {
-            return $cache[$dni];
+        if (array_key_exists($dni, self::$accesosCache)) {
+            return self::$accesosCache[$dni];
         }
         try {
-            $stmt = self::getConnection()->prepare('SELECT * FROM app_usuarios_accesos WHERE dni = :dni LIMIT 1');
+            $stmt = self::getConnection()->prepare('SELECT * FROM app_usuarios WHERE dni = :dni LIMIT 1');
             $stmt->execute([':dni' => $dni]);
             $row = $stmt->fetch();
-            $cache[$dni] = $row ?: null;
+            self::$accesosCache[$dni] = $row ?: null;
         } catch (Throwable $e) {
-            $cache[$dni] = null;
+            self::$accesosCache[$dni] = null;
         }
-        return $cache[$dni];
+        return self::$accesosCache[$dni];
+    }
+
+    public static function olvidarAcceso(string $dni): void
+    {
+        $dni = preg_replace('/[^0-9A-Za-z]/', '', $dni) ?? '';
+        if ($dni !== '') {
+            unset(self::$accesosCache[$dni]);
+        }
     }
 
     /**
@@ -589,14 +641,20 @@ final class HospitalHuaralDB
     {
         $acceso = self::accesoUsuario($dni);
         if ($acceso === null) {
-            return true; // Las cuentas históricas de `usuario` siguen operativas.
+            // Una sesión histórica sin fila no se bloquea aquí; el login y la
+            // recuperación exigen una fila real en app_usuarios.
+            return true;
         }
         return (int)($acceso['activo'] ?? 1) === 1;
     }
 
+    /**
+     * Solo el Administrador de Estadística tiene alcance de red. La Jefatura de
+     * Obstetras queda estrictamente limitada a su establecimiento.
+     */
     public static function esRolRed(string $rol): bool
     {
-        return in_array(strtoupper(trim($rol)), ['ADMIN_ESTADISTICA', 'JEFA_OBSTETRAS'], true);
+        return strtoupper(trim($rol)) === 'ADMIN_ESTADISTICA';
     }
 
     public static function puedeGestionarAccesos(string $rol): bool
@@ -618,7 +676,7 @@ final class HospitalHuaralDB
         };
     }
 
-    /** Nombre institucional con prioridad tabla de accesos → HIS → usuario. */
+    /** Nombre institucional con prioridad app_usuarios → HIS (`mstrpers`). */
     public static function nombrePersona(string $dni, ?PDO $pdo = null): string
     {
         $dni = preg_replace('/[^0-9A-Za-z]/', '', $dni) ?? '';
@@ -626,8 +684,19 @@ final class HospitalHuaralDB
             return '';
         }
         $acceso = self::accesoUsuario($dni);
-        if ($acceso !== null && trim((string)($acceso['nombre_completo'] ?? '')) !== '') {
-            return trim((string)$acceso['nombre_completo']);
+        if ($acceso !== null) {
+            $nombreCompleto = trim((string)($acceso['nombre_completo'] ?? ''));
+            if ($nombreCompleto !== '') {
+                return $nombreCompleto;
+            }
+            $partes = trim(
+                (string)($acceso['apellido_paterno'] ?? '') . ' ' .
+                (string)($acceso['apellido_materno'] ?? '') . ' ' .
+                (string)($acceso['nombres'] ?? '')
+            );
+            if ($partes !== '') {
+                return $partes;
+            }
         }
         $pre = self::dniPreactivado($dni);
         if ($pre !== null) {
@@ -646,17 +715,6 @@ final class HospitalHuaralDB
                 } catch (Throwable $e) {
                     // La tabla puede no existir en una instalación mínima.
                 }
-            }
-            $stmt = $pdo->prepare('SELECT nombre1, apaterno, amaterno FROM usuario WHERE dni = :dni LIMIT 1');
-            $stmt->execute([':dni' => $dni]);
-            $row = $stmt->fetch() ?: [];
-            $nombre = trim(
-                (string)($row['nombre1'] ?? '') . ' ' .
-                (string)($row['apaterno'] ?? '') . ' ' .
-                (string)($row['amaterno'] ?? '')
-            );
-            if ($nombre !== '') {
-                return $nombre;
             }
         } catch (Throwable $e) {
             // Sin nombre se devuelve vacío para que el llamador use su fallback.
