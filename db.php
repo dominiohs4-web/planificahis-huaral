@@ -16,6 +16,112 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/catalogo_establecimientos.php';
 
+/**
+ * Catálogo oficial de los 14 métodos de Planificación Familiar del HIS/MINSA.
+ *
+ * Cada método conserva su código oficial (con punto) y las variantes que el
+ * HIS histórico guarda en `his_dl_dt.DX` (sin punto, con .00 o con ceros).
+ * Las variantes se usan SIEMPRE dentro de `dt.DX IN (...)`, nunca con funciones
+ * sobre la columna, para conservar el índice B-Tree de la tabla de 5 GB.
+ *
+ * @return array<string, array<string, mixed>>
+ */
+function hospital_catalogo_metodos_oficial(): array
+{
+    return [
+        '99208.02' => [
+            'codigo_dx' => '99208.02', 'nombre_metodo' => 'Preservativo masculino',
+            'dias_ciclo' => 90, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 1,
+            'alias' => ['9920802'],
+        ],
+        '99208.06' => [
+            'codigo_dx' => '99208.06', 'nombre_metodo' => 'Preservativo femenino',
+            'dias_ciclo' => 90, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 2,
+            'alias' => ['9920806'],
+        ],
+        '99208.13' => [
+            'codigo_dx' => '99208.13', 'nombre_metodo' => 'Hormonal combinado oral (Píldora)',
+            'dias_ciclo' => 120, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 3,
+            'alias' => ['9920813'],
+        ],
+        '99208.04' => [
+            'codigo_dx' => '99208.04', 'nombre_metodo' => 'Hormonal combinado inyectable mensual',
+            'dias_ciclo' => 30, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 4,
+            'alias' => ['9920804', '90782', '9920801', '99208'],
+        ],
+        '99208.05' => [
+            'codigo_dx' => '99208.05', 'nombre_metodo' => 'Solo progestágenos inyectable trimestral',
+            'dias_ciclo' => 90, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 5,
+            'alias' => ['9920805', 'Z304'],
+        ],
+        '11975' => [
+            'codigo_dx' => '11975', 'nombre_metodo' => 'Implante subdérmico',
+            'dias_ciclo' => 90, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 6,
+            'alias' => ['11975.00', '11981'],
+        ],
+        '58300' => [
+            'codigo_dx' => '58300', 'nombre_metodo' => 'DIU T de cobre',
+            'dias_ciclo' => 30, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 7,
+            'alias' => ['58300.00'],
+        ],
+        '58300.01' => [
+            'codigo_dx' => '58300.01', 'nombre_metodo' => 'DIU LNG',
+            'dias_ciclo' => 30, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 8,
+            'alias' => ['5830001'],
+        ],
+        '58600' => [
+            'codigo_dx' => '58600', 'nombre_metodo' => 'BTB (ligadura de trompas bilateral)',
+            'dias_ciclo' => 365, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 9,
+            'alias' => ['58600.00'],
+        ],
+        '55250' => [
+            'codigo_dx' => '55250', 'nombre_metodo' => 'Vasectomía',
+            'dias_ciclo' => 365, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 10,
+            'alias' => ['55250.00'],
+        ],
+        '99208.07' => [
+            'codigo_dx' => '99208.07', 'nombre_metodo' => 'MELA (lactancia materna y amenorrea)',
+            'dias_ciclo' => 180, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 11,
+            'alias' => ['9920807'],
+        ],
+        '99208.09' => [
+            'codigo_dx' => '99208.09', 'nombre_metodo' => 'Billings (método de ovulación)',
+            'dias_ciclo' => 60, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 12,
+            'alias' => ['9920809'],
+        ],
+        '99208.08' => [
+            'codigo_dx' => '99208.08', 'nombre_metodo' => 'Ritmo (calendario)',
+            'dias_ciclo' => 60, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 13,
+            'alias' => ['9920808'],
+        ],
+        '99208.10' => [
+            'codigo_dx' => '99208.10', 'nombre_metodo' => 'Días fijos / collar',
+            'dias_ciclo' => 60, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 14,
+            'alias' => ['9920810', '99208.1'],
+        ],
+    ];
+}
+
+/**
+ * DNIs con acceso pre-activado. Se reconocen aunque todavía no existan en
+ * `his_mstrpers` ni en la tabla `usuario`.
+ *
+ * @return array<string, array{rol: string, nombre: string}>
+ */
+function hospital_dnis_preactivados(): array
+{
+    return [
+        '75100725' => [
+            'rol' => 'ADMIN_ESTADISTICA',
+            'nombre' => 'LUIS FERNANDO INOÑAN SANTISTEBAN',
+        ],
+        '43246820' => [
+            'rol' => 'JEFA_OBSTETRAS',
+            'nombre' => 'DIANA ALEJANDRINA ANICETO AGUEDO',
+        ],
+    ];
+}
+
 final class HospitalHuaralDB
 {
     /** Sesión persistente de 7 días exactos (60 * 60 * 24 * 7). */
@@ -142,7 +248,7 @@ final class HospitalHuaralDB
             // (semáforo en /tmp) salvo que DB_AUTO_MIGRATE=1.
             $autoMigrate = getenv('DB_AUTO_MIGRATE') === '1';
             $schemaLock = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR)
-                . DIRECTORY_SEPARATOR . 'planificahis_schema_v4_'
+                . DIRECTORY_SEPARATOR . 'planificahis_schema_v5_'
                 . substr(hash('sha256', $host . '|' . $dbname), 0, 12) . '.lock';
             if ($autoMigrate || !is_file($schemaLock)) {
                 try {
@@ -195,27 +301,66 @@ final class HospitalHuaralDB
             CREATE TABLE IF NOT EXISTS `app_catalogo_metodos` (
               `codigo_dx` varchar(15) NOT NULL,
               `nombre_metodo` varchar(120) NOT NULL,
+              `alias_codigos` varchar(255) NOT NULL DEFAULT '',
               `dias_ciclo` int NOT NULL DEFAULT 30,
               `requiere_cita` tinyint(1) DEFAULT 1,
               `activo` tinyint(1) DEFAULT 1,
+              `orden` int NOT NULL DEFAULT 0,
               PRIMARY KEY (`codigo_dx`)
             ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
         ");
+        // Compatibilidad con instalaciones anteriores al catálogo oficial.
+        foreach ([
+            "ALTER TABLE `app_catalogo_metodos` ADD COLUMN IF NOT EXISTS `alias_codigos` varchar(255) NOT NULL DEFAULT '' AFTER `nombre_metodo`",
+            "ALTER TABLE `app_catalogo_metodos` ADD COLUMN IF NOT EXISTS `orden` int NOT NULL DEFAULT 0 AFTER `activo`",
+        ] as $ddlCatalogo) {
+            try {
+                $pdo->exec($ddlCatalogo);
+            } catch (Throwable $e) {
+                // El motor ya tiene la columna o no soporta IF NOT EXISTS.
+            }
+        }
+        self::ensureCatalogoOficial($pdo);
+
+        // RBAC propio de la app: rol, establecimiento y PIN de recuperación.
+        // Es una tabla exclusiva de la nube; jamás se sincroniza al HIS local.
         $pdo->exec("
-            INSERT IGNORE INTO `app_catalogo_metodos`
-                (`codigo_dx`, `nombre_metodo`, `dias_ciclo`, `requiere_cita`, `activo`)
-            VALUES
-                ('90782',   'Inyectable Hormonal Mensual (Ampolla 1 mes)', 30, 1, 1),
-                ('9920801', 'Administración de Inyectable Mensual', 30, 1, 1),
-                ('Z304',    'Inyectable Hormonal Trimestral (Ampolla 3 meses)', 90, 1, 1),
-                ('9920802', 'Administración de Inyectable Trimestral', 90, 1, 1),
-                ('99208',   'Atención / Procedimiento en Planificación Familiar (99208)', 30, 1, 1),
-                ('9940204', 'Orientación y Consejería en Planificación Familiar', 30, 1, 1),
-                ('Z301',    'Inserción de DIU / T de Cobre (Control)', 365, 1, 1),
-                ('58300',   'Inserción de DIU', 365, 1, 1),
-                ('11981',   'Implante Subdérmico (Control)', 1095, 1, 1),
-                ('Z300',    'Consejería General sin Método Activo', 15, 1, 1)
+            CREATE TABLE IF NOT EXISTS `app_usuarios_accesos` (
+              `dni` varchar(15) NOT NULL,
+              `nombre_completo` varchar(190) NOT NULL DEFAULT '',
+              `rol` varchar(30) NOT NULL DEFAULT 'OBSTETRA',
+              `cod_estab` varchar(9) NOT NULL DEFAULT '000005481',
+              `activo` tinyint(1) NOT NULL DEFAULT 1,
+              `pin_hash` varchar(255) NOT NULL DEFAULT '',
+              `celular` varchar(20) NOT NULL DEFAULT '',
+              `email` varchar(190) NOT NULL DEFAULT '',
+              `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+              `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+              PRIMARY KEY (`dni`),
+              INDEX `idx_acceso_rol`(`rol`),
+              INDEX `idx_acceso_estab`(`cod_estab`),
+              INDEX `idx_acceso_activo`(`activo`)
+            ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
         ");
+        try {
+            $stmtAcceso = $pdo->prepare("
+                INSERT INTO `app_usuarios_accesos` (`dni`, `nombre_completo`, `rol`, `cod_estab`, `activo`)
+                VALUES (:dni, :nombre, :rol, :estab, 1)
+                ON DUPLICATE KEY UPDATE
+                    nombre_completo = IF(nombre_completo = '', VALUES(nombre_completo), nombre_completo),
+                    rol = IF(rol IN ('', 'OBSTETRA'), VALUES(rol), rol)
+            ");
+            foreach (hospital_dnis_preactivados() as $dniPre => $metaPre) {
+                $stmtAcceso->execute([
+                    ':dni' => $dniPre,
+                    ':nombre' => $metaPre['nombre'],
+                    ':rol' => $metaPre['rol'],
+                    ':estab' => '000005481',
+                ]);
+            }
+        } catch (Throwable $e) {
+            // Si la tabla no admite el upsert se conserva el acceso por DNI.
+        }
 
         // Tabla de auditoría con cadena inmutable SHA-256.
         $pdo->exec("
@@ -338,6 +483,185 @@ final class HospitalHuaralDB
               PRIMARY KEY (`id`)
             ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
         ");
+    }
+
+    // ========================================================================
+    // CATÁLOGO OFICIAL DE 14 MÉTODOS Y RBAC POR DNI
+    // ========================================================================
+    /**
+     * Siembra/actualiza los 14 métodos oficiales una sola vez por instalación.
+     * Las filas antiguas se migran solo cuando todavía no tienen `alias_codigos`;
+     * después se respetan los días de ciclo editados por Estadística.
+     */
+    public static function ensureCatalogoOficial(PDO $pdo): void
+    {
+        static $verificado = false;
+        if ($verificado) {
+            return;
+        }
+        $verificado = true;
+        try {
+            $oficial = hospital_catalogo_metodos_oficial();
+            $marcas = implode(',', array_fill(0, count($oficial), '?'));
+            $stmt = $pdo->prepare("
+                SELECT COUNT(*) FROM app_catalogo_metodos
+                WHERE codigo_dx IN ({$marcas}) AND alias_codigos <> ''
+            ");
+            $stmt->execute(array_keys($oficial));
+            if ((int)$stmt->fetchColumn() >= count($oficial)) {
+                return;
+            }
+            $upsert = $pdo->prepare("
+                INSERT INTO app_catalogo_metodos
+                    (codigo_dx, nombre_metodo, alias_codigos, dias_ciclo, requiere_cita, activo, orden)
+                VALUES
+                    (:codigo, :nombre, :alias, :dias, :cita, :activo, :orden)
+                ON DUPLICATE KEY UPDATE
+                    dias_ciclo = IF(alias_codigos = '', VALUES(dias_ciclo), dias_ciclo),
+                    nombre_metodo = IF(alias_codigos = '', VALUES(nombre_metodo), nombre_metodo),
+                    requiere_cita = VALUES(requiere_cita),
+                    activo = VALUES(activo),
+                    orden = VALUES(orden),
+                    alias_codigos = VALUES(alias_codigos)
+            ");
+            foreach ($oficial as $meta) {
+                $upsert->execute([
+                    ':codigo' => (string)$meta['codigo_dx'],
+                    ':nombre' => (string)$meta['nombre_metodo'],
+                    ':alias' => implode(',', (array)($meta['alias'] ?? [])),
+                    ':dias' => (int)$meta['dias_ciclo'],
+                    ':cita' => (int)$meta['requiere_cita'],
+                    ':activo' => (int)$meta['activo'],
+                    ':orden' => (int)$meta['orden'],
+                ]);
+            }
+        } catch (Throwable $e) {
+            error_log('[PlanificaHIS] ensureCatalogoOficial: ' . $e->getMessage());
+        }
+    }
+
+    /** @return array<string, mixed>|null */
+    public static function dniPreactivado(string $dni): ?array
+    {
+        $dni = preg_replace('/[^0-9A-Za-z]/', '', $dni) ?? '';
+        $mapa = hospital_dnis_preactivados();
+        return $mapa[$dni] ?? null;
+    }
+
+    /** @return array<string, mixed>|null */
+    public static function accesoUsuario(string $dni): ?array
+    {
+        static $cache = [];
+        $dni = preg_replace('/[^0-9A-Za-z]/', '', $dni) ?? '';
+        if ($dni === '') {
+            return null;
+        }
+        if (array_key_exists($dni, $cache)) {
+            return $cache[$dni];
+        }
+        try {
+            $stmt = self::getConnection()->prepare('SELECT * FROM app_usuarios_accesos WHERE dni = :dni LIMIT 1');
+            $stmt->execute([':dni' => $dni]);
+            $row = $stmt->fetch();
+            $cache[$dni] = $row ?: null;
+        } catch (Throwable $e) {
+            $cache[$dni] = null;
+        }
+        return $cache[$dni];
+    }
+
+    /**
+     * Rol efectivo. La tabla manda; si el DNI no tiene fila se reconocen los
+     * accesos pre-activados (ADMIN_ESTADISTICA / JEFA_OBSTETRAS).
+     */
+    public static function rolUsuario(string $dni): string
+    {
+        $acceso = self::accesoUsuario($dni);
+        if ($acceso !== null) {
+            $rol = strtoupper(trim((string)($acceso['rol'] ?? '')));
+            return $rol !== '' ? $rol : 'OBSTETRA';
+        }
+        $pre = self::dniPreactivado($dni);
+        return $pre !== null ? (string)$pre['rol'] : 'OBSTETRA';
+    }
+
+    public static function accesoActivo(string $dni): bool
+    {
+        $acceso = self::accesoUsuario($dni);
+        if ($acceso === null) {
+            return true; // Las cuentas históricas de `usuario` siguen operativas.
+        }
+        return (int)($acceso['activo'] ?? 1) === 1;
+    }
+
+    public static function esRolRed(string $rol): bool
+    {
+        return in_array(strtoupper(trim($rol)), ['ADMIN_ESTADISTICA', 'JEFA_OBSTETRAS'], true);
+    }
+
+    public static function puedeGestionarAccesos(string $rol): bool
+    {
+        return strtoupper(trim($rol)) === 'ADMIN_ESTADISTICA';
+    }
+
+    public static function puedeResetearObstetra(string $rol): bool
+    {
+        return in_array(strtoupper(trim($rol)), ['ADMIN_ESTADISTICA', 'JEFA_OBSTETRAS'], true);
+    }
+
+    public static function rolEtiqueta(string $rol): string
+    {
+        return match (strtoupper(trim($rol))) {
+            'ADMIN_ESTADISTICA' => 'Administrador de Estadística',
+            'JEFA_OBSTETRAS' => 'Jefa de Obstetras',
+            default => 'Obstetra',
+        };
+    }
+
+    /** Nombre institucional con prioridad tabla de accesos → HIS → usuario. */
+    public static function nombrePersona(string $dni, ?PDO $pdo = null): string
+    {
+        $dni = preg_replace('/[^0-9A-Za-z]/', '', $dni) ?? '';
+        if ($dni === '') {
+            return '';
+        }
+        $acceso = self::accesoUsuario($dni);
+        if ($acceso !== null && trim((string)($acceso['nombre_completo'] ?? '')) !== '') {
+            return trim((string)$acceso['nombre_completo']);
+        }
+        $pre = self::dniPreactivado($dni);
+        if ($pre !== null) {
+            return (string)$pre['nombre'];
+        }
+        try {
+            $pdo = $pdo ?: self::getConnection();
+            foreach (['mstrpers', 'his_mstrpers'] as $tabla) {
+                try {
+                    $stmt = $pdo->prepare("SELECT NOMBRE FROM {$tabla} WHERE CODPSAL = :dni LIMIT 1");
+                    $stmt->execute([':dni' => $dni]);
+                    $nombre = trim((string)($stmt->fetchColumn() ?: ''));
+                    if ($nombre !== '') {
+                        return $nombre;
+                    }
+                } catch (Throwable $e) {
+                    // La tabla puede no existir en una instalación mínima.
+                }
+            }
+            $stmt = $pdo->prepare('SELECT nombre1, apaterno, amaterno FROM usuario WHERE dni = :dni LIMIT 1');
+            $stmt->execute([':dni' => $dni]);
+            $row = $stmt->fetch() ?: [];
+            $nombre = trim(
+                (string)($row['nombre1'] ?? '') . ' ' .
+                (string)($row['apaterno'] ?? '') . ' ' .
+                (string)($row['amaterno'] ?? '')
+            );
+            if ($nombre !== '') {
+                return $nombre;
+            }
+        } catch (Throwable $e) {
+            // Sin nombre se devuelve vacío para que el llamador use su fallback.
+        }
+        return '';
     }
 
     // ========================================================================

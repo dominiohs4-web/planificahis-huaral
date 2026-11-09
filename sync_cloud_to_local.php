@@ -1,25 +1,33 @@
 <?php
 /**
  * sync_cloud_to_local.php
- * Sincronización Nube -> Base Local del Hospital San Juan Bautista Huaral
+ * Sincronización Nube <-> Base Local del Hospital San Juan Bautista Huaral
  * (MariaDB 10.4.32, base histórica de más de 5 GB).
  *
  * Uso CLI (recomendado, en la PC de Estadística):
- *   php sync_cloud_to_local.php --mode=direct --batch=500
- *   php sync_cloud_to_local.php --mode=bridge --batch=500
- *   php sync_cloud_to_local.php --mode=direct --dry-run --dump=.\sync_preview.sql
+ *   php sync_cloud_to_local.php --direction=bidirectional --batch=500
+ *   php sync_cloud_to_local.php --direction=cloud-to-local --mode=direct
+ *   php sync_cloud_to_local.php --direction=cloud-to-local --mode=bridge
+ *   php sync_cloud_to_local.php --direction=local-to-cloud --batch=500
+ *   php sync_cloud_to_local.php --direction=bidirectional --dry-run --dump=.\sync_preview.sql
+ *   php sync_cloud_to_local.php --direction=local-to-cloud --full
  *
  * Uso Web (protegido por token):
- *   https://servidor/sync_cloud_to_local.php?token=...&mode=direct
+ *   https://servidor/sync_cloud_to_local.php?token=...&direction=bidirectional
  *
  * REGLAS DE ORO:
- *   - Modo direct:  usuario, mstrpers, his_mstrpers, his_dl, his_dl_dt.
- *   - Modo bridge: usuario->r_his_digitad, his_mstrpers->r_his_mstrpers,
- *                  his_dl->r_his_dl, his_dl_dt->r_his_dl_dt +
- *                  CALL sp_get_recepcion() una sola vez al final.
- *   - NUNCA exporta pacientes_sin_metodo, auditoria_seguridad_app ni tablas app_*.
+ *   - Solo se sincronizan tablas ORIGINALES del hospital:
+ *       usuario, mstrpers, his_mstrpers, his_dl, his_dl_dt.
+ *   - cloud-to-local modo bridge usa tablas receptoras nativas:
+ *       usuario->r_his_digitad, his_mstrpers->r_his_mstrpers,
+ *       his_dl->r_his_dl, his_dl_dt->r_his_dl_dt + CALL sp_get_recepcion().
+ *   - local-to-cloud sube SOLO las tablas originales y NUNCA crea tablas en el
+ *     servidor del hospital. Las tablas `app_*`, `pacientes_sin_metodo` y
+ *     `auditoria_seguridad_app` jamás salen de la nube ni se replican al HIS.
  *   - NUNCA ejecuta CREATE, ALTER, DROP, TRUNCATE ni DELETE.
  *   - INSERT ... ON DUPLICATE KEY UPDATE (idempotente) y lotes con LIMIT estricto.
+ *   - Incremental local-to-cloud: `ANO >= año actual - 1` en tablas clínicas y
+ *     keyset por PK en tablas pequeñas; `--full` fuerza la carga completa.
  */
 declare(strict_types=1);
 
@@ -46,14 +54,40 @@ foreach ($argvList as $arg) {
     }
 }
 
-$mode = strtolower((string)($options['mode'] ?? ($_GET['mode'] ?? 'direct')));
+$option = static function (string $name, string $default = '') use ($options): string {
+    if (array_key_exists($name, $options)) {
+        return (string)$options[$name];
+    }
+    if (array_key_exists($name, $_GET)) {
+        return (string)$_GET[$name];
+    }
+    return $default;
+};
+
+$direction = strtolower($option('direction', 'cloud-to-local'));
+// Compatibilidad con el parámetro anterior --mode=direct|bridge.
+if ($direction === 'nube-a-local' || $direction === 'cloud_to_local' || $direction === 'cloud-to-local') {
+    $direction = 'cloud-to-local';
+} elseif ($direction === 'local-a-nube' || $direction === 'local_to_cloud' || $direction === 'local-to-cloud') {
+    $direction = 'local-to-cloud';
+} elseif ($direction === 'bidireccional' || $direction === 'bidirectional') {
+    $direction = 'bidirectional';
+}
+if (!in_array($direction, ['cloud-to-local', 'local-to-cloud', 'bidirectional'], true)) {
+    $direction = 'cloud-to-local';
+}
+
+$mode = strtolower($option('mode', 'direct'));
 if (!in_array($mode, ['direct', 'bridge'], true)) {
     $mode = 'direct';
 }
-$batch = (int)($options['batch'] ?? ($_GET['batch'] ?? 500));
+$batch = (int)$option('batch', '500');
 $batch = max(1, min($batch, 2000));
 $dryRun = isset($options['dry-run']) || isset($_GET['dry_run']);
-$dumpPath = trim((string)($options['dump'] ?? ($_GET['dump'] ?? '')));
+$fullSync = isset($options['full']) || isset($_GET['full']);
+$dumpPath = trim($option('dump', ''));
+$sinceYear = (int)$option('since', (string)((int)date('Y') - 1));
+$sinceYear = max(1900, min(2100, $sinceYear));
 
 function sync_out(array $data, int $status = 200): void
 {
@@ -111,7 +145,7 @@ function sync_pdo(array $cfg, bool $isCloud): PDO
             $options[PDO::MYSQL_ATTR_SSL_VERIFY_SERVER_CERT] = false;
         }
         $ca = (string)(getenv('CLOUD_DB_SSL_CA') ?: (getenv('DB_SSL_CA') ?: ''));
-        if ($ca !== '' && is_readable($ca) && defined('PDO::MYSQL_ATTR_SSL_CA')) {
+        if ($ca !== '' && is_readable($ca) && defined(PDO::MYSQL_ATTR_SSL_CA)) {
             $options[PDO::MYSQL_ATTR_SSL_CA] = $ca;
         }
     }
@@ -134,7 +168,8 @@ $localCfg = [
     'pass' => getenv('LOCAL_DB_PASS') !== false ? (string)getenv('LOCAL_DB_PASS') : (getenv('DB_PASS') ?: ''),
 ];
 
-$allowedTables = ['usuario', 'mstrpers', 'his_mstrpers', 'his_dl', 'his_dl_dt'];
+// Lista blanca estricta: solo tablas originales del hospital.
+$originalTables = ['usuario', 'mstrpers', 'his_mstrpers', 'his_dl', 'his_dl_dt'];
 $bridgeMap = [
     'usuario' => 'r_his_digitad',
     'his_mstrpers' => 'r_his_mstrpers',
@@ -144,6 +179,8 @@ $bridgeMap = [
 $neverTables = [
     'pacientes_sin_metodo',
     'auditoria_seguridad_app',
+    'app_catalogo_metodos',
+    'app_usuarios_accesos',
     'app_2fa_challenges',
     'app_obstetra_establecimiento',
     'app_rate_limits',
@@ -154,13 +191,18 @@ $neverTables = [
 $keyColumns = [
     'usuario' => ['dni'],
     'mstrpers' => ['CODPSAL'],
-    'his_mstrpers' => ['CODPSAL'],
+    'his_mstrpers' => ['CODPSAL', 'COD_ESTAB'],
     'his_dl' => ['ID'],
     'his_dl_dt' => ['ID', 'num'],
     'r_his_dl' => ['ID'],
     'r_his_dl_dt' => ['ID', 'num'],
-    'r_his_mstrpers' => ['CODPSAL'],
+    'r_his_mstrpers' => ['CODPSAL', 'COD_ESTAB'],
     'r_his_digitad' => ['dni'],
+];
+// Columnas de año para el modo incremental local-to-cloud.
+$incrementalYearColumns = [
+    'his_dl' => ['ANO'],
+    'his_dl_dt' => ['ano'],
 ];
 
 function sync_is_forbidden(string $table): bool
@@ -225,7 +267,6 @@ function sync_sql_seguro(string $sql): bool
     if (preg_match('/\b(CREATE|ALTER|DROP|TRUNCATE|DELETE|REPLACE|GRANT|REVOKE)\b/i', $limpio)) {
         return false;
     }
-    // Solo se permiten uno o más INSERT (un lote por tabla).
     return (bool)preg_match('/^\s*INSERT\s+INTO\b/i', $limpio);
 }
 
@@ -264,21 +305,31 @@ function upsert_sql(PDO $pdo, string $table, array $rows, array $commonColumns, 
 
 /**
  * Paginación por keyset (sin OFFSET) para no saturar la red ni la base de 5 GB.
+ * `$extraWhere` debe venir sin la palabra WHERE y con sus propios parámetros.
+ *
  * @return array<int, array<string, mixed>>
  */
-function fetch_batch(PDO $pdo, string $table, array $keys, array $columns, ?array $lastKey, int $limit): array
-{
+function fetch_batch(
+    PDO $pdo,
+    string $table,
+    array $keys,
+    array $columns,
+    ?array $lastKey,
+    int $limit,
+    string $extraWhere = '',
+    array $extraParams = []
+): array {
     foreach (array_merge($keys, $columns) as $c) {
         if (!safe_identifier((string)$c)) {
             throw new RuntimeException('Identificador no permitido: ' . $c);
         }
     }
     $limit = max(1, min($limit, 2000));
-    $where = '';
+    $where = [];
     $params = [];
     if ($lastKey !== null && count($lastKey) === count($keys)) {
         if (count($keys) === 1) {
-            $where = ' WHERE ' . qcol($keys[0]) . ' > :k0';
+            $where[] = qcol($keys[0]) . ' > :k0';
             $params[':k0'] = $lastKey[0];
         } else {
             $parts = [];
@@ -286,14 +337,155 @@ function fetch_batch(PDO $pdo, string $table, array $keys, array $columns, ?arra
                 $parts[] = ':k' . $i;
                 $params[':k' . $i] = $lastKey[$i];
             }
-            $where = ' WHERE (' . implode(', ', array_map('qcol', $keys)) . ') > (' . implode(', ', $parts) . ')';
+            $where[] = '(' . implode(', ', array_map('qcol', $keys)) . ') > (' . implode(', ', $parts) . ')';
         }
     }
+    if ($extraWhere !== '') {
+        $where[] = '(' . $extraWhere . ')';
+        $params = array_merge($params, $extraParams);
+    }
+    $whereSql = $where ? (' WHERE ' . implode(' AND ', $where)) : '';
     $order = implode(', ', array_map('qcol', $keys));
-    $sql = 'SELECT ' . implode(', ', array_map('qcol', $columns)) . ' FROM ' . qcol($table) . $where . ' ORDER BY ' . $order . ' LIMIT ' . $limit;
+    $sql = 'SELECT ' . implode(', ', array_map('qcol', $columns)) . ' FROM ' . qcol($table) . $whereSql . ' ORDER BY ' . $order . ' LIMIT ' . $limit;
     $stmt = $pdo->prepare($sql);
     $stmt->execute($params);
     return $stmt->fetchAll();
+}
+
+/**
+ * Sincroniza un sentido completo. Devuelve el reporte del sentido.
+ *
+ * @param array<int, string> $plan source => target
+ * @return array<string, mixed>
+ */
+function sync_direction(
+    string $direction,
+    PDO $source,
+    PDO $target,
+    array $plan,
+    array $keyColumns,
+    array $incrementalYearColumns,
+    int $batch,
+    bool $dryRun,
+    bool $fullSync,
+    int $sinceYear,
+    $dumpHandle
+): array {
+    $report = [
+        'direction' => $direction,
+        'tables' => [],
+        'errors' => [],
+    ];
+
+    foreach ($plan as $sourceTable => $targetTable) {
+        if (
+            !safe_identifier((string)$sourceTable)
+            || !safe_identifier((string)$targetTable)
+            || sync_is_forbidden((string)$sourceTable)
+            || sync_is_forbidden((string)$targetTable)
+        ) {
+            $report['errors'][] = "Tabla no permitida: {$sourceTable} -> {$targetTable}";
+            continue;
+        }
+        if (!table_exists($source, (string)$sourceTable)) {
+            $report['tables'][$sourceTable] = ['skipped' => true, 'reason' => 'No existe en la base de origen.'];
+            continue;
+        }
+        if (!table_exists($target, (string)$targetTable)) {
+            // REGLA DE ORO: jamás intentar escribir en una tabla inexistente.
+            $report['tables'][$sourceTable] = [
+                'skipped' => true,
+                'target' => $targetTable,
+                'reason' => 'No existe en la base de destino.',
+            ];
+            continue;
+        }
+
+        $sourceColumns = table_columns($source, (string)$sourceTable);
+        $targetColumns = table_columns($target, (string)$targetTable);
+        $common = array_values(array_intersect($sourceColumns, $targetColumns));
+        $keys = $keyColumns[$targetTable] ?? [];
+        $keys = array_values(array_intersect($keys, $common));
+        if (!$common || !$keys) {
+            $report['tables'][$sourceTable] = [
+                'skipped' => true,
+                'target' => $targetTable,
+                'reason' => 'Sin columnas/clave común compatibles.',
+            ];
+            continue;
+        }
+
+        // local-to-cloud incremental: las tablas clínicas se limitan por ANO.
+        $extraWhere = '';
+        $extraParams = [];
+        if ($direction === 'local-to-cloud' && !$fullSync) {
+            foreach (($incrementalYearColumns[$sourceTable] ?? []) as $yearColumn) {
+                if (in_array($yearColumn, $sourceColumns, true) && in_array($yearColumn, $common, true)) {
+                    $extraWhere = qcol($yearColumn) . ' >= :ano_min';
+                    $extraParams = [':ano_min' => $sinceYear];
+                    break;
+                }
+            }
+        }
+
+        $processed = 0;
+        $batches = 0;
+        $lastKey = null;
+        $started = microtime(true);
+        try {
+            while (true) {
+                $rows = fetch_batch($source, (string)$sourceTable, $keys, $common, $lastKey, $batch, $extraWhere, $extraParams);
+                if (!$rows) {
+                    break;
+                }
+                $batches++;
+                $sql = upsert_sql($target, (string)$targetTable, $rows, $common, $keys);
+                if ($sql === '') {
+                    break;
+                }
+                if (!sync_sql_seguro($sql)) {
+                    throw new RuntimeException('El lote generado fue bloqueado por la política SQL del hospital.');
+                }
+                if ($dumpHandle !== null) {
+                    fwrite($dumpHandle, "-- [{$direction}] {$sourceTable} -> {$targetTable} · lote {$batches} · " . count($rows) . " filas\n");
+                    fwrite($dumpHandle, $sql . "\n");
+                }
+                if (!$dryRun) {
+                    $target->beginTransaction();
+                    try {
+                        $target->exec($sql);
+                        $target->commit();
+                    } catch (Throwable $e) {
+                        $target->rollBack();
+                        throw $e;
+                    }
+                }
+                $processed += count($rows);
+                $lastRow = $rows[count($rows) - 1];
+                $lastKey = array_map(static fn ($k) => $lastRow[$k], $keys);
+                if (count($rows) < $batch) {
+                    break;
+                }
+            }
+
+            $report['tables'][$sourceTable] = [
+                'target' => $targetTable,
+                'rows' => $processed,
+                'batches' => $batches,
+                'incremental' => $extraWhere !== '' ? ['where' => $extraWhere, 'since' => $sinceYear] : null,
+                'seconds' => round(microtime(true) - $started, 3),
+            ];
+        } catch (Throwable $e) {
+            $report['errors'][] = "{$sourceTable} -> {$targetTable}: " . $e->getMessage();
+            $report['tables'][$sourceTable] = [
+                'target' => $targetTable,
+                'error' => $e->getMessage(),
+                'rows' => $processed,
+            ];
+        }
+    }
+
+    return $report;
 }
 
 // El dump opcional solo puede escribirse dentro de esta carpeta (nunca en rutas
@@ -320,142 +512,95 @@ try {
 
 $report = [
     'startedAt' => date('c'),
+    'direction' => $direction,
     'mode' => $mode,
     'batch' => $batch,
     'dryRun' => $dryRun,
+    'full' => $fullSync,
+    'sinceYear' => $sinceYear,
     'dump' => $dumpPath !== '' ? $dumpPath : null,
-    'tables' => [],
     'neverSynced' => $neverTables,
+    'directions' => [],
+    'tables' => [],
     'errors' => [],
 ];
+
 $dumpHandle = null;
 if ($dumpPath !== '') {
     $dumpHandle = fopen($dumpPath, 'wb');
     if ($dumpHandle === false) {
         sync_out(['error' => 'No se pudo abrir el archivo de dump: ' . $dumpPath], 400);
     }
-    fwrite($dumpHandle, "-- Sincronización Nube -> Local · " . date('c') . " · modo {$mode}\n");
+    fwrite($dumpHandle, "-- Sincronización PlanificaHIS · " . date('c') . " · dirección {$direction} · modo {$mode}\n");
     fwrite($dumpHandle, "SET NAMES utf8mb4;\nSET @OLD_SQL_MODE=@@SQL_MODE;\nSET SQL_MODE='STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION';\n");
 }
 
-// Plan estricto de tablas. En modo directo nunca se tocan las tablas puente y en
-// modo bridge nunca se escribe mstrpers (no tiene tabla receptora nativa).
-$plan = $mode === 'bridge' ? $bridgeMap : array_combine($allowedTables, $allowedTables);
-
-foreach ($plan as $sourceTable => $targetTable) {
-    if (
-        !in_array($sourceTable, $allowedTables, true)
-        || !safe_identifier($sourceTable)
-        || !safe_identifier($targetTable)
-        || sync_is_forbidden($sourceTable)
-        || sync_is_forbidden($targetTable)
-    ) {
-        $report['errors'][] = "Tabla no permitida: {$sourceTable} -> {$targetTable}";
-        continue;
+if ($direction === 'cloud-to-local' || $direction === 'bidirectional') {
+    // En modo bridge solo se tocan las tablas receptoras nativas del hospital.
+    $plan = $mode === 'bridge' ? $bridgeMap : array_combine($originalTables, $originalTables);
+    $sub = sync_direction(
+        'cloud-to-local',
+        $cloud,
+        $local,
+        $plan,
+        $keyColumns,
+        $incrementalYearColumns,
+        $batch,
+        $dryRun,
+        true, // La bajada conserva la carga histórica completa por keyset.
+        $sinceYear,
+        $dumpHandle
+    );
+    $report['directions']['cloud-to-local'] = $sub;
+    foreach (($sub['tables'] ?? []) as $tabla => $info) {
+        $report['tables']['cloud-to-local:' . $tabla] = $info;
     }
-    if (!table_exists($cloud, $sourceTable)) {
-        $report['tables'][$sourceTable] = ['skipped' => true, 'reason' => 'No existe en la base Nube.'];
-        continue;
+    foreach (($sub['errors'] ?? []) as $error) {
+        $report['errors'][] = 'cloud-to-local: ' . $error;
     }
-    if (!table_exists($local, $targetTable)) {
-        // REGLA DE ORO: jamás intentar escribir en una tabla inexistente del hospital.
-        $report['tables'][$sourceTable] = [
-            'skipped' => true,
-            'target' => $targetTable,
-            'reason' => 'No existe en la base local del hospital.',
-        ];
-        continue;
-    }
-
-    $cloudColumns = table_columns($cloud, $sourceTable);
-    $localColumns = table_columns($local, $targetTable);
-    $common = array_values(array_intersect($cloudColumns, $localColumns));
-    $keys = $keyColumns[$targetTable] ?? [];
-    $keys = array_values(array_intersect($keys, $common));
-    if (!$common || !$keys) {
-        $report['tables'][$sourceTable] = [
-            'skipped' => true,
-            'target' => $targetTable,
-            'reason' => 'Sin columnas/clave común compatibles.',
-        ];
-        continue;
-    }
-
-    $processed = 0;
-    $batches = 0;
-    $lastKey = null;
-    $started = microtime(true);
-    try {
-        while (true) {
-            $rows = fetch_batch($cloud, $sourceTable, $keys, $common, $lastKey, $batch);
-            if (!$rows) {
-                break;
-            }
-            $batches++;
-            $sql = upsert_sql($local, $targetTable, $rows, $common, $keys);
-            if ($sql === '') {
-                break;
-            }
-            if (!sync_sql_seguro($sql)) {
-                throw new RuntimeException('El lote generado fue bloqueado por la política SQL del hospital.');
-            }
-            if ($dumpHandle !== null) {
-                fwrite($dumpHandle, "-- {$sourceTable} -> {$targetTable} · lote {$batches} · " . count($rows) . " filas\n");
-                fwrite($dumpHandle, $sql . "\n");
-            }
-            if (!$dryRun) {
-                $local->beginTransaction();
-                try {
-                    $local->exec($sql);
-                    $local->commit();
-                } catch (Throwable $e) {
-                    $local->rollBack();
-                    throw $e;
-                }
-            }
-            $processed += count($rows);
-            $lastRow = $rows[count($rows) - 1];
-            $lastKey = array_map(static fn ($k) => $lastRow[$k], $keys);
-            if (count($rows) < $batch) {
-                break;
-            }
+    if ($direction === 'cloud-to-local' && $mode === 'bridge' && !$dryRun) {
+        try {
+            $local->exec('CALL sp_get_recepcion()');
+            $report['sp_get_recepcion'] = 'OK';
+        } catch (Throwable $e) {
+            $report['errors'][] = 'CALL sp_get_recepcion() falló: ' . $e->getMessage();
         }
+    }
+}
 
-        $report['tables'][$sourceTable] = [
-            'target' => $targetTable,
-            'rows' => $processed,
-            'batches' => $batches,
-            'seconds' => round(microtime(true) - $started, 3),
-        ];
-    } catch (Throwable $e) {
-        $report['errors'][] = "{$sourceTable} -> {$targetTable}: " . $e->getMessage();
-        $report['tables'][$sourceTable] = [
-            'target' => $targetTable,
-            'error' => $e->getMessage(),
-            'rows' => $processed,
-        ];
+if ($direction === 'local-to-cloud' || $direction === 'bidirectional') {
+    // Subida: SOLO tablas originales. Nunca app_*, pacientes_sin_metodo ni
+    // auditoria_seguridad_app. Esto garantiza que el hospital no reciba tablas
+    // nuevas ni datos exclusivos de la nube.
+    $plan = array_combine($originalTables, $originalTables);
+    $sub = sync_direction(
+        'local-to-cloud',
+        $local,
+        $cloud,
+        $plan,
+        $keyColumns,
+        $incrementalYearColumns,
+        $batch,
+        $dryRun,
+        $fullSync,
+        $sinceYear,
+        $dumpHandle
+    );
+    $report['directions']['local-to-cloud'] = $sub;
+    foreach (($sub['tables'] ?? []) as $tabla => $info) {
+        $report['tables']['local-to-cloud:' . $tabla] = $info;
+    }
+    foreach (($sub['errors'] ?? []) as $error) {
+        $report['errors'][] = 'local-to-cloud: ' . $error;
     }
 }
 
 if ($dumpHandle !== null) {
-    if ($mode === 'bridge') {
+    if ($direction !== 'local-to-cloud' && $mode === 'bridge') {
         fwrite($dumpHandle, "\n-- Procedimiento nativo del hospital: integra las tablas receptoras.\nCALL sp_get_recepcion();\n");
-    } else {
-        fwrite($dumpHandle, "\n-- Modo directo: no se invoca sp_get_recepcion() para evitar doble inserción.\n");
     }
     fwrite($dumpHandle, "SET SQL_MODE=@OLD_SQL_MODE;\n");
     fclose($dumpHandle);
-}
-
-// El procedimiento del hospital procesa las tablas puente una sola vez, al final,
-// cuando ya se cargaron todos los lotes. Nunca se ejecuta en modo directo.
-if ($mode === 'bridge' && !$dryRun) {
-    try {
-        $local->exec('CALL sp_get_recepcion()');
-        $report['sp_get_recepcion'] = 'OK';
-    } catch (Throwable $e) {
-        $report['errors'][] = 'CALL sp_get_recepcion() falló: ' . $e->getMessage();
-    }
 }
 
 // Registro de la corrida (solo en la nube; si la tabla no existe se ignora).
@@ -466,7 +611,7 @@ try {
         VALUES (:dni, :modo, :tablas, :filas)
     ")->execute([
         ':dni' => $isCli ? 'SYNC_CLI' : 'SYNC_WEB',
-        ':modo' => $mode,
+        ':modo' => $direction,
         ':tablas' => implode(',', array_keys($report['tables'])),
         ':filas' => array_sum(array_map(static fn ($t) => (int)($t['rows'] ?? 0), $report['tables'])),
     ]);
