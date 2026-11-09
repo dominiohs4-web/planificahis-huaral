@@ -502,6 +502,16 @@ final class HospitalHuaralDB
             'idx_reporte_fecha_estab' => "CREATE INDEX `idx_reporte_fecha_estab` ON `pacientes_sin_metodo` (`fecha_registro`, `cod_estab`)",
             'idx_reporte_estado_fecha' => "CREATE INDEX `idx_reporte_estado_fecha` ON `pacientes_sin_metodo` (`estado_paciente`, `fecha_registro`)",
             'idx_reporte_sector' => "CREATE INDEX `idx_reporte_sector` ON `pacientes_sin_metodo` (`sector`)",
+            // Índices compuestos SARGables de los reportes clínicos. En una
+            // instalación nueva se crean aquí; en TiDB Cloud de 5 GB conviene
+            // aplicarlos con optimizar_indices_5gb.sql en ventana de mantenimiento.
+            'idx_his_dl_ano_mes_dia' => "CREATE INDEX `idx_his_dl_ano_mes_dia` ON `his_dl` (`ANO`, `MES`, `DIA`)",
+            'idx_his_dl_estab_ano_mes_dia' => "CREATE INDEX `idx_his_dl_estab_ano_mes_dia` ON `his_dl` (`COD_ESTAB`, `ANO`, `MES`, `DIA`)",
+            'idx_his_dl_codpsal_ano_mes_dia' => "CREATE INDEX `idx_his_dl_codpsal_ano_mes_dia` ON `his_dl` (`CODPSAL`, `ANO`, `MES`, `DIA`)",
+            'idx_his_dl_dni_ano_mes_dia' => "CREATE INDEX `idx_his_dl_dni_ano_mes_dia` ON `his_dl` (`DNI`, `ANO`, `MES`, `DIA`)",
+            'idx_his_dl_dt_dx_id' => "CREATE INDEX `idx_his_dl_dt_dx_id` ON `his_dl_dt` (`DX`, `ID`)",
+            'idx_his_dl_dt_id_dx' => "CREATE INDEX `idx_his_dl_dt_id_dx` ON `his_dl_dt` (`ID`, `DX`)",
+            'idx_his_dl_id_dni_fecha' => "CREATE INDEX `idx_his_dl_id_dni_fecha` ON `his_dl` (`ID`, `DNI`, `ANO`, `MES`, `DIA`)",
         ] as $ddlIndice) {
             try {
                 $pdo->exec($ddlIndice);

@@ -312,6 +312,98 @@ function filtro_establecimiento_sql(string $alias, array $codigos): array
 
 
 /**
+ * Convierte una fecha ISO YYYY-MM-DD en sus componentes enteros. Devuelve null
+ * si la fecha no existe (por ejemplo 2026-02-31).
+ *
+ * @return array{0: int, 1: int, 2: int}|null
+ */
+function ymd_partes_fecha(string $iso): ?array
+{
+    $dt = DateTimeImmutable::createFromFormat('!Y-m-d', trim($iso));
+    if (!$dt instanceof DateTimeImmutable || $dt->format('Y-m-d') !== trim($iso)) {
+        return null;
+    }
+    return [(int)$dt->format('Y'), (int)$dt->format('n'), (int)$dt->format('j')];
+}
+
+/**
+ * Condición de rango SARGable sobre las columnas enteras (ANO, MES, DIA) del
+ * HIS. NUNCA usa STR_TO_DATE(CONCAT(...)): así TiDB Cloud puede usar los
+ * índices compuestos sobre his_dl sin escanear los 5 GB de atenciones.
+ *
+ * Los parámetros posicionales se agregan a $params en el mismo orden en que
+ * aparecen los `?` de la condición devuelta.
+ */
+function sql_condicion_rango_ymd(string $alias, string $desdeIso, string $hastaIso, array &$params): string
+{
+    $alias = preg_replace('/[^A-Za-z0-9_.]/', '', $alias) ?: 'h';
+    $desde = ymd_partes_fecha($desdeIso);
+    $hasta = ymd_partes_fecha($hastaIso);
+    if ($desde === null || $hasta === null) {
+        return '1 = 0';
+    }
+    [$y1, $m1, $d1] = $desde;
+    [$y2, $m2, $d2] = $hasta;
+
+    // Por seguridad, un rango invertido se normaliza.
+    if ($y1 * 10000 + $m1 * 100 + $d1 > $y2 * 10000 + $m2 * 100 + $d2) {
+        [$y1, $m1, $d1, $y2, $m2, $d2] = [$y2, $m2, $d2, $y1, $m1, $d1];
+    }
+
+    if ($y1 === $y2 && $m1 === $m2 && $d1 === $d2) {
+        $params[] = $y1;
+        $params[] = $m1;
+        $params[] = $d1;
+        return "({$alias}.ANO = ? AND {$alias}.MES = ? AND {$alias}.DIA = ?)";
+    }
+
+    if ($y1 === $y2 && $m1 === $m2) {
+        $params[] = $y1;
+        $params[] = $m1;
+        $params[] = $d1;
+        $params[] = $d2;
+        return "({$alias}.ANO = ? AND {$alias}.MES = ? AND {$alias}.DIA BETWEEN ? AND ?)";
+    }
+
+    if ($y1 === $y2 && $m2 === $m1 + 1) {
+        $params[] = $y1;
+        $params[] = $m1;
+        $params[] = $d1;
+        $params[] = $m2;
+        $params[] = $d2;
+        return "({$alias}.ANO = ? AND (({$alias}.MES = ? AND {$alias}.DIA >= ?) OR ({$alias}.MES = ? AND {$alias}.DIA <= ?)))";
+    }
+
+    // Rangos largos (varios meses o años): se acota por ANO y por la clave
+    // numérica YYYYMMDD calculada sobre columnas enteras, sin funciones.
+    $params[] = $y1;
+    $params[] = $y2;
+    $params[] = $y1 * 10000 + $m1 * 100 + $d1;
+    $params[] = $y2 * 10000 + $m2 * 100 + $d2;
+    return "({$alias}.ANO BETWEEN ? AND ? AND ({$alias}.ANO * 10000 + {$alias}.MES * 100 + {$alias}.DIA) BETWEEN ? AND ?)";
+}
+
+/**
+ * Comprueba una sola vez por request si un índice existe. Permite usar
+ * FORCE INDEX solo cuando el índice ya fue creado, sin romper la app.
+ */
+function indice_existe(PDO $pdo, string $tabla, string $indice): bool
+{
+    static $cache = [];
+    $clave = $tabla . '|' . $indice;
+    if (array_key_exists($clave, $cache)) {
+        return $cache[$clave];
+    }
+    try {
+        $stmt = $pdo->prepare('SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?');
+        $stmt->execute([$tabla, $indice]);
+        return $cache[$clave] = ((int)$stmt->fetchColumn() > 0);
+    } catch (Throwable $e) {
+        return $cache[$clave] = false;
+    }
+}
+
+/**
  * Modo demostración: por defecto SOLO se activa en desarrollo local. En
  * producción (APP_ENV=production o RENDER=1) exige APP_DEMO_MODE=1 explícito.
  * Nunca debe habilitarse en el servidor del hospital.
@@ -1906,16 +1998,14 @@ function alertas_programaticas_datos(PDO $pdo, array $session, ?array $catalogo 
         $codigosEstabAlertas = codigos_establecimiento_sesion($session);
         $scopeAlertas[] = 'h.COD_ESTAB IN (' . implode(',', array_fill(0, count($codigosEstabAlertas), '?')) . ')';
         $scopeParams = array_merge($scopeParams, $codigosEstabAlertas);
-        if ($condObstetraAlertas !== '') {
-            $scopeAlertas[] = 'h.CODPSAL = ?';
-            $scopeParams[] = $paramsObstetraAlertas[0];
-        }
+        // El filtro por obstetra se aplica SIEMPRE aparte con
+        // $condObstetraAlertas para no duplicar placeholders ni parámetros.
     }
     $scope = $scopeAlertas ? (' AND ' . implode(' AND ', $scopeAlertas) . ' ') : '';
 
     $codigosConsulta = array_values($variantes);
     $cacheKey = hash('sha256', implode('|', [
-        'alertas-v2',
+        'alertas-v3',
         (string)($session['dni'] ?? ''),
         (string)($session['cod_estab'] ?? ''),
         (string)$rolAlertas,
@@ -1930,148 +2020,217 @@ function alertas_programaticas_datos(PDO $pdo, array $session, ?array $catalogo 
         return $cacheado;
     }
 
-    $placeholders = implode(',', array_fill(0, count($codigosConsulta), '?'));
+    $columnasAlertasSql = "
+                    h.ID AS id_his, h.DNI AS dni, h.COD_ESTAB AS cod_estab,
+                    h.CODPSAL AS obstetra_dni, h.EDAD AS edad, h.HCLFAM AS historia_clinica,
+                    TRIM(h.Apellido_p) AS apellido_paterno, TRIM(h.Apellido_m) AS apellido_materno,
+                    TRIM(COALESCE(NULLIF(h.Dnombres, ''), h.Pnombre)) AS nombres,
+                    h.DIA, h.MES, h.ANO, h.fecha_reg,
+                    dt.DX AS codigo_his, dt.id_dosis AS dosis, dt.fecha_reg AS fecha_dx";
 
-    if ($modoRedAlertas) {
-        // Alcance RED: UNION ALL por IPRESS. Cada subconsulta usa el índice
-        // (COD_ESTAB, ANO, MES, DIA) y corta en 150 atenciones recientes. En
-        // lugar de ordenar 3.3 millones de filas, se combinan ~53 bloques
-        // pequeños y luego PHP elige la última atención por DNI.
-        $estabsRed = array_column(hospital_establecimientos(), 'COD_ESTAB');
-        $subs = [];
-        $paramsSql = [];
-        $porEstab = 80;
-        foreach ($estabsRed as $codRed) {
-            $subs[] = "(SELECT h.ID AS id_his, h.DNI AS dni, h.COD_ESTAB AS cod_estab,
-                   h.CODPSAL AS obstetra_dni, h.EDAD AS edad, h.HCLFAM AS historia_clinica,
-                   TRIM(h.Apellido_p) AS apellido_paterno, TRIM(h.Apellido_m) AS apellido_materno,
-                   TRIM(COALESCE(NULLIF(h.Dnombres, ''), h.Pnombre)) AS nombres,
-                   h.DIA, h.MES, h.ANO, h.fecha_reg,
-                   dt.DX AS codigo_his, dt.id_dosis AS dosis, dt.fecha_reg AS fecha_dx
-                FROM his_dl h FORCE INDEX(idx_his_dl_estab_fecha)
-                INNER JOIN his_dl_dt dt ON dt.ID = h.ID
-                WHERE h.COD_ESTAB = ?
-                  AND h.ANO BETWEEN ? AND ?
-                  AND dt.DX IN ({$placeholders})
-                  {$condObstetraAlertas}
-                ORDER BY h.ANO DESC, h.MES DESC, h.DIA DESC, h.ID DESC
-                LIMIT {$porEstab})";
-            $paramsSql[] = (string)$codRed;
-            $paramsSql[] = $anioMin;
-            $paramsSql[] = $anioMax;
-            foreach ($codigosConsulta as $codigoConsulta) {
-                $paramsSql[] = $codigoConsulta;
-            }
-            foreach ($paramsObstetraAlertas as $paramObstetra) {
-                $paramsSql[] = $paramObstetra;
-            }
+    // Agrupación por ciclo (máximo 6 grupos: 30/60/90/120/180/365). Una sola
+    // consulta SARGable, sin UNION ALL por IPRESS y sin FORCE INDEX.
+    $gruposCicloAlertas = [];
+    foreach ($codigosConsulta as $codigoAlerta) {
+        $metaAlerta = resolver_metodo_catalogo($catalogo, $codigoAlerta);
+        $diasAlerta = max(1, (int)($metaAlerta['dias_ciclo'] ?? 30));
+        $gruposCicloAlertas[$diasAlerta][] = (string)$codigoAlerta;
+    }
+    ksort($gruposCicloAlertas);
+
+    // Ventana global que cubre HOY, MAÑANA y las VENCIDAS de hasta 365 días para
+    // todos los ciclos. Cualquier paciente relevante tiene su última atención
+    // dentro de esta ventana; así se obtiene el método vigente real sin traer
+    // todo el historial ni ejecutar una segunda pasada por DNI.
+    $minCicloAlertas = min(array_keys($gruposCicloAlertas));
+    $maxCicloAlertas = max(array_keys($gruposCicloAlertas));
+    $desdeGlobalAlertas = $hoy->modify('-' . ($maxCicloAlertas + $lookbackVencidas) . ' days')->format('Y-m-d');
+    $hastaGlobalAlertas = $manana->modify('-' . $minCicloAlertas . ' days')->format('Y-m-d');
+    $anioMinAlertas = (int)substr($desdeGlobalAlertas, 0, 4);
+    $anioMaxAlertas = (int)substr($hastaGlobalAlertas, 0, 4);
+
+    $placeholdersAlertas = implode(',', array_fill(0, count($codigosConsulta), '?'));
+    $paramsRangoGlobalAlertas = [];
+    $condicionRangoGlobalAlertas = sql_condicion_rango_ymd('h', $desdeGlobalAlertas, $hastaGlobalAlertas, $paramsRangoGlobalAlertas);
+
+    // CASE que traduce cada DX a su ciclo para elegir, en una misma fecha, el
+    // método de mayor ciclo (método real) al calcular MAX(CONCAT(fecha|ciclo|DX)).
+    $casoCicloAlertas = 'CASE dt.DX';
+    foreach ($gruposCicloAlertas as $diasCicloAlerta => $listaCodigosAlerta) {
+        foreach ($listaCodigosAlerta as $codigoAlerta) {
+            $casoCicloAlertas .= ' WHEN ' . $pdo->quote((string)$codigoAlerta) . ' THEN ' . (int)$diasCicloAlerta;
         }
-        $sql = implode(' UNION ALL ', $subs);
-    } else {
-        $codigosEstabAlertas = codigos_establecimiento_sesion($session);
-        if ($esObstetraAlertas) {
-            // OBSTETRA: idx_his_dl_codpsal_fecha resuelve el ORDER BY por fecha
-            // con igualdad en CODPSAL, incluso si aún no tiene atenciones.
-            $marcasEstabObstetra = implode(',', array_fill(0, count($codigosEstabAlertas), '?'));
-            $sql = "
-                SELECT h.ID AS id_his, h.DNI AS dni, h.COD_ESTAB AS cod_estab,
-                       h.CODPSAL AS obstetra_dni, h.EDAD AS edad, h.HCLFAM AS historia_clinica,
-                       TRIM(h.Apellido_p) AS apellido_paterno, TRIM(h.Apellido_m) AS apellido_materno,
-                       TRIM(COALESCE(NULLIF(h.Dnombres, ''), h.Pnombre)) AS nombres,
-                       h.DIA, h.MES, h.ANO, h.fecha_reg,
-                       dt.DX AS codigo_his, dt.id_dosis AS dosis, dt.fecha_reg AS fecha_dx
+    }
+    $casoCicloAlertas .= ' ELSE 365 END';
+    $hintAlertas = indice_existe($pdo, 'his_dl', 'idx_his_dl_id_dni_fecha')
+        ? ' FORCE INDEX(idx_his_dl_id_dni_fecha)'
+        : '';
+
+    $sqlUltimaAlerta = "
+        SELECT h.DNI AS dni,
+               MAX(h.ANO * 10000 + h.MES * 100 + h.DIA) AS ymd,
+               SUBSTRING_INDEX(
+                   MAX(CONCAT(
+                       LPAD(h.ANO * 10000 + h.MES * 100 + h.DIA, 8, '0'), '|',
+                       LPAD({$casoCicloAlertas}, 4, '0'), '|',
+                       dt.DX
+                   )),
+                   '|', -1
+               ) AS codigo
+        FROM his_dl h{$hintAlertas}
+        INNER JOIN his_dl_dt dt ON dt.ID = h.ID
+        WHERE h.ANO BETWEEN ? AND ?
+          AND dt.DX IN ({$placeholdersAlertas})
+          AND {$condicionRangoGlobalAlertas}
+          {$scope}
+          {$condObstetraAlertas}
+        GROUP BY h.DNI
+    ";
+    $paramsUltimaAlerta = array_merge(
+        [$anioMinAlertas, $anioMaxAlertas],
+        $codigosConsulta,
+        $paramsRangoGlobalAlertas,
+        $scopeParams,
+        $paramsObstetraAlertas
+    );
+
+    $ultimasAlertas = [];
+    try {
+        $stmtUltima = $pdo->prepare($sqlUltimaAlerta);
+        $stmtUltima->execute($paramsUltimaAlerta);
+        $ultimasAlertas = $stmtUltima->fetchAll();
+    } catch (Throwable $e) {
+        error_log('[PlanificaHIS] alertas_programaticas_datos: ' . $e->getMessage());
+        return $vacio;
+    }
+
+    // Clasificación clínica en PHP: solo se conservan las pacientes cuya ÚLTIMA
+    // atención vence hoy, mañana o está vencida dentro de los últimos 365 días.
+    $relevantesAlertas = [];
+    $totalesAlerta = ['manana' => 0, 'hoy' => 0, 'vencidas' => 0];
+    foreach ($ultimasAlertas as $filaUltima) {
+        $dni = trim((string)($filaUltima['dni'] ?? ''));
+        $codigoHis = trim((string)($filaUltima['codigo'] ?? ''));
+        $ymd = (int)($filaUltima['ymd'] ?? 0);
+        if ($dni === '' || $codigoHis === '' || $ymd <= 0) {
+            continue;
+        }
+        $meta = resolver_metodo_catalogo($catalogo, $codigoHis);
+        if ($meta === null || (int)$meta['dias_ciclo'] <= 0) {
+            continue;
+        }
+        $anio = intdiv($ymd, 10000);
+        $mes = intdiv($ymd - $anio * 10000, 100);
+        $dia = $ymd % 100;
+        if (!checkdate($mes, $dia, $anio)) {
+            continue;
+        }
+        $fecha = sprintf('%04d-%02d-%02d', $anio, $mes, $dia);
+        try {
+            $proximo = (new DateTimeImmutable($fecha))->modify('+' . (int)$meta['dias_ciclo'] . ' days');
+        } catch (Throwable $e) {
+            continue;
+        }
+        $diasRestantes = (int)$hoy->diff($proximo)->format('%r%a');
+        if ($diasRestantes > 1 || $diasRestantes < -$lookbackVencidas) {
+            continue;
+        }
+        $grupoAlerta = $diasRestantes === 1 ? 'manana' : ($diasRestantes === 0 ? 'hoy' : 'vencidas');
+        $totalesAlerta[$grupoAlerta]++;
+        $relevantesAlertas[$dni] = [
+            'ymd' => $ymd,
+            'codigo' => $codigoHis,
+            'dias' => $diasRestantes,
+            'grupo' => $grupoAlerta,
+        ];
+    }
+    // Solo se construyen tarjetas completas para las más urgentes de cada grupo;
+    // los totales reales ya quedaron contados arriba.
+    $porGrupoAlerta = ['manana' => [], 'hoy' => [], 'vencidas' => []];
+    foreach ($relevantesAlertas as $dniGrupo => $metaGrupo) {
+        $porGrupoAlerta[$metaGrupo['grupo']][$dniGrupo] = $metaGrupo;
+    }
+    $relevantesSeleccionados = [];
+    foreach ($porGrupoAlerta as $listaGrupo) {
+        uasort($listaGrupo, static function (array $a, array $b): int {
+            $cmp = (int)$a['dias'] <=> (int)$b['dias'];
+            return $cmp !== 0 ? $cmp : strcmp((string)$a['codigo'], (string)$b['codigo']);
+        });
+        foreach (array_slice($listaGrupo, 0, max(1, $limiteLista), true) as $dniGrupo => $metaGrupo) {
+            $relevantesSeleccionados[$dniGrupo] = $metaGrupo;
+        }
+    }
+
+    // Se traen las filas completas solo de las pacientes relevantes (DNI+fecha).
+    $filasAlertas = [];
+    if ($relevantesSeleccionados) {
+        foreach (array_chunk(array_keys($relevantesSeleccionados), 500) as $loteDnisAlerta) {
+            $tuplasAlerta = [];
+            $paramsTuplasAlerta = [];
+            foreach ($loteDnisAlerta as $dniLote) {
+                $ymdLote = (int)$relevantesSeleccionados[$dniLote]['ymd'];
+                $tuplasAlerta[] = '(?, ?, ?, ?)';
+                $paramsTuplasAlerta[] = $dniLote;
+                $paramsTuplasAlerta[] = intdiv($ymdLote, 10000);
+                $paramsTuplasAlerta[] = intdiv($ymdLote - intdiv($ymdLote, 10000) * 10000, 100);
+                $paramsTuplasAlerta[] = $ymdLote % 100;
+            }
+            $sqlFilasAlerta = "
+                SELECT {$columnasAlertasSql}
                 FROM his_dl h
                 INNER JOIN his_dl_dt dt ON dt.ID = h.ID
-                WHERE h.CODPSAL = ?
-                  AND h.ANO BETWEEN ? AND ?
-                  AND dt.DX IN ({$placeholders})
-                  AND h.COD_ESTAB IN ({$marcasEstabObstetra})
-                ORDER BY h.ANO DESC, h.MES DESC, h.DIA DESC, h.ID DESC
-                LIMIT 4000
+                WHERE (h.DNI, h.ANO, h.MES, h.DIA) IN (" . implode(',', $tuplasAlerta) . ")
+                  AND dt.DX IN ({$placeholdersAlertas})
             ";
-            $paramsSql = array_merge(
-                [(string)($session['dni'] ?? ''), $anioMin, $anioMax],
-                $codigosConsulta,
-                $codigosEstabAlertas
-            );
-        } else {
-            // JEFATURA: una subconsulta por variante de código de IPRESS. Con
-            // igualdad en COD_ESTAB, el índice entrega el orden por fecha sin
-            // filesort (≈0.4 s sobre los 5 GB del HIS).
-            $subs = [];
-            $paramsSql = [];
-            foreach ($codigosEstabAlertas as $codEstabAlerta) {
-                $subs[] = "(SELECT h.ID AS id_his, h.DNI AS dni, h.COD_ESTAB AS cod_estab,
-                       h.CODPSAL AS obstetra_dni, h.EDAD AS edad, h.HCLFAM AS historia_clinica,
-                       TRIM(h.Apellido_p) AS apellido_paterno, TRIM(h.Apellido_m) AS apellido_materno,
-                       TRIM(COALESCE(NULLIF(h.Dnombres, ''), h.Pnombre)) AS nombres,
-                       h.DIA, h.MES, h.ANO, h.fecha_reg,
-                       dt.DX AS codigo_his, dt.id_dosis AS dosis, dt.fecha_reg AS fecha_dx
-                    FROM his_dl h FORCE INDEX(idx_his_dl_estab_fecha)
-                    INNER JOIN his_dl_dt dt ON dt.ID = h.ID
-                    WHERE h.COD_ESTAB = ?
-                      AND h.ANO BETWEEN ? AND ?
-                      AND dt.DX IN ({$placeholders})
-                    ORDER BY h.ANO DESC, h.MES DESC, h.DIA DESC, h.ID DESC
-                    LIMIT 4000)";
-                $paramsSql[] = (string)$codEstabAlerta;
-                $paramsSql[] = $anioMin;
-                $paramsSql[] = $anioMax;
-                foreach ($codigosConsulta as $codigoConsulta) {
-                    $paramsSql[] = $codigoConsulta;
+            try {
+                $stmtFilasAlerta = $pdo->prepare($sqlFilasAlerta);
+                $stmtFilasAlerta->execute(array_merge($paramsTuplasAlerta, $codigosConsulta));
+                foreach ($stmtFilasAlerta->fetchAll() as $filaAlerta) {
+                    $filasAlertas[] = $filaAlerta;
                 }
+            } catch (Throwable $e) {
+                error_log('[PlanificaHIS] alertas filas relevantes: ' . $e->getMessage());
             }
-            $sql = implode(' UNION ALL ', $subs);
         }
     }
 
     $mejores = [];
-    try {
-        $stmt = $pdo->prepare($sql);
-        $stmt->execute($paramsSql);
-        foreach ($stmt->fetchAll() as $row) {
-            $dni = trim((string)($row['dni'] ?? ''));
-            $codigoHis = trim((string)($row['codigo_his'] ?? ''));
-            if ($dni === '' || $codigoHis === '') {
-                continue;
-            }
-            $meta = resolver_metodo_catalogo($catalogo, $codigoHis);
-            if ($meta === null || (int)$meta['dias_ciclo'] <= 0) {
-                continue;
-            }
-            $fecha = trim((string)($row['fecha_aplicacion'] ?? ''));
-            if ($fecha === '' || str_starts_with($fecha, '0000-00-00')) {
-                $fecha = fecha_aplicacion_his($row);
-            }
-            if ($fecha === '') {
-                continue;
-            }
-            try {
-                $proximo = (new DateTimeImmutable($fecha))->modify('+' . (int)$meta['dias_ciclo'] . ' days');
-            } catch (Throwable $e) {
-                continue;
-            }
-            $diasRestantes = (int)$hoy->diff($proximo)->format('%r%a');
-            if ($diasRestantes > 1 || $diasRestantes < -$lookbackVencidas) {
-                continue;
-            }
-            $score = $fecha . '|' . str_pad((string)(int)$meta['dias_ciclo'], 4, '0', STR_PAD_LEFT)
-                . '|' . str_pad((string)(int)($row['id_his'] ?? 0), 12, '0', STR_PAD_LEFT);
-            if (isset($mejores[$dni]) && strcmp($score, (string)$mejores[$dni]['_score']) <= 0) {
-                continue;
-            }
-            $mejores[$dni] = [
-                '_score' => $score,
-                'row' => $row,
-                'meta' => $meta,
-                'fecha' => $fecha,
-                'proximo' => $proximo->format('Y-m-d'),
-                'dias_restantes' => $diasRestantes,
-            ];
+    foreach ($filasAlertas as $row) {
+        $dni = trim((string)($row['dni'] ?? ''));
+        $codigoHis = trim((string)($row['codigo_his'] ?? ''));
+        if ($dni === '' || $codigoHis === '' || !isset($relevantesSeleccionados[$dni])) {
+            continue;
         }
-    } catch (Throwable $e) {
-        error_log('[PlanificaHIS] alertas_programaticas_datos: ' . $e->getMessage());
-        return $vacio;
+        $meta = resolver_metodo_catalogo($catalogo, $codigoHis);
+        if ($meta === null || (int)$meta['dias_ciclo'] <= 0) {
+            continue;
+        }
+        $fecha = fecha_aplicacion_his($row);
+        if ($fecha === '') {
+            continue;
+        }
+        try {
+            $proximo = (new DateTimeImmutable($fecha))->modify('+' . (int)$meta['dias_ciclo'] . ' days');
+        } catch (Throwable $e) {
+            continue;
+        }
+        $diasRestantes = (int)$hoy->diff($proximo)->format('%r%a');
+        if ($diasRestantes > 1 || $diasRestantes < -$lookbackVencidas) {
+            continue;
+        }
+        $score = $fecha . '|' . str_pad((string)(int)$meta['dias_ciclo'], 4, '0', STR_PAD_LEFT)
+            . '|' . str_pad((string)(int)($row['id_his'] ?? 0), 12, '0', STR_PAD_LEFT);
+        if (isset($mejores[$dni]) && strcmp($score, (string)$mejores[$dni]['_score']) <= 0) {
+            continue;
+        }
+        $mejores[$dni] = [
+            '_score' => $score,
+            'row' => $row,
+            'meta' => $meta,
+            'fecha' => $fecha,
+            'proximo' => $proximo->format('Y-m-d'),
+            'dias_restantes' => $diasRestantes,
+        ];
     }
 
     if (!$mejores) {
@@ -2144,9 +2303,9 @@ function alertas_programaticas_datos(PDO $pdo, array $session, ?array $catalogo 
     }
 
     $totales = [
-        'manana' => count($listas['manana']),
-        'hoy' => count($listas['hoy']),
-        'vencidas' => count($listas['vencidas']),
+        'manana' => (int)$totalesAlerta['manana'],
+        'hoy' => (int)$totalesAlerta['hoy'],
+        'vencidas' => (int)$totalesAlerta['vencidas'],
     ];
     foreach ($listas as &$lista) {
         usort($lista, static function (array $a, array $b): int {
@@ -2232,6 +2391,104 @@ function catalogo_metodos_planificacion(PDO $pdo, bool $forceReload = false): ar
         ];
     }
     return $catalogo;
+}
+
+/**
+ * Obtiene la ÚLTIMA atención de Planificación Familiar por DNI hasta una fecha
+ * tope, en dos pasos rápidos:
+ *   1) índice (DNI, ANO, MES, DIA) → MAX(YYYYMMDD) por DNI (solo índice).
+ *   2) búsqueda exacta de las filas completas de esas fechas por DNI.
+ * Evita traer todo el historial de cada paciente y mantiene el cruce en < 2 s.
+ *
+ * @param array<int, string> $dnis
+ * @param array<int, string> $codigos
+ * @param array<int, string> $columnasSelect columnas ya escapadas del SELECT
+ * @return array<int, array<string, mixed>>
+ */
+function ultimas_atenciones_metodo_hasta(
+    PDO $pdo,
+    array $dnis,
+    array $codigos,
+    string $desdeIso,
+    string $hastaIso,
+    string $columnasSelect
+): array {
+    $dnis = array_values(array_unique(array_filter(array_map(
+        static fn ($dni): string => preg_replace('/[^0-9A-Za-z]/', '', (string)$dni) ?? '',
+        $dnis
+    ), static fn (string $dni): bool => $dni !== '')));
+    $codigos = array_values(array_unique(array_filter(array_map('strval', $codigos), static fn ($c) => trim($c) !== '')));
+    if (!$dnis || !$codigos) {
+        return [];
+    }
+    $desde = ymd_partes_fecha($desdeIso);
+    $hasta = ymd_partes_fecha($hastaIso);
+    if ($desde === null || $hasta === null) {
+        return [];
+    }
+    $marcasDx = implode(',', array_fill(0, count($codigos), '?'));
+    $resultado = [];
+    foreach (array_chunk($dnis, 500) as $lote) {
+        $marcasDni = implode(',', array_fill(0, count($lote), '?'));
+        $paramsRango = [];
+        $condicionRango = sql_condicion_rango_ymd('h', $desdeIso, $hastaIso, $paramsRango);
+        $sqlUltima = "
+            SELECT h.DNI AS dni,
+                   MAX(h.ANO * 10000 + h.MES * 100 + h.DIA) AS ymd
+            FROM his_dl h
+            INNER JOIN his_dl_dt dt ON dt.ID = h.ID
+            WHERE h.DNI IN ({$marcasDni})
+              AND h.ANO BETWEEN ? AND ?
+              AND dt.DX IN ({$marcasDx})
+              AND {$condicionRango}
+            GROUP BY h.DNI
+        ";
+        $paramsUltima = array_merge($lote, [$desde[0], $hasta[0]], $codigos, $paramsRango);
+        try {
+            $stmtUltima = $pdo->prepare($sqlUltima);
+            $stmtUltima->execute($paramsUltima);
+            $ultimas = $stmtUltima->fetchAll();
+        } catch (Throwable $e) {
+            error_log('[PlanificaHIS] ultimas_atenciones_metodo_hasta (max): ' . $e->getMessage());
+            continue;
+        }
+        if (!$ultimas) {
+            continue;
+        }
+        $tuplas = [];
+        $paramsTuplas = [];
+        foreach ($ultimas as $filaUltima) {
+            $ymd = (int)($filaUltima['ymd'] ?? 0);
+            if ($ymd <= 0) {
+                continue;
+            }
+            $tuplas[] = '(?, ?, ?, ?)';
+            $paramsTuplas[] = (string)$filaUltima['dni'];
+            $paramsTuplas[] = intdiv($ymd, 10000);
+            $paramsTuplas[] = intdiv($ymd - intdiv($ymd, 10000) * 10000, 100);
+            $paramsTuplas[] = $ymd % 100;
+        }
+        if (!$tuplas) {
+            continue;
+        }
+        $sqlFilas = "
+            SELECT {$columnasSelect}
+            FROM his_dl h
+            INNER JOIN his_dl_dt dt ON dt.ID = h.ID
+            WHERE (h.DNI, h.ANO, h.MES, h.DIA) IN (" . implode(',', $tuplas) . ")
+              AND dt.DX IN ({$marcasDx})
+        ";
+        try {
+            $stmtFilas = $pdo->prepare($sqlFilas);
+            $stmtFilas->execute(array_merge($paramsTuplas, $codigos));
+            foreach ($stmtFilas->fetchAll() as $fila) {
+                $resultado[] = $fila;
+            }
+        } catch (Throwable $e) {
+            error_log('[PlanificaHIS] ultimas_atenciones_metodo_hasta (filas): ' . $e->getMessage());
+        }
+    }
+    return $resultado;
 }
 
 /**
@@ -3047,33 +3304,45 @@ if ($action === 'reporte_programacion') {
     }
     $codigosConsulta = codigos_consulta_metodos($catalogo, $codigosFiltro);
 
-    // 7-B.2 Ventanas de fecha de aplicación por método. Al calcular
+    // 7-B.2 Ventanas de fecha de aplicación AGRUPADAS POR CICLO. Los 14 métodos
+    // oficiales solo tienen 6 ciclos (30, 60, 90, 120, 180 y 365 días), por lo
+    // que en vez de ~28 condiciones se construyen como máximo 6. Al calcular
     // fecha_proximo = fecha_aplicacion + dias_ciclo, la consulta se acota a los
     // días exactos en que cada método pudo aplicarse para vencer en el rango.
-    $lookbackVencidas = 1825; // 5 años de abandonos recuperables
+    $historicoVencidas = !empty($_GET['historico']);
+    $lookbackVencidas = $historicoVencidas ? 730 : 365; // abandonos recuperables
     $lookbackTodos = 365;     // "vencidas recientes" al combinar todos los modos
-    $ventanas = [];
+    $gruposPorCiclo = [];
     foreach ($codigosConsulta as $codigo) {
         $metaCiclo = resolver_metodo_catalogo($catalogo, $codigo);
         $dias = max(1, (int)($metaCiclo['dias_ciclo'] ?? 30));
+        $gruposPorCiclo[$dias][] = (string)$codigo;
+    }
+    ksort($gruposPorCiclo);
+
+    $ventanas = [];
+    $ventanasPorCiclo = [];
+    foreach ($gruposPorCiclo as $dias => $listaCodigosCiclo) {
         if ($rangoModo === 'exacto') {
             $desde = $fechaBase->modify('-' . $dias . ' days')->format('Y-m-d');
             $hasta = $desde;
         } elseif ($rangoModo === 'ventana_7d') {
             $desde = $fechaBase->modify('-' . $dias . ' days')->format('Y-m-d');
-            $hasta = $fechaBase->modify('+' . (7 - $dias) . ' days')->format('Y-m-d');
+            $desplazamiento7d = 7 - $dias;
+            $hasta = $fechaBase->modify(($desplazamiento7d >= 0 ? '+' : '-') . abs($desplazamiento7d) . ' days')->format('Y-m-d');
         } elseif ($rangoModo === 'vencidas') {
             $desde = $fechaBase->modify('-' . ($dias + $lookbackVencidas) . ' days')->format('Y-m-d');
             $hasta = $fechaBase->modify('-' . ($dias + 1) . ' days')->format('Y-m-d');
         } else {
             $desde = $fechaBase->modify('-' . ($dias + $lookbackTodos) . ' days')->format('Y-m-d');
-            $hasta = $fechaBase->modify('+' . (7 - $dias) . ' days')->format('Y-m-d');
+            $desplazamientoTodos = 7 - $dias;
+            $hasta = $fechaBase->modify(($desplazamientoTodos >= 0 ? '+' : '-') . abs($desplazamientoTodos) . ' days')->format('Y-m-d');
         }
-        $ventanas[$codigo] = ['desde' => $desde, 'hasta' => $hasta];
+        $ventanasPorCiclo[(int)$dias] = ['desde' => $desde, 'hasta' => $hasta];
+        foreach ($listaCodigosCiclo as $codigoCiclo) {
+            $ventanas[$codigoCiclo] = ['desde' => $desde, 'hasta' => $hasta];
+        }
     }
-
-    $placeholdersCodigos = implode(',', array_fill(0, count($codigosConsulta), '?'));
-    $paramsCodigos = array_map('strval', $codigosConsulta);
 
     $verRed = puede_ver_red($session);
     $rolReporte = HospitalHuaralDB::rolUsuario((string)$session['dni']);
@@ -3114,100 +3383,186 @@ if ($action === 'reporte_programacion') {
         $paramsObstetra[] = $obstetraReporte;
     }
 
-    // Rango de años derivado de las ventanas clínicas (solo para acotar el
-    // índice h.ANO; NO se usa STR_TO_DATE en el WHERE).
-    $anioMinVentana = (int)date('Y') - 6;
-    $anioMaxVentana = (int)date('Y') + 1;
-    foreach ($ventanas as $rango) {
-        $anioMinVentana = min($anioMinVentana, (int)substr((string)$rango['desde'], 0, 4));
-        $anioMaxVentana = max($anioMaxVentana, (int)substr((string)$rango['hasta'], 0, 4));
+    $columnasReporteSql = "
+                    h.ID AS id_his, h.DNI AS dni, h.COD_ESTAB AS cod_estab,
+                    TRIM(h.Apellido_p) AS apellido_paterno,
+                    TRIM(h.Apellido_m) AS apellido_materno,
+                    TRIM(COALESCE(NULLIF(h.Dnombres, ''), h.Pnombre)) AS nombres,
+                    h.EDAD AS edad, h.HCLFAM AS historia_clinica,
+                    h.FICHAFAM AS ficha_familiar, h.CODPSAL AS obstetra_dni,
+                    h.DIA, h.MES, h.ANO, h.fecha_reg,
+                    dt.DX AS codigo_metodo, dt.id_dosis AS dosis, dt.fecha_reg AS fecha_dx";
+
+    $placeholdersReporte = implode(',', array_fill(0, count($codigosConsulta), '?'));
+    $primeroFechaReporte = in_array($rangoModo, ['exacto', 'ventana_7d'], true);
+    if ($primeroFechaReporte && indice_existe($pdo, 'his_dl', 'idx_his_dl_ano_mes_dia')) {
+        $hintReporte = ' FORCE INDEX(idx_his_dl_ano_mes_dia)';
+        $joinReporte = 'STRAIGHT_JOIN';
+    } elseif (!$primeroFechaReporte && indice_existe($pdo, 'his_dl', 'idx_his_dl_id_dni_fecha')) {
+        $hintReporte = ' FORCE INDEX(idx_his_dl_id_dni_fecha)';
+        $joinReporte = 'INNER JOIN';
+    } else {
+        $hintReporte = '';
+        $joinReporte = $primeroFechaReporte ? 'STRAIGHT_JOIN' : 'INNER JOIN';
     }
 
-    // CONSULTA SARGABLE: dt.DX IN (...) + h.ANO BETWEEN + índices de
-    // establecimiento/obstetra. Se leen como máximo 4000 atenciones recientes y
-    // la ventana exacta se evalúa en PHP, sin invalidar índices sobre 5 GB.
-    $limiteCandidatos = 4000;
-    if ($modoRedReporte) {
-        $estabsReporte = array_column(hospital_establecimientos(), 'COD_ESTAB');
-        $subsReporte = [];
-        $params = [];
-        $porEstabReporte = 100;
-        foreach ($estabsReporte as $codReporte) {
-            $subsReporte[] = "(SELECT
-                    h.ID AS id_his, h.DNI AS dni, h.COD_ESTAB AS cod_estab,
-                    TRIM(h.Apellido_p) AS apellido_paterno,
-                    TRIM(h.Apellido_m) AS apellido_materno,
-                    TRIM(COALESCE(NULLIF(h.Dnombres, ''), h.Pnombre)) AS nombres,
-                    h.EDAD AS edad, h.HCLFAM AS historia_clinica,
-                    h.FICHAFAM AS ficha_familiar, h.CODPSAL AS obstetra_dni,
-                    h.DIA, h.MES, h.ANO, h.fecha_reg,
-                    dt.DX AS codigo_metodo, dt.id_dosis AS dosis, dt.fecha_reg AS fecha_dx
-                FROM his_dl h FORCE INDEX(idx_his_dl_estab_fecha)
-                INNER JOIN his_dl_dt dt ON dt.ID = h.ID
-                WHERE h.COD_ESTAB = ?
-                  AND dt.DX IN ({$placeholdersCodigos})
-                  {$condicionObstetra}
-                  AND h.ANO BETWEEN ? AND ?
-                ORDER BY h.ANO DESC, h.MES DESC, h.DIA DESC, h.ID DESC
-                LIMIT {$porEstabReporte})";
-            $params[] = (string)$codReporte;
-            foreach ($paramsCodigos as $paramCodigo) {
-                $params[] = $paramCodigo;
-            }
-            foreach ($paramsObstetra as $paramObstetra) {
-                $params[] = $paramObstetra;
-            }
-            $params[] = $anioMinVentana;
-            $params[] = $anioMaxVentana;
+    // Se ejecuta UNA consulta por ciclo (máximo 6), cada una con su ventana
+    // exacta. Así la fecha exacta y los 7 días solo recorren sus pocos días y
+    // vencidas/todos no genera un OR gigantesco sobre 2 años.
+    $ultimasReporte = [];
+    foreach ($gruposPorCiclo as $diasCicloReporte => $listaCodigosReporte) {
+        $rangoCicloReporte = $ventanasPorCiclo[(int)$diasCicloReporte] ?? null;
+        if ($rangoCicloReporte === null || !$listaCodigosReporte) {
+            continue;
         }
-        $sql = implode(' UNION ALL ', $subsReporte);
-    } else {
-        $codigosEstabReporte = $paramsEstab ?: [''];
-        $subsReporte = [];
-        $params = [];
-        foreach ($codigosEstabReporte as $codEstabReporte) {
-            $condEstabSub = $paramsEstab ? ' AND h.COD_ESTAB = ? ' : '';
-            $subsReporte[] = "(SELECT
-                    h.ID AS id_his, h.DNI AS dni, h.COD_ESTAB AS cod_estab,
-                    TRIM(h.Apellido_p) AS apellido_paterno,
-                    TRIM(h.Apellido_m) AS apellido_materno,
-                    TRIM(COALESCE(NULLIF(h.Dnombres, ''), h.Pnombre)) AS nombres,
-                    h.EDAD AS edad, h.HCLFAM AS historia_clinica,
-                    h.FICHAFAM AS ficha_familiar, h.CODPSAL AS obstetra_dni,
-                    h.DIA, h.MES, h.ANO, h.fecha_reg,
-                    dt.DX AS codigo_metodo, dt.id_dosis AS dosis, dt.fecha_reg AS fecha_dx
-                FROM his_dl h FORCE INDEX(idx_his_dl_estab_fecha)
-                INNER JOIN his_dl_dt dt ON dt.ID = h.ID
-                WHERE dt.DX IN ({$placeholdersCodigos})
-                  {$condEstabSub}
-                  {$condicionObstetra}
-                  AND h.ANO BETWEEN ? AND ?
-                ORDER BY h.ANO DESC, h.MES DESC, h.DIA DESC, h.ID DESC
-                LIMIT 4000)";
-            foreach ($paramsCodigos as $paramCodigo) {
-                $params[] = $paramCodigo;
+        $marcasCicloReporte = implode(',', array_fill(0, count($listaCodigosReporte), '?'));
+        $paramsRangoCicloReporte = [];
+        $condicionRangoCicloReporte = sql_condicion_rango_ymd(
+            'h',
+            (string)$rangoCicloReporte['desde'],
+            (string)$rangoCicloReporte['hasta'],
+            $paramsRangoCicloReporte
+        );
+        $anioMinCicloReporte = (int)substr((string)$rangoCicloReporte['desde'], 0, 4);
+        $anioMaxCicloReporte = (int)substr((string)$rangoCicloReporte['hasta'], 0, 4);
+        $sqlCicloReporte = "
+            SELECT h.DNI AS dni,
+                   MAX(h.ANO * 10000 + h.MES * 100 + h.DIA) AS ymd,
+                   SUBSTRING_INDEX(
+                       MAX(CONCAT(
+                           LPAD(h.ANO * 10000 + h.MES * 100 + h.DIA, 8, '0'), '|',
+                           LPAD('" . (int)$diasCicloReporte . "', 4, '0'), '|',
+                           dt.DX
+                       )),
+                       '|', -1
+                   ) AS codigo
+            FROM his_dl h{$hintReporte}
+            {$joinReporte} his_dl_dt dt ON dt.ID = h.ID
+            WHERE h.ANO BETWEEN ? AND ?
+              AND dt.DX IN ({$marcasCicloReporte})
+              AND {$condicionRangoCicloReporte}
+              {$condicionEstabH}
+              {$condicionObstetra}
+            GROUP BY h.DNI
+        ";
+        $paramsCicloReporte = array_merge(
+            [$anioMinCicloReporte, $anioMaxCicloReporte],
+            $listaCodigosReporte,
+            $paramsRangoCicloReporte,
+            $paramsEstab,
+            $paramsObstetra
+        );
+        try {
+            $stmtCicloReporte = $pdo->prepare($sqlCicloReporte);
+            $stmtCicloReporte->execute($paramsCicloReporte);
+            foreach ($stmtCicloReporte->fetchAll() as $filaCicloReporte) {
+                $dniCicloReporte = (string)$filaCicloReporte['dni'];
+                $ymdCicloReporte = (int)$filaCicloReporte['ymd'];
+                $diasCicloActual = (int)$diasCicloReporte;
+                $existenteCiclo = $ultimasReporte[$dniCicloReporte] ?? null;
+                if (
+                    $existenteCiclo === null
+                    || $ymdCicloReporte > (int)$existenteCiclo['ymd']
+                    || ($ymdCicloReporte === (int)$existenteCiclo['ymd'] && $diasCicloActual > (int)$existenteCiclo['dias'])
+                ) {
+                    $ultimasReporte[$dniCicloReporte] = [
+                        'dni' => $dniCicloReporte,
+                        'ymd' => $ymdCicloReporte,
+                        'dias' => $diasCicloActual,
+                        'codigo' => (string)$filaCicloReporte['codigo'],
+                    ];
+                }
             }
-            if ($paramsEstab) {
-                $params[] = (string)$codEstabReporte;
-            }
-            foreach ($paramsObstetra as $paramObstetra) {
-                $params[] = $paramObstetra;
-            }
-            $params[] = $anioMinVentana;
-            $params[] = $anioMaxVentana;
+        } catch (Throwable $e) {
+            error_log('[PlanificaHIS] reporte_programacion query failure: ' . $e->getMessage());
+            json_error('No se pudo calcular la programación. Verifique los índices clínicos del HIS e intente nuevamente.', 503, [
+                'code' => 'REPORTE_QUERY_FAILED',
+            ]);
         }
-        $sql = implode(' UNION ALL ', $subsReporte);
     }
+    $ultimasReporte = array_values($ultimasReporte);
+
+    // Clasificación clínica de la última atención real por DNI. Como la ventana
+    // global cubre todas las fechas de aplicación que podrían vencer en el
+    // rango, este MAX por DNI ya incorpora renovaciones y cambios de método.
+    $limiteCandidatos = 8000;
+    $relevantesReporte = [];
+    foreach ($ultimasReporte as $filaUltimaReporte) {
+        $dniReporte = trim((string)($filaUltimaReporte['dni'] ?? ''));
+        $codigoReporte = trim((string)($filaUltimaReporte['codigo'] ?? ''));
+        $ymdReporte = (int)($filaUltimaReporte['ymd'] ?? 0);
+        if ($dniReporte === '' || $codigoReporte === '' || $ymdReporte <= 0) {
+            continue;
+        }
+        $metaReporte = resolver_metodo_catalogo($catalogo, $codigoReporte);
+        if ($metaReporte === null || (int)$metaReporte['dias_ciclo'] <= 0) {
+            continue;
+        }
+        $anioReporte = intdiv($ymdReporte, 10000);
+        $mesReporte = intdiv($ymdReporte - $anioReporte * 10000, 100);
+        $diaReporte = $ymdReporte % 100;
+        if (!checkdate($mesReporte, $diaReporte, $anioReporte)) {
+            continue;
+        }
+        $fechaReporte = sprintf('%04d-%02d-%02d', $anioReporte, $mesReporte, $diaReporte);
+        try {
+            $proximoReporte = (new DateTimeImmutable($fechaReporte))->modify('+' . (int)$metaReporte['dias_ciclo'] . ' days');
+        } catch (Throwable $e) {
+            continue;
+        }
+        $diasReporte = (int)$fechaBase->diff($proximoReporte)->format('%r%a');
+        $aplicaReporte = match ($rangoModo) {
+            'exacto' => $diasReporte === 0,
+            'ventana_7d' => $diasReporte >= 0 && $diasReporte <= 7,
+            'vencidas' => $diasReporte < 0 && $diasReporte >= -$lookbackVencidas,
+            'todos' => $diasReporte <= 7 && $diasReporte >= -$lookbackTodos,
+            default => false,
+        };
+        if (!$aplicaReporte) {
+            continue;
+        }
+        $relevantesReporte[$dniReporte] = [
+            'ymd' => $ymdReporte,
+            'dias' => $diasReporte,
+        ];
+    }
+    // Prioriza a las más urgentes y respeta el límite de candidatos del reporte.
+    uasort($relevantesReporte, static function (array $a, array $b): int {
+        return (int)$a['dias'] <=> (int)$b['dias'];
+    });
+    $relevantesReporte = array_slice($relevantesReporte, 0, $limiteCandidatos, true);
+
+    // Se traen las filas completas solo de las pacientes relevantes (DNI+fecha).
     $filasBase = [];
-    try {
-        $stmt = $pdo->prepare($sql);
-        $stmt->execute($params);
-        $filasBase = $stmt->fetchAll();
-    } catch (Throwable $e) {
-        error_log('[PlanificaHIS] reporte_programacion query failure: ' . $e->getMessage());
-        json_error('No se pudo calcular la programación. Verifique los índices clínicos del HIS e intente nuevamente.', 503, [
-            'code' => 'REPORTE_QUERY_FAILED',
-        ]);
+    if ($relevantesReporte) {
+        foreach (array_chunk(array_keys($relevantesReporte), 500) as $loteDnisReporte) {
+            $tuplasReporte = [];
+            $paramsTuplasReporte = [];
+            foreach ($loteDnisReporte as $dniLoteReporte) {
+                $ymdLoteReporte = (int)$relevantesReporte[$dniLoteReporte]['ymd'];
+                $tuplasReporte[] = '(?, ?, ?, ?)';
+                $paramsTuplasReporte[] = $dniLoteReporte;
+                $paramsTuplasReporte[] = intdiv($ymdLoteReporte, 10000);
+                $paramsTuplasReporte[] = intdiv($ymdLoteReporte - intdiv($ymdLoteReporte, 10000) * 10000, 100);
+                $paramsTuplasReporte[] = $ymdLoteReporte % 100;
+            }
+            $sqlFilasReporte = "
+                SELECT {$columnasReporteSql}
+                FROM his_dl h
+                INNER JOIN his_dl_dt dt ON dt.ID = h.ID
+                WHERE (h.DNI, h.ANO, h.MES, h.DIA) IN (" . implode(',', $tuplasReporte) . ")
+                  AND dt.DX IN ({$placeholdersReporte})
+            ";
+            try {
+                $stmtFilasReporte = $pdo->prepare($sqlFilasReporte);
+                $stmtFilasReporte->execute(array_merge($paramsTuplasReporte, $codigosConsulta));
+                foreach ($stmtFilasReporte->fetchAll() as $filaReporte) {
+                    $filasBase[] = $filaReporte;
+                }
+            } catch (Throwable $e) {
+                error_log('[PlanificaHIS] reporte_programacion filas relevantes: ' . $e->getMessage());
+            }
+        }
     }
 
     // 7-B.4 Se elige la última atención con método por DNI. Si una misma
@@ -3737,7 +4092,17 @@ function reporte_campo_datos(PDO $pdo, array $session, array $input, int $page =
 {
     [$desde, $hasta] = reporte_rango_fechas($input);
     $hastaExclusivo = (new DateTimeImmutable($hasta))->modify('+1 day')->format('Y-m-d');
-    $alcance = strtolower(trim((string)($input['alcance'] ?? (is_admin_session($session) ? 'red' : 'establecimiento')))) === 'red' ? 'red' : 'establecimiento';
+    $codEstabSolicitadoCampo = preg_replace('/[^0-9A-Za-z]/', '', (string)($input['cod_estab'] ?? '')) ?? '';
+    if (in_array(strtoupper($codEstabSolicitadoCampo), ['TODOS', 'RED'], true)) {
+        $codEstabSolicitadoCampo = '';
+    }
+    $alcanceRecibidoCampo = strtolower(trim((string)($input['alcance'] ?? '')));
+    if ($alcanceRecibidoCampo === '') {
+        // Un ADMIN_ESTADISTICA que envía cod_estab específico pide ese
+        // establecimiento; sin cod_estab se conserva el alcance de red.
+        $alcanceRecibidoCampo = ($codEstabSolicitadoCampo !== '' || !is_admin_session($session)) ? 'establecimiento' : 'red';
+    }
+    $alcance = $alcanceRecibidoCampo === 'red' ? 'red' : 'establecimiento';
     $verRed = puede_ver_red($session);
     $rolCampo = HospitalHuaralDB::rolUsuario((string)($session['dni'] ?? ''));
     $esObstetraCampo = $rolCampo === 'OBSTETRA';
@@ -3746,7 +4111,15 @@ function reporte_campo_datos(PDO $pdo, array $session, array $input, int $page =
     if (!$modoRedCampo) {
         $alcance = 'establecimiento';
     }
-    $codigosEstab = $modoRedCampo ? [] : codigos_establecimiento_sesion($session);
+    if ($modoRedCampo) {
+        $codigosEstab = [];
+    } elseif (is_admin_session($session) && $codEstabSolicitadoCampo !== '') {
+        // Estadística puede consultar cualquier IPRESS específica de la Red.
+        $variantesSolicitadasCampo = hospital_codigos_busqueda_establecimiento($codEstabSolicitadoCampo);
+        $codigosEstab = $variantesSolicitadasCampo ?: [$codEstabSolicitadoCampo];
+    } else {
+        $codigosEstab = codigos_establecimiento_sesion($session);
+    }
 
     $where = ['p.fecha_registro >= :desde', 'p.fecha_registro < :hasta_exclusivo'];
     $params = [':desde' => $desde, ':hasta_exclusivo' => $hastaExclusivo];
@@ -3916,7 +4289,9 @@ function reporte_campo_datos(PDO $pdo, array $session, array $input, int $page =
         $dnisObstetras = array_map(static fn ($row) => (string)$row['codpsal_obstetra'], $filasBase);
         $dicObs = nombres_personas_por_dni($pdo, $dnisObstetras);
         $catalogo = catalogo_metodos_planificacion($pdo);
-        $ultimas = reporte_ultimas_atenciones_metodo($pdo, $dnisPagina, $catalogo, $codigosEstab);
+        // El último método se busca en TODA la Red por DNI: la paciente pudo
+        // renovar en otra IPRESS y aun así debe mostrarse su método vigente.
+        $ultimas = reporte_ultimas_atenciones_metodo($pdo, $dnisPagina, $catalogo);
         foreach ($filasBase as $row) {
             $dni = (string)$row['dni'];
             $codObstetra = (string)$row['codpsal_obstetra'];
@@ -4007,7 +4382,15 @@ function reporte_metodos_datos(PDO $pdo, array $session, array $input, int $page
 {
     [$desde, $hasta] = reporte_rango_fechas($input);
     $hastaExclusivo = (new DateTimeImmutable($hasta))->modify('+1 day')->format('Y-m-d');
-    $alcance = strtolower(trim((string)($input['alcance'] ?? (is_admin_session($session) ? 'red' : 'establecimiento')))) === 'red' ? 'red' : 'establecimiento';
+    $codEstabSolicitadoMetodos = preg_replace('/[^0-9A-Za-z]/', '', (string)($input['cod_estab'] ?? '')) ?? '';
+    if (in_array(strtoupper($codEstabSolicitadoMetodos), ['TODOS', 'RED'], true)) {
+        $codEstabSolicitadoMetodos = '';
+    }
+    $alcanceRecibidoMetodos = strtolower(trim((string)($input['alcance'] ?? '')));
+    if ($alcanceRecibidoMetodos === '') {
+        $alcanceRecibidoMetodos = ($codEstabSolicitadoMetodos !== '' || !is_admin_session($session)) ? 'establecimiento' : 'red';
+    }
+    $alcance = $alcanceRecibidoMetodos === 'red' ? 'red' : 'establecimiento';
     $verRed = puede_ver_red($session);
     $rolMetodos = HospitalHuaralDB::rolUsuario((string)($session['dni'] ?? ''));
     $esObstetraMetodos = $rolMetodos === 'OBSTETRA';
@@ -4015,7 +4398,14 @@ function reporte_metodos_datos(PDO $pdo, array $session, array $input, int $page
     if (!$modoRedMetodos) {
         $alcance = 'establecimiento';
     }
-    $codigosEstab = $modoRedMetodos ? [] : codigos_establecimiento_sesion($session);
+    if ($modoRedMetodos) {
+        $codigosEstab = [];
+    } elseif (is_admin_session($session) && $codEstabSolicitadoMetodos !== '') {
+        $variantesSolicitadasMetodos = hospital_codigos_busqueda_establecimiento($codEstabSolicitadoMetodos);
+        $codigosEstab = $variantesSolicitadasMetodos ?: [$codEstabSolicitadoMetodos];
+    } else {
+        $codigosEstab = codigos_establecimiento_sesion($session);
+    }
     $catalogo = catalogo_metodos_planificacion($pdo);
 
     $where = ['p.fecha_registro >= :desde', 'p.fecha_registro < :hasta_exclusivo'];
@@ -4056,7 +4446,8 @@ function reporte_metodos_datos(PDO $pdo, array $session, array $input, int $page
     $dnis = array_map(static fn ($row) => (string)$row['dni'], $base);
     $dnisObs = array_map(static fn ($row) => (string)$row['codpsal_obstetra'], $base);
     $dicObs = nombres_personas_por_dni($pdo, $dnisObs);
-    $ultimas = reporte_ultimas_atenciones_metodo($pdo, $dnis, $catalogo, $codigosEstab);
+    // Búsqueda en toda la Red por DNI (sin restringir al establecimiento del padrón).
+    $ultimas = reporte_ultimas_atenciones_metodo($pdo, $dnis, $catalogo);
 
     $codigoFiltro = strtoupper(trim((string)($input['codigo_metodo'] ?? 'TODOS')));
     $estadoFiltro = strtoupper(trim((string)($input['estado_vencimiento'] ?? 'TODOS')));
@@ -4399,7 +4790,7 @@ if ($action === 'export_reporte_campo' || $action === 'export_reporte_metodos') 
                 'Salidas a campo, sectores visitados y pacientes captadas por día',
                 [
                     'Establecimiento: ' . (string)($datos['establecimiento']['nombre'] ?? $session['estab_nombre']),
-                    'Periodo: ' . (string)($datos['periodo']['desde'] ?? '') . ' al ' . (string)($datos['periodo']['hasta'] ?? ''),
+                    'Periodo: ' . (string)($datos['filtros']['fecha_desde'] ?? '') . ' al ' . (string)($datos['filtros']['fecha_hasta'] ?? ''),
                     'Obstetra: ' . (string)($datos['obstetra_nombre'] ?? 'TODAS LAS OBSTETRAS'),
                     'Emisor: ' . HospitalHuaralDB::nombrePersona((string)$session['dni'], $pdo) . ' · DNI ' . (string)$session['dni'] . ' · ' . (string)$session['platform'],
                     'Generado: ' . date('d/m/Y H:i:s'),
@@ -4495,7 +4886,7 @@ if ($action === 'export_reporte_campo' || $action === 'export_reporte_metodos') 
         'Programación y estado de la última atención de Planificación Familiar',
         [
             'Establecimiento: ' . (string)($datos['establecimiento']['nombre'] ?? $session['estab_nombre']),
-            'Periodo: ' . (string)($datos['periodo']['desde'] ?? '') . ' al ' . (string)($datos['periodo']['hasta'] ?? ''),
+            'Periodo: ' . (string)($datos['filtros']['fecha_desde'] ?? '') . ' al ' . (string)($datos['filtros']['fecha_hasta'] ?? ''),
             'Filtros: ' . json_encode($datos['filtros'] ?? [], JSON_UNESCAPED_UNICODE),
             'Emisor: ' . HospitalHuaralDB::nombrePersona((string)$session['dni'], $pdo) . ' · DNI ' . (string)$session['dni'] . ' · ' . (string)$session['platform'],
             'Generado: ' . date('d/m/Y H:i:s'),

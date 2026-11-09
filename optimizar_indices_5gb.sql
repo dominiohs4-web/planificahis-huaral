@@ -178,6 +178,55 @@ CALL sp_planifica_crear_indice(
 );
 
 -- ----------------------------------------------------------------------------
+-- 2-B. ÍNDICES COMPUESTOS OFICIALES PARA REPORTES SARGABLES (v2.1.0)
+-- Usados por reporte_programacion y alertas_programaticas_datos. Permiten
+-- resolver (ANO, MES, DIA) y el cruce DX -> ID sin escanear los 5 GB.
+-- ----------------------------------------------------------------------------
+CALL sp_planifica_crear_indice(
+    'his_dl',
+    'idx_his_dl_ano_mes_dia',
+    '`ANO`, `MES`, `DIA`',
+    'INDEX'
+);
+CALL sp_planifica_crear_indice(
+    'his_dl',
+    'idx_his_dl_estab_ano_mes_dia',
+    '`COD_ESTAB`, `ANO`, `MES`, `DIA`',
+    'INDEX'
+);
+CALL sp_planifica_crear_indice(
+    'his_dl',
+    'idx_his_dl_codpsal_ano_mes_dia',
+    '`CODPSAL`, `ANO`, `MES`, `DIA`',
+    'INDEX'
+);
+CALL sp_planifica_crear_indice(
+    'his_dl',
+    'idx_his_dl_dni_ano_mes_dia',
+    '`DNI`, `ANO`, `MES`, `DIA`',
+    'INDEX'
+);
+CALL sp_planifica_crear_indice(
+    'his_dl_dt',
+    'idx_his_dl_dt_dx_id',
+    '`DX`, `ID`',
+    'INDEX'
+);
+CALL sp_planifica_crear_indice(
+    'his_dl_dt',
+    'idx_his_dl_dt_id_dx',
+    '`ID`, `DX`',
+    'INDEX'
+);
+-- Cobertura del cruce DX -> ID -> DNI/fecha sin leer la fila clustered de 5 GB.
+CALL sp_planifica_crear_indice(
+    'his_dl',
+    'idx_his_dl_id_dni_fecha',
+    '`ID`, `DNI`, `ANO`, `MES`, `DIA`',
+    'INDEX'
+);
+
+-- ----------------------------------------------------------------------------
 -- 3. ACTUALIZAR ESTADÍSTICAS DEL OPTIMIZADOR (sin bloquear escrituras)
 -- ----------------------------------------------------------------------------
 ANALYZE TABLE his_dl, his_dl_dt, establec, mstrpers, pacientes_sin_metodo, auditoria_seguridad_app;

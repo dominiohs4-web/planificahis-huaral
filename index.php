@@ -196,7 +196,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       showSecurity: true,
       booted: false,
       reporteVista: 'CAMPO',
-      campoFiltros: filtrosReportePorDefecto(),
+      campoFiltros: Object.assign(filtrosReportePorDefecto(), { alcance: 'establecimiento' }),
       campoData: null,
       campoLoading: false,
       campoError: '',
@@ -204,7 +204,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       metodosData: null,
       metodosLoading: false,
       metodosError: '',
-      productividadFiltros: filtrosReportePorDefecto(),
+      productividadFiltros: Object.assign(filtrosReportePorDefecto(), { alcance: 'establecimiento' }),
       productividadData: null,
       productividadLoading: false,
       productividadError: '',
@@ -212,6 +212,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       padronLoading: false,
       padronError: '',
       padronGrupo: 'todas',
+      padronAlcance: 'establecimiento',
       accesosData: null,
       accesosLoading: false,
       accesosError: '',
@@ -1665,6 +1666,10 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
             <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Sector</label><select onchange="actualizarFiltroCampo('sector', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white"><option value="TODOS">Todos los sectores</option>${sectores.map(function (s) { return '<option value="' + esc(s) + '"' + (f.sector === s ? ' selected' : '') + '>' + esc(s) + '</option>'; }).join('')}</select></div>
             <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Obstetra</label><select onchange="actualizarFiltroCampo('obstetra', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white"><option value="TODOS">Todas las obstetras</option>${obstetras.map(function (o) { return '<option value="' + esc(o.codpsal_obstetra) + '"' + (f.obstetra === o.codpsal_obstetra ? ' selected' : '') + '>' + esc(o.nombre_obstetra || o.codpsal_obstetra) + '</option>'; }).join('')}</select></div>
           </div>
+          ${state.session && state.session.isAdmin ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">Alcance</label><select onchange="actualizarFiltroCampo('alcance', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-[10px] bg-white">
+            <option value="establecimiento" ${f.alcance === 'establecimiento' ? 'selected' : ''}>Mi establecimiento activo</option>
+            <option value="red" ${f.alcance === 'red' ? 'selected' : ''}>Toda la Red (53 IPRESS)</option>
+          </select></div>` : ''}
           <input type="search" value="${esc(f.q)}" oninput="buscarCampoDebounce(this.value)" placeholder="Buscar por DNI o nombres de la paciente..." class="w-full min-h-[44px] px-3 rounded-xl border border-slate-300 text-xs" />
           <button type="button" onclick="cargarReporteCampo(true)" ${state.campoLoading ? 'disabled' : ''} class="w-full min-h-[46px] rounded-xl bg-sky-700 hover:bg-sky-800 text-white text-xs font-bold disabled:opacity-60">${state.campoLoading ? 'Consultando reporte...' : 'Aplicar filtros y actualizar'}</button>
           ${state.campoError ? '<div class="p-3 rounded-xl bg-red-50 border border-red-200 text-[11px] text-red-800">' + esc(state.campoError) + '</div>' : ''}
@@ -2019,7 +2024,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
     }
 
     async function cargarTodasFilasCampo() {
-      const filtros = Object.assign({}, state.campoFiltros, { page: 1, per_page: 100 });
+      const filtros = Object.assign({}, state.campoFiltros, { page: 1, per_page: 500 });
       const primera = await apiGet('reporte_campo', filtros);
       const filas = (primera.filas || []).slice();
       const pages = Math.min(50, Number((primera.paginacion && primera.paginacion.pages) || 1));
@@ -2359,6 +2364,10 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
             <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Desde</label><input id="prod-desde" type="date" value="${esc(f.fecha_desde)}" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs font-mono" /></div>
             <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Hasta</label><input id="prod-hasta" type="date" value="${esc(f.fecha_hasta)}" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs font-mono" /></div>
           </div>
+          ${state.session && state.session.isAdmin ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">Alcance</label><select id="prod-alcance" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-[10px] bg-white">
+            <option value="establecimiento" ${f.alcance === 'establecimiento' ? 'selected' : ''}>Mi establecimiento activo</option>
+            <option value="red" ${f.alcance === 'red' ? 'selected' : ''}>Toda la Red (53 IPRESS)</option>
+          </select></div>` : ''}
           <div class="grid grid-cols-2 gap-2">
             <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Mes / Año rápido</label><input type="month" onchange="aplicarMesProductividad(this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs font-mono" /></div>
             <div><label class="block text-[10px] font-bold text-slate-600 mb-1">DNI obstetra (opcional)</label><input id="prod-obstetra" type="text" inputmode="numeric" value="${esc(f.obstetra !== 'TODOS' ? f.obstetra : '')}" placeholder="TODOS" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs font-mono" /></div>
@@ -2407,6 +2416,10 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
           <div class="grid grid-cols-4 gap-1.5">
             ${grupos.map(function (g) { return '<button type="button" onclick="setPadronGrupo(\'' + g.id + '\')" class="min-h-[40px] rounded-xl text-[9px] font-bold ' + (state.padronGrupo === g.id ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-700') + '">' + esc(g.label) + '</button>'; }).join('')}
           </div>
+          ${state.session && state.session.isAdmin ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">Alcance</label><select onchange="setPadronAlcance(this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-[10px] bg-white">
+            <option value="establecimiento" ${state.padronAlcance === 'establecimiento' ? 'selected' : ''}>Mi establecimiento activo</option>
+            <option value="red" ${state.padronAlcance === 'red' ? 'selected' : ''}>Toda la Red (53 IPRESS)</option>
+          </select></div>` : ''}
           <button type="button" onclick="cargarReportePadron(true)" ${state.padronLoading ? 'disabled' : ''} class="w-full min-h-[44px] rounded-xl bg-sky-700 hover:bg-sky-800 disabled:opacity-60 text-white text-xs font-bold">${state.padronLoading ? 'Consultando padrón...' : 'Actualizar padrón de llamadas'}</button>
           ${state.padronError ? '<div class="p-3 rounded-xl bg-red-50 border border-red-200 text-[11px] text-red-800">' + esc(state.padronError) + '</div>' : ''}
         </div>
@@ -2427,12 +2440,19 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       cargarReportePadron(true);
     }
 
+    function setPadronAlcance(alcance) {
+      state.padronAlcance = alcance === 'red' ? 'red' : 'establecimiento';
+      cargarReportePadron(true);
+    }
+
     async function buscarProductividad() {
       const desde = document.getElementById('prod-desde');
       const hasta = document.getElementById('prod-hasta');
       const obstetra = document.getElementById('prod-obstetra');
       if (desde && desde.value) state.productividadFiltros.fecha_desde = desde.value;
       if (hasta && hasta.value) state.productividadFiltros.fecha_hasta = hasta.value;
+      const alcance = document.getElementById('prod-alcance');
+      if (alcance && alcance.value) state.productividadFiltros.alcance = alcance.value;
       state.productividadFiltros.obstetra = obstetra && obstetra.value.trim() ? obstetra.value.replace(/\D/g, '') : 'TODOS';
       state.productividadFiltros.page = 1;
       await cargarReporteProductividad(true);
@@ -2491,7 +2511,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       state.padronError = '';
       if (mostrarSkeleton) render();
       try {
-        state.padronData = await apiGet('reporte_padron', { grupo: state.padronGrupo || 'todas' });
+        state.padronData = await apiGet('reporte_padron', { grupo: state.padronGrupo || 'todas', alcance: state.padronAlcance || 'establecimiento' });
       } catch (error) {
         state.padronError = error.message;
       } finally {
