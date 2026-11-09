@@ -157,6 +157,26 @@ CALL sp_planifica_crear_indice(
     'INDEX'
 );
 
+-- App: autenticación y sesiones multi-obstetra (tablas propias de la nube).
+CALL sp_planifica_crear_indice(
+    'app_usuarios',
+    'idx_app_usuarios_rol_estab_activo',
+    '`rol`, `cod_estab`, `activo`',
+    'INDEX'
+);
+CALL sp_planifica_crear_indice(
+    'app_sesiones',
+    'idx_app_sesiones_dni_expira',
+    '`dni`, `expires_at`',
+    'INDEX'
+);
+CALL sp_planifica_crear_indice(
+    'app_sesiones',
+    'idx_app_sesiones_actividad',
+    '`last_activity`, `expires_at`',
+    'INDEX'
+);
+
 -- ----------------------------------------------------------------------------
 -- 3. ACTUALIZAR ESTADÍSTICAS DEL OPTIMIZADOR (sin bloquear escrituras)
 -- ----------------------------------------------------------------------------

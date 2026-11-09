@@ -55,6 +55,51 @@ header('X-Permitted-Cross-Domain-Policies: none');
 header('Permissions-Policy: geolocation=(), camera=(), microphone=(), payment=(), usb=()');
 header('Vary: Origin');
 
+// ---------------------------------------------------------------------------
+// MANEJADOR GLOBAL DE ERRORES: NINGÚN endpoint puede devolver un HTTP 500
+// vacío de Apache. Toda excepción se registra y se responde SIEMPRE JSON.
+// ---------------------------------------------------------------------------
+function api_emit_internal_error(Throwable $e): void
+{
+    error_log(
+        '[PlanificaHIS API Error] ' . $e->getMessage()
+        . ' en ' . $e->getFile() . ':' . $e->getLine()
+    );
+    if (!headers_sent()) {
+        http_response_code(500);
+        header('Content-Type: application/json; charset=utf-8');
+        header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    }
+    echo json_encode([
+        'error' => 'Ocurrió un error interno controlado en el servidor clínico. ' .
+                   'El detalle técnico quedó registrado en el log para Estadística e Informática.',
+        'code' => 'API_INTERNAL_ERROR',
+        'action' => (string)($_GET['action'] ?? ''),
+        'timestamp' => date('c'),
+    ], JSON_UNESCAPED_UNICODE);
+}
+
+set_exception_handler(static function (Throwable $e): void {
+    api_emit_internal_error($e);
+});
+
+register_shutdown_function(static function (): void {
+    $err = error_get_last();
+    if ($err === null) {
+        return;
+    }
+    if (!in_array((int)$err['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR], true)) {
+        return;
+    }
+    api_emit_internal_error(new ErrorException(
+        (string)$err['message'],
+        0,
+        (int)$err['type'],
+        (string)$err['file'],
+        (int)$err['line']
+    ));
+});
+
 $requestOrigin = trim((string)($_SERVER['HTTP_ORIGIN'] ?? ''));
 $configuredOrigins = array_values(array_filter(array_map(
     'trim',
@@ -470,9 +515,12 @@ if ($action === 'login') {
             HospitalHuaralDB::registrarAuditoria($dni, 'AUTH_LOGIN_FAILED', 'Clave inicial incorrecta (clave_hash vacío).', '', $platform);
             json_error('DNI o contraseña incorrectos.', 401, ['remainingAttempts' => max(0, 4 - (int)$limit['hits'])]);
         }
+        // Bcrypt se calcula UNA SOLA VEZ (cost 10) y se reutiliza en el UPDATE
+        // y en la sesión. Antes se ejecutaba dos veces seguidas por login.
+        $hashedInicial = HospitalHuaralDB::hashPassword($password);
         $pdo->prepare('UPDATE app_usuarios SET clave_hash = :pass WHERE dni = :dni LIMIT 1')
-            ->execute([':pass' => HospitalHuaralDB::hashPassword($password), ':dni' => $dni]);
-        $user['clave_hash'] = HospitalHuaralDB::hashPassword($password);
+            ->execute([':pass' => $hashedInicial, ':dni' => $dni]);
+        $user['clave_hash'] = $hashedInicial;
     } elseif (!HospitalHuaralDB::verifyPassword($password, $storedPass)) {
         HospitalHuaralDB::rateLimitHit($bucket, 900);
         HospitalHuaralDB::registrarAuditoria($dni, 'AUTH_LOGIN_FAILED', 'Contraseña inválida verificada con Bcrypt/Scrypt. Intento registrado.', '', $platform);
@@ -595,7 +643,7 @@ if ($action === 'register_obstetra') {
     }
 
     $hashed = HospitalHuaralDB::hashPassword($password);
-    $nombreCompleto = trim("{$apellidoPaterno} {$apellidoMaterno}, {$nombre1}");
+    $nombreCompleto = trim("{$apaterno} {$amaterno}, {$nombre1}");
     $stmt = $pdo->prepare("
         INSERT INTO app_usuarios
             (dni, nombres, apellido_paterno, apellido_materno, nombre_completo, email, celular,
@@ -1607,7 +1655,13 @@ if ($action === 'overview') {
  */
 function resolver_nombre_establecimiento(PDO $pdo, ?string $codigo, ?string $fallback = null): string
 {
+    static $cache = [];
     $codigo = trim((string)$codigo);
+    $fallback = trim((string)$fallback);
+    $cacheKey = $codigo . '|' . $fallback;
+    if (isset($cache[$cacheKey])) {
+        return $cache[$cacheKey];
+    }
     $variantes = hospital_codigos_busqueda_establecimiento($codigo);
     // El catálogo oficial manda: se prueba el código recibido y sus variantes
     // (IPRESS, interno de 4 dígitos, sin ceros) antes de consultar establec.
@@ -1616,14 +1670,13 @@ function resolver_nombre_establecimiento(PDO $pdo, ?string $codigo, ?string $fal
         if ($est !== null) {
             $nombre = trim((string)($est['DESC_ESTAB'] ?? ''));
             if ($nombre !== '') {
-                return $nombre;
+                return $cache[$cacheKey] = $nombre;
             }
         }
     }
 
-    $fallback = trim((string)$fallback);
     if ($fallback !== '' && $fallback !== $codigo) {
-        return $fallback;
+        return $cache[$cacheKey] = $fallback;
     }
 
     if ($variantes) {
@@ -1633,14 +1686,14 @@ function resolver_nombre_establecimiento(PDO $pdo, ?string $codigo, ?string $fal
             $stmt->execute($variantes);
             $nombre = trim((string)($stmt->fetchColumn() ?: ''));
             if ($nombre !== '') {
-                return $nombre;
+                return $cache[$cacheKey] = $nombre;
             }
         } catch (Throwable $e) {
             // La tabla establec puede no existir en una instalación mínima.
         }
     }
 
-    return $fallback !== '' ? $fallback : ($codigo !== '' ? $codigo : 'SIN ESTABLECIMIENTO');
+    return $cache[$cacheKey] = ($fallback !== '' ? $fallback : ($codigo !== '' ? $codigo : 'SIN ESTABLECIMIENTO'));
 }
 
 /**
@@ -1736,6 +1789,56 @@ function contactos_pacientes_por_dni(PDO $pdo, array $dnis): array
 }
 
 /**
+ * Caché ligera de alertas programáticas (TTL 90 s).
+ * Evita que 15 obstetras del mismo establecimiento golpeen TiDB Cloud al
+ * mismo tiempo: la primera petición consulta y las demás leen el JSON local.
+ */
+function alertas_cache_path(string $key): string
+{
+    return rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR)
+        . DIRECTORY_SEPARATOR . 'planificahis_alertas_' . $key . '.json';
+}
+
+function alertas_cache_get(string $key): ?array
+{
+    $path = alertas_cache_path($key);
+    if (!is_file($path)) {
+        return null;
+    }
+    $mtime = @filemtime($path);
+    if ($mtime === false || (time() - $mtime) > 90) {
+        @unlink($path);
+        return null;
+    }
+    $raw = @file_get_contents($path);
+    if ($raw === false || $raw === '') {
+        return null;
+    }
+    $data = json_decode($raw, true);
+    return is_array($data) ? $data : null;
+}
+
+function alertas_cache_set(string $key, array $data): void
+{
+    $path = alertas_cache_path($key);
+    $json = json_encode($data, JSON_UNESCAPED_UNICODE);
+    if ($json === false) {
+        return;
+    }
+    @file_put_contents($path, $json, LOCK_EX);
+}
+
+/** Invalida todas las cachés de alertas al guardar una paciente o un método. */
+function alertas_cache_invalidate(): void
+{
+    $patron = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR)
+        . DIRECTORY_SEPARATOR . 'planificahis_alertas_*.json';
+    foreach (glob($patron) ?: [] as $archivo) {
+        @unlink($archivo);
+    }
+}
+
+/**
  * Alertas proactivas de seguimiento programático: pacientes que les toca HOY,
  * MAÑANA o están VENCIDAS. Se calcula con las 14 variantes oficiales del HIS y
  * ventanas SARGables de fecha de aplicación para no escanear los 5 GB.
@@ -1747,10 +1850,12 @@ function alertas_programaticas_datos(PDO $pdo, array $session, ?array $catalogo 
 {
     $catalogo = $catalogo ?: catalogo_metodos_planificacion($pdo);
     $variantes = [];
+    $maxCicloAlertas = 365;
     foreach ($catalogo as $meta) {
         if ((int)($meta['activo'] ?? 1) !== 1 || (int)($meta['dias_ciclo'] ?? 0) <= 0) {
             continue;
         }
+        $maxCicloAlertas = max($maxCicloAlertas, (int)$meta['dias_ciclo']);
         foreach ((array)($meta['codigos_consulta'] ?? []) as $variante) {
             $variante = trim((string)$variante);
             if ($variante !== '') {
@@ -1773,44 +1878,10 @@ function alertas_programaticas_datos(PDO $pdo, array $session, ?array $catalogo 
     $hoy = new DateTimeImmutable('today');
     $manana = $hoy->modify('+1 day');
     $lookbackVencidas = 365;
-    $expr = "COALESCE(
-        CASE
-          WHEN h.DIA BETWEEN 1 AND 31
-           AND h.MES BETWEEN 1 AND 12
-           AND h.ANO BETWEEN 1900 AND 2100
-          THEN STR_TO_DATE(
-                 CONCAT(h.ANO, '-', LPAD(h.MES, 2, '0'), '-', LPAD(h.DIA, 2, '0')),
-                 '%Y-%m-%d'
-               )
-        END,
-        DATE(h.fecha_reg),
-        DATE(dt.fecha_reg)
-    )";
-
-    $condiciones = [];
-    $params = [];
-    foreach ($variantes as $variante) {
-        $meta = resolver_metodo_catalogo($catalogo, $variante);
-        if ($meta === null) {
-            continue;
-        }
-        $dias = max(1, (int)$meta['dias_ciclo']);
-        $condiciones[] = "(dt.DX = ? AND {$expr} BETWEEN ? AND ?)";
-        $params[] = $variante;
-        $params[] = $hoy->modify('-' . $dias . ' days')->format('Y-m-d');
-        $params[] = $manana->modify('-' . $dias . ' days')->format('Y-m-d');
-
-        $condiciones[] = "(dt.DX = ? AND {$expr} BETWEEN ? AND ?)";
-        $params[] = $variante;
-        $params[] = $hoy->modify('-' . ($dias + $lookbackVencidas) . ' days')->format('Y-m-d');
-        $params[] = $hoy->modify('-' . ($dias + 1) . ' days')->format('Y-m-d');
-    }
-    if (!$condiciones) {
-        return $vacio;
-    }
-
-    $anioMin = (int)date('Y') - 2;
+    // Cobertura exacta: ciclo máximo + 365 días de vencidas, redondeado a años.
+    $anioMin = (int)date('Y') - (int)ceil(($maxCicloAlertas + $lookbackVencidas) / 366) - 1;
     $anioMax = (int)date('Y') + 1;
+
     $rolAlertas = HospitalHuaralDB::rolUsuario((string)($session['dni'] ?? ''));
     $esObstetraAlertas = !puede_ver_red($session) && $rolAlertas !== 'JEFA_OBSTETRAS';
     $alcanceAlertas = strtolower(trim((string)($_GET['alcance'] ?? (is_admin_session($session) ? 'red' : 'establecimiento'))));
@@ -1819,39 +1890,140 @@ function alertas_programaticas_datos(PDO $pdo, array $session, ?array $catalogo 
     if ($obstetraAlertas === 'TODOS') {
         $obstetraAlertas = '';
     }
+    $condObstetraAlertas = '';
+    $paramsObstetraAlertas = [];
+    if ($esObstetraAlertas) {
+        $condObstetraAlertas = ' AND h.CODPSAL = ? ';
+        $paramsObstetraAlertas[] = (string)($session['dni'] ?? '');
+    } elseif ($obstetraAlertas !== '') {
+        $condObstetraAlertas = ' AND h.CODPSAL = ? ';
+        $paramsObstetraAlertas[] = $obstetraAlertas;
+    }
+
     $scopeAlertas = [];
     $scopeParams = [];
     if (!$modoRedAlertas) {
         $codigosEstabAlertas = codigos_establecimiento_sesion($session);
         $scopeAlertas[] = 'h.COD_ESTAB IN (' . implode(',', array_fill(0, count($codigosEstabAlertas), '?')) . ')';
         $scopeParams = array_merge($scopeParams, $codigosEstabAlertas);
-    }
-    if ($esObstetraAlertas) {
-        $scopeAlertas[] = 'h.CODPSAL = ?';
-        $scopeParams[] = (string)($session['dni'] ?? '');
-    } elseif ($obstetraAlertas !== '') {
-        $scopeAlertas[] = 'h.CODPSAL = ?';
-        $scopeParams[] = $obstetraAlertas;
+        if ($condObstetraAlertas !== '') {
+            $scopeAlertas[] = 'h.CODPSAL = ?';
+            $scopeParams[] = $paramsObstetraAlertas[0];
+        }
     }
     $scope = $scopeAlertas ? (' AND ' . implode(' AND ', $scopeAlertas) . ' ') : '';
 
-    $sql = "
-        SELECT h.ID AS id_his, h.DNI AS dni, h.COD_ESTAB AS cod_estab,
-               h.CODPSAL AS obstetra_dni, h.EDAD AS edad, h.HCLFAM AS historia_clinica,
-               TRIM(h.Apellido_p) AS apellido_paterno, TRIM(h.Apellido_m) AS apellido_materno,
-               TRIM(COALESCE(NULLIF(h.Dnombres, ''), h.Pnombre)) AS nombres,
-               h.DIA, h.MES, h.ANO, h.fecha_reg,
-               dt.DX AS codigo_his, dt.id_dosis AS dosis, dt.fecha_reg AS fecha_dx,
-               {$expr} AS fecha_aplicacion
-        FROM his_dl h
-        INNER JOIN his_dl_dt dt ON dt.ID = h.ID
-        WHERE h.ANO BETWEEN ? AND ?
-          AND (" . implode(' OR ', $condiciones) . ")
-          {$scope}
-        ORDER BY h.ANO DESC, h.MES DESC, h.DIA DESC, h.ID DESC
-        LIMIT 20000
-    ";
-    $paramsSql = array_merge([$anioMin, $anioMax], $params, $scopeParams);
+    $codigosConsulta = array_values($variantes);
+    $cacheKey = hash('sha256', implode('|', [
+        'alertas-v2',
+        (string)($session['dni'] ?? ''),
+        (string)($session['cod_estab'] ?? ''),
+        (string)$rolAlertas,
+        $modoRedAlertas ? 'red' : 'est',
+        $obstetraAlertas,
+        implode(',', $codigosConsulta),
+        (string)$limiteLista,
+        $hoy->format('Y-m-d'),
+    ]));
+    $cacheado = alertas_cache_get($cacheKey);
+    if ($cacheado !== null) {
+        return $cacheado;
+    }
+
+    $placeholders = implode(',', array_fill(0, count($codigosConsulta), '?'));
+
+    if ($modoRedAlertas) {
+        // Alcance RED: UNION ALL por IPRESS. Cada subconsulta usa el índice
+        // (COD_ESTAB, ANO, MES, DIA) y corta en 150 atenciones recientes. En
+        // lugar de ordenar 3.3 millones de filas, se combinan ~53 bloques
+        // pequeños y luego PHP elige la última atención por DNI.
+        $estabsRed = array_column(hospital_establecimientos(), 'COD_ESTAB');
+        $subs = [];
+        $paramsSql = [];
+        $porEstab = 80;
+        foreach ($estabsRed as $codRed) {
+            $subs[] = "(SELECT h.ID AS id_his, h.DNI AS dni, h.COD_ESTAB AS cod_estab,
+                   h.CODPSAL AS obstetra_dni, h.EDAD AS edad, h.HCLFAM AS historia_clinica,
+                   TRIM(h.Apellido_p) AS apellido_paterno, TRIM(h.Apellido_m) AS apellido_materno,
+                   TRIM(COALESCE(NULLIF(h.Dnombres, ''), h.Pnombre)) AS nombres,
+                   h.DIA, h.MES, h.ANO, h.fecha_reg,
+                   dt.DX AS codigo_his, dt.id_dosis AS dosis, dt.fecha_reg AS fecha_dx
+                FROM his_dl h FORCE INDEX(idx_his_dl_estab_fecha)
+                INNER JOIN his_dl_dt dt ON dt.ID = h.ID
+                WHERE h.COD_ESTAB = ?
+                  AND h.ANO BETWEEN ? AND ?
+                  AND dt.DX IN ({$placeholders})
+                  {$condObstetraAlertas}
+                ORDER BY h.ANO DESC, h.MES DESC, h.DIA DESC, h.ID DESC
+                LIMIT {$porEstab})";
+            $paramsSql[] = (string)$codRed;
+            $paramsSql[] = $anioMin;
+            $paramsSql[] = $anioMax;
+            foreach ($codigosConsulta as $codigoConsulta) {
+                $paramsSql[] = $codigoConsulta;
+            }
+            foreach ($paramsObstetraAlertas as $paramObstetra) {
+                $paramsSql[] = $paramObstetra;
+            }
+        }
+        $sql = implode(' UNION ALL ', $subs);
+    } else {
+        $codigosEstabAlertas = codigos_establecimiento_sesion($session);
+        if ($esObstetraAlertas) {
+            // OBSTETRA: idx_his_dl_codpsal_fecha resuelve el ORDER BY por fecha
+            // con igualdad en CODPSAL, incluso si aún no tiene atenciones.
+            $marcasEstabObstetra = implode(',', array_fill(0, count($codigosEstabAlertas), '?'));
+            $sql = "
+                SELECT h.ID AS id_his, h.DNI AS dni, h.COD_ESTAB AS cod_estab,
+                       h.CODPSAL AS obstetra_dni, h.EDAD AS edad, h.HCLFAM AS historia_clinica,
+                       TRIM(h.Apellido_p) AS apellido_paterno, TRIM(h.Apellido_m) AS apellido_materno,
+                       TRIM(COALESCE(NULLIF(h.Dnombres, ''), h.Pnombre)) AS nombres,
+                       h.DIA, h.MES, h.ANO, h.fecha_reg,
+                       dt.DX AS codigo_his, dt.id_dosis AS dosis, dt.fecha_reg AS fecha_dx
+                FROM his_dl h
+                INNER JOIN his_dl_dt dt ON dt.ID = h.ID
+                WHERE h.CODPSAL = ?
+                  AND h.ANO BETWEEN ? AND ?
+                  AND dt.DX IN ({$placeholders})
+                  AND h.COD_ESTAB IN ({$marcasEstabObstetra})
+                ORDER BY h.ANO DESC, h.MES DESC, h.DIA DESC, h.ID DESC
+                LIMIT 4000
+            ";
+            $paramsSql = array_merge(
+                [(string)($session['dni'] ?? ''), $anioMin, $anioMax],
+                $codigosConsulta,
+                $codigosEstabAlertas
+            );
+        } else {
+            // JEFATURA: una subconsulta por variante de código de IPRESS. Con
+            // igualdad en COD_ESTAB, el índice entrega el orden por fecha sin
+            // filesort (≈0.4 s sobre los 5 GB del HIS).
+            $subs = [];
+            $paramsSql = [];
+            foreach ($codigosEstabAlertas as $codEstabAlerta) {
+                $subs[] = "(SELECT h.ID AS id_his, h.DNI AS dni, h.COD_ESTAB AS cod_estab,
+                       h.CODPSAL AS obstetra_dni, h.EDAD AS edad, h.HCLFAM AS historia_clinica,
+                       TRIM(h.Apellido_p) AS apellido_paterno, TRIM(h.Apellido_m) AS apellido_materno,
+                       TRIM(COALESCE(NULLIF(h.Dnombres, ''), h.Pnombre)) AS nombres,
+                       h.DIA, h.MES, h.ANO, h.fecha_reg,
+                       dt.DX AS codigo_his, dt.id_dosis AS dosis, dt.fecha_reg AS fecha_dx
+                    FROM his_dl h FORCE INDEX(idx_his_dl_estab_fecha)
+                    INNER JOIN his_dl_dt dt ON dt.ID = h.ID
+                    WHERE h.COD_ESTAB = ?
+                      AND h.ANO BETWEEN ? AND ?
+                      AND dt.DX IN ({$placeholders})
+                    ORDER BY h.ANO DESC, h.MES DESC, h.DIA DESC, h.ID DESC
+                    LIMIT 4000)";
+                $paramsSql[] = (string)$codEstabAlerta;
+                $paramsSql[] = $anioMin;
+                $paramsSql[] = $anioMax;
+                foreach ($codigosConsulta as $codigoConsulta) {
+                    $paramsSql[] = $codigoConsulta;
+                }
+            }
+            $sql = implode(' UNION ALL ', $subs);
+        }
+    }
 
     $mejores = [];
     try {
@@ -1985,13 +2157,15 @@ function alertas_programaticas_datos(PDO $pdo, array $session, ?array $catalogo 
     }
     unset($lista);
 
-    return [
+    $resultado = [
         'manana' => $totales['manana'],
         'hoy' => $totales['hoy'],
         'vencidas' => $totales['vencidas'],
         'total' => $totales['manana'] + $totales['hoy'] + $totales['vencidas'],
         'listas' => $listas,
     ];
+    alertas_cache_set($cacheKey, $resultado);
+    return $resultado;
 }
 
 /**
@@ -2898,26 +3072,6 @@ if ($action === 'reporte_programacion') {
         $ventanas[$codigo] = ['desde' => $desde, 'hasta' => $hasta];
     }
 
-    // 7-B.3 Expresión SQL única para la fecha real de aplicación. Se usa tanto
-    // en la selección como en el filtro SARGable de las ventanas.
-    $exprAplicacion = static function (string $aliasH, string $aliasDt): string {
-        return "COALESCE(
-            CASE
-              WHEN {$aliasH}.DIA BETWEEN 1 AND 31
-               AND {$aliasH}.MES BETWEEN 1 AND 12
-               AND {$aliasH}.ANO BETWEEN 1900 AND 2100
-              THEN STR_TO_DATE(
-                     CONCAT({$aliasH}.ANO, '-', LPAD({$aliasH}.MES, 2, '0'), '-', LPAD({$aliasH}.DIA, 2, '0')),
-                     '%Y-%m-%d'
-                   )
-            END,
-            DATE({$aliasH}.fecha_reg),
-            DATE({$aliasDt}.fecha_reg)
-        )";
-    };
-    $exprH = $exprAplicacion('h', 'dt');
-    $expr0 = $exprAplicacion('h0', 'dt0');
-
     $placeholdersCodigos = implode(',', array_fill(0, count($codigosConsulta), '?'));
     $paramsCodigos = array_map('strval', $codigosConsulta);
 
@@ -2926,15 +3080,13 @@ if ($action === 'reporte_programacion') {
     $esObstetraReporte = $rolReporte === 'OBSTETRA';
     $modoRedReporte = es_alcance_red($session, $alcance);
 
-    // El establecimiento se aplica SIEMPRE en el subquery de candidatas (h0) y
-    // en la consulta principal (h). Nunca se mezclan establecimientos.
-    $condicionEstab0 = '';
+    // El establecimiento se aplica SIEMPRE en la consulta principal. Nunca se
+    // mezclan establecimientos.
     $condicionEstabH = '';
     $paramsEstab = [];
     if (!$modoRedReporte) {
         $variantes = codigos_establecimiento_sesion($session);
         $placeholdersEstab = implode(',', array_fill(0, count($variantes), '?'));
-        $condicionEstab0 = " AND h0.COD_ESTAB IN ({$placeholdersEstab}) ";
         $condicionEstabH = " AND h.COD_ESTAB IN ({$placeholdersEstab}) ";
         $paramsEstab = $variantes;
     }
@@ -2953,74 +3105,99 @@ if ($action === 'reporte_programacion') {
         // La obstetra puede alternar "Mis atenciones" (solo pacientes que ella
         // atendió) o "Mi establecimiento" (padrón histórico del establecimiento).
         if ($ambitoReporte === 'mis_atenciones') {
-            $condicionObstetra = ' AND h0.CODPSAL = ? ';
+            $condicionObstetra = ' AND h.CODPSAL = ? ';
             $paramsObstetra[] = (string)$session['dni'];
         }
         $obstetraReporte = $ambitoReporte === 'mis_atenciones' ? (string)$session['dni'] : '';
     } elseif ($obstetraReporte !== '') {
-        $condicionObstetra = ' AND h0.CODPSAL = ? ';
+        $condicionObstetra = ' AND h.CODPSAL = ? ';
         $paramsObstetra[] = $obstetraReporte;
     }
-    $condicionPropia = '';
-    $paramsPropia = [];
 
-    $condicionesVentana = [];
-    $paramsVentana = [];
-    $anioMinVentana = 1900;
-    $anioMaxVentana = 2100;
-    foreach ($ventanas as $codigo => $rango) {
-        $condicionesVentana[] = "(dt0.DX = ? AND {$expr0} BETWEEN ? AND ?)";
-        $paramsVentana[] = $codigo;
-        $paramsVentana[] = $rango['desde'];
-        $paramsVentana[] = $rango['hasta'];
-        $anioMinVentana = min($anioMinVentana, (int)substr($rango['desde'], 0, 4));
-        $anioMaxVentana = max($anioMaxVentana, (int)substr($rango['hasta'], 0, 4));
+    // Rango de años derivado de las ventanas clínicas (solo para acotar el
+    // índice h.ANO; NO se usa STR_TO_DATE en el WHERE).
+    $anioMinVentana = (int)date('Y') - 6;
+    $anioMaxVentana = (int)date('Y') + 1;
+    foreach ($ventanas as $rango) {
+        $anioMinVentana = min($anioMinVentana, (int)substr((string)$rango['desde'], 0, 4));
+        $anioMaxVentana = max($anioMaxVentana, (int)substr((string)$rango['hasta'], 0, 4));
     }
-    $condicionVentana = '(' . implode(' OR ', $condicionesVentana) . ')';
 
-    // El primer subquery identifica solo las pacientes candidatas dentro de la
-    // ventana (máximo 800). El segundo recupera su última atención con método
-    // usando el índice de DNI, evitando escanear millones de filas del HIS.
-    $limiteCandidatos = 800;
-    $sql = "
-        SELECT
-            h.ID AS id_his,
-            h.DNI AS dni,
-            h.COD_ESTAB AS cod_estab,
-            TRIM(h.Apellido_p) AS apellido_paterno,
-            TRIM(h.Apellido_m) AS apellido_materno,
-            TRIM(COALESCE(NULLIF(h.Dnombres, ''), h.Pnombre)) AS nombres,
-            h.EDAD AS edad,
-            h.HCLFAM AS historia_clinica,
-            h.FICHAFAM AS ficha_familiar,
-            h.CODPSAL AS obstetra_dni,
-            h.DIA, h.MES, h.ANO, h.fecha_reg,
-            dt.DX AS codigo_metodo,
-            dt.id_dosis AS dosis,
-            dt.fecha_reg AS fecha_dx,
-            {$exprH} AS fecha_aplicacion
-        FROM his_dl h
-        INNER JOIN his_dl_dt dt ON dt.ID = h.ID
-        INNER JOIN (
-            SELECT h0.DNI AS dni
-            FROM his_dl h0
-            INNER JOIN his_dl_dt dt0 ON dt0.ID = h0.ID
-            WHERE dt0.DX IN ({$placeholdersCodigos})
-              {$condicionEstab0}
-              {$condicionObstetra}
-              AND h0.ANO BETWEEN ? AND ?
-              AND {$condicionVentana}
-            GROUP BY h0.DNI
-            ORDER BY MAX(h0.ANO) DESC, MAX(h0.MES) DESC, MAX(h0.DIA) DESC
-            LIMIT {$limiteCandidatos}
-        ) cand ON cand.dni = h.DNI
-        WHERE dt.DX IN ({$placeholdersCodigos})
-          {$condicionEstabH}
-        ORDER BY h.DNI ASC, h.ANO DESC, h.MES DESC, h.DIA DESC, h.ID DESC
-        LIMIT 12000
-    ";
-
-    $params = array_merge($paramsCodigos, $paramsEstab, $paramsObstetra, [$anioMinVentana, $anioMaxVentana], $paramsVentana, $paramsCodigos, $paramsEstab);
+    // CONSULTA SARGABLE: dt.DX IN (...) + h.ANO BETWEEN + índices de
+    // establecimiento/obstetra. Se leen como máximo 4000 atenciones recientes y
+    // la ventana exacta se evalúa en PHP, sin invalidar índices sobre 5 GB.
+    $limiteCandidatos = 4000;
+    if ($modoRedReporte) {
+        $estabsReporte = array_column(hospital_establecimientos(), 'COD_ESTAB');
+        $subsReporte = [];
+        $params = [];
+        $porEstabReporte = 100;
+        foreach ($estabsReporte as $codReporte) {
+            $subsReporte[] = "(SELECT
+                    h.ID AS id_his, h.DNI AS dni, h.COD_ESTAB AS cod_estab,
+                    TRIM(h.Apellido_p) AS apellido_paterno,
+                    TRIM(h.Apellido_m) AS apellido_materno,
+                    TRIM(COALESCE(NULLIF(h.Dnombres, ''), h.Pnombre)) AS nombres,
+                    h.EDAD AS edad, h.HCLFAM AS historia_clinica,
+                    h.FICHAFAM AS ficha_familiar, h.CODPSAL AS obstetra_dni,
+                    h.DIA, h.MES, h.ANO, h.fecha_reg,
+                    dt.DX AS codigo_metodo, dt.id_dosis AS dosis, dt.fecha_reg AS fecha_dx
+                FROM his_dl h FORCE INDEX(idx_his_dl_estab_fecha)
+                INNER JOIN his_dl_dt dt ON dt.ID = h.ID
+                WHERE h.COD_ESTAB = ?
+                  AND dt.DX IN ({$placeholdersCodigos})
+                  {$condicionObstetra}
+                  AND h.ANO BETWEEN ? AND ?
+                ORDER BY h.ANO DESC, h.MES DESC, h.DIA DESC, h.ID DESC
+                LIMIT {$porEstabReporte})";
+            $params[] = (string)$codReporte;
+            foreach ($paramsCodigos as $paramCodigo) {
+                $params[] = $paramCodigo;
+            }
+            foreach ($paramsObstetra as $paramObstetra) {
+                $params[] = $paramObstetra;
+            }
+            $params[] = $anioMinVentana;
+            $params[] = $anioMaxVentana;
+        }
+        $sql = implode(' UNION ALL ', $subsReporte);
+    } else {
+        $codigosEstabReporte = $paramsEstab ?: [''];
+        $subsReporte = [];
+        $params = [];
+        foreach ($codigosEstabReporte as $codEstabReporte) {
+            $condEstabSub = $paramsEstab ? ' AND h.COD_ESTAB = ? ' : '';
+            $subsReporte[] = "(SELECT
+                    h.ID AS id_his, h.DNI AS dni, h.COD_ESTAB AS cod_estab,
+                    TRIM(h.Apellido_p) AS apellido_paterno,
+                    TRIM(h.Apellido_m) AS apellido_materno,
+                    TRIM(COALESCE(NULLIF(h.Dnombres, ''), h.Pnombre)) AS nombres,
+                    h.EDAD AS edad, h.HCLFAM AS historia_clinica,
+                    h.FICHAFAM AS ficha_familiar, h.CODPSAL AS obstetra_dni,
+                    h.DIA, h.MES, h.ANO, h.fecha_reg,
+                    dt.DX AS codigo_metodo, dt.id_dosis AS dosis, dt.fecha_reg AS fecha_dx
+                FROM his_dl h FORCE INDEX(idx_his_dl_estab_fecha)
+                INNER JOIN his_dl_dt dt ON dt.ID = h.ID
+                WHERE dt.DX IN ({$placeholdersCodigos})
+                  {$condEstabSub}
+                  {$condicionObstetra}
+                  AND h.ANO BETWEEN ? AND ?
+                ORDER BY h.ANO DESC, h.MES DESC, h.DIA DESC, h.ID DESC
+                LIMIT 4000)";
+            foreach ($paramsCodigos as $paramCodigo) {
+                $params[] = $paramCodigo;
+            }
+            if ($paramsEstab) {
+                $params[] = (string)$codEstabReporte;
+            }
+            foreach ($paramsObstetra as $paramObstetra) {
+                $params[] = $paramObstetra;
+            }
+            $params[] = $anioMinVentana;
+            $params[] = $anioMaxVentana;
+        }
+        $sql = implode(' UNION ALL ', $subsReporte);
+    }
     $filasBase = [];
     try {
         $stmt = $pdo->prepare($sql);
@@ -3816,7 +3993,7 @@ function reporte_campo_datos(PDO $pdo, array $session, array $input, int $page =
                 ? HospitalHuaralDB::nombrePersona($obstetra, $pdo)
                 : ($modoRedCampo
                     ? 'TODAS LAS OBSTETRAS DE LA RED'
-                    : (($rolCampo === 'JEFA_OBSTETRAS') ? (string)$session['nombreCompleto'] : 'TODAS LAS OBSTETRAS DEL ESTABLECIMIENTO'))),
+                    : (($rolCampo === 'JEFA_OBSTETRAS') ? HospitalHuaralDB::nombrePersona((string)$session['dni'], $pdo) : 'TODAS LAS OBSTETRAS DEL ESTABLECIMIENTO'))),
         'generado_en' => date('c'),
     ];
 }
@@ -3863,9 +4040,9 @@ function reporte_metodos_datos(PDO $pdo, array $session, array $input, int $page
     }
     $whereSql = implode(' AND ', $where);
 
-    // Base acotada: máximo 800 pacientes del periodo/establecimiento (3000 en
+    // Base acotada: máximo 800 pacientes del periodo/establecimiento (5000 en
     // exportaciones completas) para mantener fluidez en celulares de gama media.
-    $limiteBase = $perPage > 200 ? 3000 : 800;
+    $limiteBase = $perPage > 200 ? 5000 : 800;
     $stmt = $pdo->prepare("
         SELECT p.*
         FROM pacientes_sin_metodo p
@@ -4006,44 +4183,102 @@ function reporte_metodos_datos(PDO $pdo, array $session, array $input, int $page
 }
 
 /**
- * Descarga CSV nativo para Excel en español (BOM UTF-8 + separador ';').
- * Los códigos se envían como fórmula de texto para conservar ceros a la
- * izquierda en DNI y código de establecimiento.
+ * Excel oficial enriquecido (.xls HTML/XML) con los DOS logos institucionales
+ * incrustados en Base64: DIRESA Lima (izquierda) y Hospital SJB Huaral
+ * (derecha). Conserva ceros a la izquierda con mso-number-format:"\@",
+ * incluye resumen estadístico, filtros y pie de firma/emisor.
  *
  * @param array<int, string> $headers
  * @param array<int, array<int, string|int|float|null>> $rows
+ * @param array<int, string> $metaLineas
+ * @param array<int, string> $resumenLineas
  */
-function reporte_csv_excel(string $filename, array $headers, array $rows, array $codigosTexto = []): void
-{
+function reporte_excel_enriquecido(
+    string $filename,
+    string $titulo,
+    string $subtitulo,
+    array $metaLineas,
+    array $headers,
+    array $rows,
+    array $codigosTexto = [],
+    array $resumenLineas = []
+): void {
     if (headers_sent()) {
         return;
     }
-    header('Content-Type: text/csv; charset=utf-8');
-    header('Content-Disposition: attachment; filename="' . preg_replace('/[^A-Za-z0-9_\-\.]/', '_', $filename) . '"');
+    $filename = preg_replace('/[^A-Za-z0-9_\-\.]/', '_', $filename);
+    header('Content-Type: application/vnd.ms-excel; charset=utf-8');
+    header('Content-Disposition: attachment; filename="' . $filename . '"');
     header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
     header('Pragma: no-cache');
-    echo "\xEF\xBB\xBF";
-    $out = fopen('php://output', 'w');
-    if ($out === false) {
-        exit;
+
+    $logoDiresa = '';
+    $rutaDiresa = __DIR__ . '/public/logo-diresa-lima.jpg';
+    if (is_file($rutaDiresa)) {
+        $logoDiresa = 'data:image/jpeg;base64,' . base64_encode((string)file_get_contents($rutaDiresa));
     }
-    fputcsv($out, $headers, ';', '"', '\\');
+    $logoHospital = '';
+    $rutaHospital = __DIR__ . '/public/logo.png';
+    if (is_file($rutaHospital)) {
+        $logoHospital = 'data:image/png;base64,' . base64_encode((string)file_get_contents($rutaHospital));
+    }
+
+    $e = static fn ($v): string => htmlspecialchars((string)($v ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+    $totalCols = max(1, count($headers));
+    $metaHtml = '';
+    foreach ($metaLineas as $linea) {
+        $metaHtml .= '<tr><td colspan="' . $totalCols . '" style="font-size:9pt;color:#334155;border:1px solid #cbd5e1;padding:3px 6px;background:#f8fafc">' . $e($linea) . '</td></tr>';
+    }
+    $filasHtml = '';
     foreach ($rows as $row) {
-        $linea = [];
+        $filasHtml .= '<tr>';
         foreach (array_values($row) as $i => $valor) {
             $texto = (string)($valor ?? '');
-            if (in_array($i, $codigosTexto, true) && $texto !== '') {
-                $texto = '="' . str_replace('"', '""', $texto) . '"';
-            } elseif (preg_match('/^[=+\-@]/', $texto)) {
-                // Mitigación de inyección de fórmulas en Excel para datos que
-                // provienen del HIS o del formulario de campo.
-                $texto = "'" . $texto;
+            $estilo = 'border:1px solid #94a3b8;padding:3px 5px;font-size:8.5pt;vertical-align:top;';
+            if (in_array($i, $codigosTexto, true)) {
+                $estilo .= "mso-number-format:'\\@';";
             }
-            $linea[] = $texto;
+            $filasHtml .= '<td style="' . $estilo . '">' . $e($texto) . '</td>';
         }
-        fputcsv($out, $linea, ';', '"', '\\');
+        $filasHtml .= '</tr>';
     }
-    fclose($out);
+    $resumenHtml = '';
+    foreach ($resumenLineas as $linea) {
+        $resumenHtml .= '<tr><td colspan="' . $totalCols . '" style="border:1px solid #94a3b8;background:#f1f5f9;font-size:9pt;font-weight:bold;color:#334155;padding:3px 6px">' . $e($linea) . '</td></tr>';
+    }
+    $emisor = 'PlanificaHIS · Hospital San Juan Bautista Huaral · Red de Salud Huaral-Chancay';
+    $ahora = date('d/m/Y H:i:s');
+
+    echo "\xEF\xBB\xBF";
+    echo '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">'
+        . '<head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />'
+        . '<meta name="ProgId" content="Excel.Sheet" />'
+        . '<style>'
+        . 'table{border-collapse:collapse;font-family:Arial,sans-serif}'
+        . '.inst{font-size:9pt;font-weight:bold;color:#7f1d1d;text-align:center;line-height:1.35}'
+        . '.inst2{font-size:9pt;font-weight:bold;color:#075985;text-align:center;line-height:1.35}'
+        . '.titulo{font-size:14pt;font-weight:bold;color:#0f172a;text-align:center;background:#f8fafc}'
+        . '.sub{font-size:9pt;font-weight:bold;color:#075985;text-align:center}'
+        . '.th{border:1px solid #64748b;background:#0082C8;color:#ffffff;font-weight:bold;font-size:9pt;padding:5px 6px;text-align:center}'
+        . '</style></head><body>'
+        . '<table><tr>'
+        . '<td width="240" align="center" valign="middle">' . ($logoDiresa !== '' ? '<img src="' . $logoDiresa . '" width="220" height="75" alt="DIRESA Lima" />' : '') . '</td>'
+        . '<td align="center" valign="middle"><div class="titulo">' . $e($titulo) . '</div><div class="sub">' . $e($subtitulo) . '</div></td>'
+        . '<td width="110" align="center" valign="middle">' . ($logoHospital !== '' ? '<img src="' . $logoHospital . '" width="80" height="85" alt="Hospital San Juan Bautista Huaral" />' : '') . '</td>'
+        . '</tr></table>'
+        . '<table style="width:100%">' . $metaHtml . '</table><br/>'
+        . '<table style="width:100%"><thead><tr>';
+    foreach ($headers as $header) {
+        echo '<th class="th">' . $e($header) . '</th>';
+    }
+    echo '</tr></thead><tbody>' . $filasHtml
+        . '<tr><td colspan="' . $totalCols . '" style="border:1px solid #94a3b8;background:#fef3c7;color:#78350f;font-weight:bold;text-align:center">Total de registros: ' . count($rows) . '</td></tr>'
+        . $resumenHtml
+        . '</tbody></table><br/>'
+        . '<table style="width:100%"><tr><td style="font-size:8pt;color:#64748b;text-align:center">'
+        . $e($emisor) . ' · Generado el ' . $e($ahora)
+        . '</td></tr></table>'
+        . '</body></html>';
     exit;
 }
 
@@ -4116,6 +4351,7 @@ if ($action === 'save_metodo') {
         ':cita' => $requiereCita,
         ':activo' => $activo,
     ]);
+    alertas_cache_invalidate();
     HospitalHuaralDB::registrarAuditoria(
         (string)$session['dni'],
         'CATALOGO_METODO_UPDATE',
@@ -4157,10 +4393,25 @@ if ($action === 'export_reporte_campo' || $action === 'export_reporte_metodos') 
                 ];
             }
             HospitalHuaralDB::registrarAuditoria($session['dni'], 'EXPORT_REPORTE_CAMPO', 'Exportación Excel de productividad por obstetra y día: ' . count($rows) . ' filas.', $session['cod_estab'], $session['platform']);
-            reporte_csv_excel('productividad_campo_' . $sello . '.csv', [
-                'Fecha de salida', 'DNI Obstetra', 'Nombre Obstetra', 'Sectores visitados',
-                'Pacientes registradas', 'Primera hora de registro', 'Última hora de registro',
-            ], $rows, [1]);
+            reporte_excel_enriquecido(
+                'productividad_campo_' . $sello . '.xls',
+                'REPORTE 02 · PRODUCTIVIDAD DIARIA POR OBSTETRA',
+                'Salidas a campo, sectores visitados y pacientes captadas por día',
+                [
+                    'Establecimiento: ' . (string)($datos['establecimiento']['nombre'] ?? $session['estab_nombre']),
+                    'Periodo: ' . (string)($datos['periodo']['desde'] ?? '') . ' al ' . (string)($datos['periodo']['hasta'] ?? ''),
+                    'Obstetra: ' . (string)($datos['obstetra_nombre'] ?? 'TODAS LAS OBSTETRAS'),
+                    'Emisor: ' . HospitalHuaralDB::nombrePersona((string)$session['dni'], $pdo) . ' · DNI ' . (string)$session['dni'] . ' · ' . (string)$session['platform'],
+                    'Generado: ' . date('d/m/Y H:i:s'),
+                ],
+                [
+                    'Fecha de salida', 'DNI Obstetra', 'Nombre Obstetra', 'Sectores visitados',
+                    'Pacientes registradas', 'Primera hora de registro', 'Última hora de registro',
+                ],
+                $rows,
+                [1],
+                ['Total de salidas registradas: ' . count($rows)]
+            );
         }
         $rows = [];
         foreach ($filas as $f) {
@@ -4186,12 +4437,34 @@ if ($action === 'export_reporte_campo' || $action === 'export_reporte_metodos') 
             ];
         }
         HospitalHuaralDB::registrarAuditoria($session['dni'], 'EXPORT_REPORTE_CAMPO', 'Exportación Excel detallado de pacientes de campo: ' . count($rows) . ' filas.', $session['cod_estab'], $session['platform']);
-        reporte_csv_excel('pacientes_campo_' . $sello . '.csv', [
-            'Fecha y hora de registro', 'Sector', 'DNI Paciente', 'Apellido Paterno', 'Apellido Materno',
-            'Nombres', 'Edad', 'Celular', 'Dirección', 'Distrito', 'Estado de la Paciente',
-            'Validación 99208', 'Último Método', 'Próxima Cita', 'DNI Obstetra',
-            'Obstetra que registró', 'Código Establecimiento', 'Establecimiento',
-        ], $rows, [2, 14, 16]);
+        reporte_excel_enriquecido(
+            'pacientes_campo_' . $sello . '.xls',
+            'REPORTE 01 · CAPTACIÓN DE CAMPO / BARRIDO',
+            'Captación domiciliaria y barrido de Planificación Familiar',
+            [
+                'Establecimiento: ' . (string)($datos['establecimiento']['nombre'] ?? $session['estab_nombre']),
+                'Periodo: ' . (string)($datos['filtros']['fecha_desde'] ?? '') . ' al ' . (string)($datos['filtros']['fecha_hasta'] ?? ''),
+                'Obstetra: ' . (string)($datos['obstetra_nombre'] ?? 'TODAS LAS OBSTETRAS'),
+                'Filtros: ' . json_encode($datos['filtros'] ?? [], JSON_UNESCAPED_UNICODE),
+                'Emisor: ' . HospitalHuaralDB::nombrePersona((string)$session['dni'], $pdo) . ' · DNI ' . (string)$session['dni'] . ' · ' . (string)$session['platform'],
+                'Generado: ' . date('d/m/Y H:i:s'),
+            ],
+            [
+                'Fecha y hora de registro', 'Sector', 'DNI Paciente', 'Apellido Paterno', 'Apellido Materno',
+                'Nombres', 'Edad', 'Celular', 'Dirección', 'Distrito', 'Estado de la Paciente',
+                'Validación 99208', 'Último Método', 'Próxima Cita', 'DNI Obstetra',
+                'Obstetra que registró', 'Código Establecimiento', 'Establecimiento',
+            ],
+            $rows,
+            [2, 14, 16],
+            [
+                'Total de pacientes registradas: ' . (int)($datos['resumen']['total_pacientes'] ?? count($rows)),
+                'Satisfechas con método: ' . (int)($datos['resumen']['satisfechas'] ?? 0),
+                'Insatisfechas sin método: ' . (int)($datos['resumen']['insatisfechas'] ?? 0),
+                'Con consejería 99208: ' . (int)($datos['resumen']['con_99208'] ?? 0),
+                'Pendientes / seguimiento: ' . (int)($datos['resumen']['pendientes'] ?? 0),
+            ]
+        );
     }
 
     $datos = reporte_metodos_datos($pdo, $session, $_GET, 1, 5000);
@@ -4216,11 +4489,32 @@ if ($action === 'export_reporte_campo' || $action === 'export_reporte_metodos') 
         ];
     }
     HospitalHuaralDB::registrarAuditoria($session['dni'], 'EXPORT_REPORTE_METODOS', 'Exportación Excel del reporte por método anticonceptivo: ' . count($rows) . ' filas.', $session['cod_estab'], $session['platform']);
-    reporte_csv_excel('reporte_por_metodo_' . date('Ymd_His') . '.csv', [
-        'DNI Paciente', 'Paciente', 'Edad', 'Celular', 'Sector', 'Código Método',
-        'Método', 'Días de ciclo', 'Fecha última atención', 'Fecha programada siguiente atención',
-        'Estado del indicador', 'DNI Obstetra', 'Obstetra', 'Código Establecimiento', 'Establecimiento',
-    ], $rows, [0, 11, 13]);
+    reporte_excel_enriquecido(
+        'reporte_por_metodo_' . date('Ymd_His') . '.xls',
+        'REPORTE 03 · INDICADORES POR MÉTODO ANTICONCEPTIVO',
+        'Programación y estado de la última atención de Planificación Familiar',
+        [
+            'Establecimiento: ' . (string)($datos['establecimiento']['nombre'] ?? $session['estab_nombre']),
+            'Periodo: ' . (string)($datos['periodo']['desde'] ?? '') . ' al ' . (string)($datos['periodo']['hasta'] ?? ''),
+            'Filtros: ' . json_encode($datos['filtros'] ?? [], JSON_UNESCAPED_UNICODE),
+            'Emisor: ' . HospitalHuaralDB::nombrePersona((string)$session['dni'], $pdo) . ' · DNI ' . (string)$session['dni'] . ' · ' . (string)$session['platform'],
+            'Generado: ' . date('d/m/Y H:i:s'),
+        ],
+        [
+            'DNI Paciente', 'Paciente', 'Edad', 'Celular', 'Sector', 'Código Método',
+            'Método', 'Días de ciclo', 'Fecha última atención', 'Fecha programada siguiente atención',
+            'Estado del indicador', 'DNI Obstetra', 'Obstetra', 'Código Establecimiento', 'Establecimiento',
+        ],
+        $rows,
+        [0, 11, 13],
+        [
+            'Total de pacientes: ' . (int)($datos['resumen']['total'] ?? count($rows)),
+            'Vigentes: ' . (int)($datos['resumen']['vigente'] ?? 0),
+            'Próximas: ' . (int)($datos['resumen']['proxima'] ?? 0),
+            'Vencidas: ' . (int)($datos['resumen']['vencida'] ?? 0),
+            'Sin método: ' . (int)($datos['resumen']['sin_metodo'] ?? 0),
+        ]
+    );
 }
 
 
@@ -4370,6 +4664,7 @@ if ($action === 'save_paciente') {
         ':a99208' => $atencion99208,
     ]);
 
+    alertas_cache_invalidate();
     HospitalHuaralDB::registrarAuditoria(
         $session['dni'],
         $paseUps ? 'PASE_UPS_CONFIRMADO' : 'GUARDAR_PACIENTE',
@@ -4420,6 +4715,7 @@ if ($action === 'update_estado') {
     if ($stmt->rowCount() === 0) {
         json_error('No se encontró el registro solicitado.', 404);
     }
+    alertas_cache_invalidate();
     HospitalHuaralDB::registrarAuditoria($session['dni'], 'PACIENTE_STATUS_CHANGE', 'Cambio de estado del registro #' . $id . ' a ' . $estado . '.', $session['cod_estab'], $session['platform']);
     json_out(['success' => true, 'id' => $id, 'estado_paciente' => $estado]);
 }

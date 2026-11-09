@@ -31,6 +31,19 @@ $totalEstablecimientos = count($catalogo);
 // descarga directa. Si no existe, se ofrecen las instrucciones de instalación PWA.
 $apkDisponible = is_file(__DIR__ . '/public/planificahis.apk');
 $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+
+// Logos oficiales pre-codificados en Base64: disponibles al instante en modo
+// offline, PDF y Excel sin depender de una petición adicional al servidor.
+$diresaLogoPath = __DIR__ . '/public/logo-diresa-lima.jpg';
+$hospitalLogoPath = __DIR__ . '/public/logo.png';
+$diresaLogoDataUri = is_file($diresaLogoPath)
+    ? 'data:image/jpeg;base64,' . base64_encode((string)file_get_contents($diresaLogoPath))
+    : './public/logo-diresa-lima.jpg';
+$hospitalLogoDataUri = is_file($hospitalLogoPath)
+    ? 'data:image/png;base64,' . base64_encode((string)file_get_contents($hospitalLogoPath))
+    : './public/logo.png';
+$diresaLogoJson = json_encode($diresaLogoDataUri, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+$hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
 ?>
 <!doctype html>
 <html lang="es">
@@ -45,8 +58,9 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="PlanificaHIS" />
   <link rel="manifest" href="./manifest.webmanifest" />
-  <link rel="icon" type="image/svg+xml" href="./public/icon.svg" />
-  <link rel="apple-touch-icon" href="./public/apple-touch-icon.png" />
+  <link rel="icon" type="image/svg+xml" href="./public/icon.svg?v=3" />
+  <link rel="icon" type="image/x-icon" href="./public/favicon.ico?v=3" />
+  <link rel="apple-touch-icon" href="./public/apple-touch-icon.png?v=3" sizes="180x180" />
   <script src="https://cdn.tailwindcss.com"></script>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
   <style>
@@ -54,10 +68,14 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
     .font-mono { font-family: 'JetBrains Mono', monospace; font-variant-numeric: tabular-nums; }
     .hide-scrollbar::-webkit-scrollbar { display: none; }
     .safe-bottom { padding-bottom: env(safe-area-inset-bottom); }
+    /* iOS Safari: evita el auto-zoom al enfocar inputs/selects/textareas. */
+    @media (max-width: 768px) {
+      input, select, textarea { font-size: 16px !important; }
+    }
   </style>
 </head>
-<body class="bg-slate-200/70 text-slate-900 antialiased min-h-screen flex flex-col items-center">
-  <div id="app-root" class="w-full max-w-[430px] min-h-screen bg-slate-50 shadow-2xl border-x border-slate-200 flex flex-col relative"></div>
+<body class="bg-slate-200/70 text-slate-900 antialiased min-h-[100dvh] flex flex-col items-center">
+  <div id="app-root" class="w-full max-w-[480px] md:max-w-3xl lg:max-w-5xl min-h-[100dvh] bg-slate-50 shadow-2xl border-x border-slate-200 flex flex-col relative"></div>
   <div id="ios-banner-root"></div>
 
   <script>
@@ -67,6 +85,8 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
     const POR_DISTRITO = <?= $porDistritoJson ?>;
     const TOTAL_ESTABLECIMIENTOS = <?= (int)$totalEstablecimientos ?>;
     const APK_URL = <?= $apkJson ?>;
+    const DIRESA_LOGO_DATA_URI = <?= $diresaLogoJson ?>;
+    const HOSPITAL_LOGO_DATA_URI = <?= $hospitalLogoJson ?>;
     const API = './api.php';
     const TOKEN_KEY = 'planificahis.php.token.v1';
     const SESSION_KEY = 'planificahis.php.session.v1';
@@ -87,69 +107,9 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
       'VEINTISIETE DE NOVIEMBRE'
     ];
 
-    const LOGO_SVG = `
-      <svg viewBox="0 0 240 260" fill="none" xmlns="http://www.w3.org/2000/svg" class="w-full h-full">
-        <ellipse cx="120" cy="130" rx="96" ry="116" fill="#FFFFFF" stroke="#0082C8" stroke-width="8" />
-        <path d="M52 46 C 85 95, 85 165, 52 214" stroke="#0082C8" stroke-width="7" stroke-linecap="round" fill="none" />
-        <path d="M188 46 C 155 95, 155 165, 188 214" stroke="#0082C8" stroke-width="7" stroke-linecap="round" fill="none" />
-        <path d="M78 74 C 92 74, 96 86, 96 96 L 96 164 C 96 174, 92 186, 78 186" stroke="#0082C8" stroke-width="6" fill="none" />
-        <path d="M162 74 C 148 74, 144 86, 144 96 L 144 164 C 144 174, 148 186, 162 186" stroke="#0082C8" stroke-width="6" fill="none" />
-        <rect x="66" y="38" width="108" height="36" fill="#FFFFFF" stroke="#0082C8" stroke-width="7" />
-        <text x="120" y="62" text-anchor="middle" fill="#111827" font-family="Arial, sans-serif" font-weight="900" font-size="18">HOSPITAL</text>
-        <rect x="66" y="186" width="108" height="36" fill="#FFFFFF" stroke="#0082C8" stroke-width="7" />
-        <text x="120" y="210" text-anchor="middle" fill="#111827" font-family="Arial, sans-serif" font-weight="900" font-size="18">HUARAL</text>
-        <path d="M120 104 C 98 90, 74 92, 66 104 C 76 112, 96 114, 120 112 Z" fill="#D4AF37" stroke="#9A7B1C" stroke-width="2" />
-        <path d="M120 104 C 142 90, 166 92, 174 104 C 164 112, 144 114, 120 112 Z" fill="#D4AF37" stroke="#9A7B1C" stroke-width="2" />
-        <line x1="120" y1="84" x2="120" y2="178" stroke="#B8860B" stroke-width="5" stroke-linecap="round" />
-        <circle cx="120" cy="82" r="8" fill="#EAB308" stroke="#9A7B1C" stroke-width="2.5" />
-        <text x="120" y="152" text-anchor="middle" fill="#0F172A" font-family="Georgia, serif" font-weight="bold" font-size="48">SJB</text>
-      </svg>`;
-
-    // Logo oficial DIRESA Lima: Chakana/ cruz andina escalonada con bordes
-    // dorados y bloques multicolor. Se usa en el lado izquierdo de los 4
-    // reportes (pantalla, PDF y Excel). El logo UEI/Hospital permanece a la
-    // derecha. También se conserva public/logo-diresa-lima.jpg como respaldo
-    // institucional para personalizaciones del Administrador.
-    const DIRESA_SVG = `
-      <svg viewBox="0 0 240 280" fill="none" xmlns="http://www.w3.org/2000/svg" class="w-full h-full">
-        <rect x="2" y="2" width="236" height="276" rx="8" fill="#FFFFFF" stroke="#B8860B" stroke-width="4" />
-        <rect x="8" y="8" width="224" height="264" rx="5" fill="none" stroke="#F5D061" stroke-width="1.5" />
-        <clipPath id="chakanaClip">
-          <path d="M100 20 H140 V42 H162 V64 H184 V146 H162 V168 H140 V190 H100 V168 H78 V146 H56 V64 H78 V42 H100 Z" />
-        </clipPath>
-        <path d="M100 20 H140 V42 H162 V64 H184 V146 H162 V168 H140 V190 H100 V168 H78 V146 H56 V64 H78 V42 H100 Z" fill="#D4AF37" stroke="#9A7B1C" stroke-width="4" />
-        <g clip-path="url(#chakanaClip)">
-          <rect x="56" y="20" width="128" height="44" fill="#F2C200" />
-          <rect x="56" y="64" width="34" height="82" fill="#E30613" />
-          <rect x="150" y="64" width="34" height="82" fill="#0057B8" />
-          <rect x="56" y="146" width="128" height="44" fill="#0B7A3E" />
-          <rect x="90" y="64" width="60" height="82" fill="#FFFFFF" />
-          <rect x="90" y="64" width="20" height="20" fill="#6B3FA0" />
-          <rect x="110" y="64" width="20" height="20" fill="#F28C28" />
-          <rect x="130" y="64" width="20" height="20" fill="#0057B8" />
-          <rect x="90" y="84" width="20" height="20" fill="#F2C200" />
-          <rect x="110" y="84" width="20" height="20" fill="#8BC34A" />
-          <rect x="130" y="84" width="20" height="20" fill="#E30613" />
-          <rect x="90" y="104" width="20" height="20" fill="#0B7A3E" />
-          <rect x="110" y="104" width="20" height="20" fill="#8BC34A" />
-          <rect x="130" y="104" width="20" height="20" fill="#6B3FA0" />
-          <rect x="90" y="124" width="60" height="22" fill="#FFFFFF" />
-          <path d="M101 137 V120 H111 V132 H119 V120 H129 V137" stroke="#8BC34A" stroke-width="7" stroke-linecap="square" fill="none" />
-          <g stroke="#D4AF37" stroke-width="2.5">
-            <path d="M56 64 H184 M56 146 H184 M90 64 V146 M150 64 V146 M90 84 H150 M90 104 H150 M90 124 H150 M110 64 V146 M130 64 V146" />
-          </g>
-        </g>
-        <g>
-          <rect x="24" y="200" width="192" height="28" fill="#FFFFFF" stroke="#B8860B" stroke-width="2" />
-          <text x="120" y="219" text-anchor="middle" fill="#111827" font-family="Arial Black, Arial, sans-serif" font-weight="900" font-size="12.5">GOBIERNO REGIONAL DE LIMA</text>
-          <rect x="34" y="233" width="172" height="4" fill="#C8102E" />
-          <rect x="24" y="242" width="192" height="24" fill="#FFFFFF" stroke="#B8860B" stroke-width="2" />
-          <text x="120" y="258" text-anchor="middle" fill="#111827" font-family="Arial Black, Arial, sans-serif" font-weight="900" font-size="10.5">DIRECCION REGIONAL DE SALUD</text>
-        </g>
-      </svg>`;
-
-    // Escudo institucional referencial para el membrete oficial de los 4 reportes.
-    const ESCUDO_SVG = DIRESA_SVG;
+    // Logo oficial del Hospital San Juan Bautista Huaral (public/logo.png).
+    // Se usa SIEMPRE la imagen original, sin SVG inventados ni filtros.
+    const HOSPITAL_LOGO_HTML = '<img src="' + HOSPITAL_LOGO_DATA_URI + '" alt="Hospital San Juan Bautista Huaral" class="w-full h-full object-contain" />';
 
 
     function localIsoDate(offsetDays) {
@@ -498,7 +458,7 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
     function renderLogin() {
       return `
         <div class="bg-gradient-to-b from-sky-50/80 to-white border-b border-slate-100 px-6 pt-8 pb-5 text-center">
-          <div class="w-24 h-24 mx-auto mb-3">${LOGO_SVG}</div>
+          <div class="w-24 h-24 mx-auto mb-3">${HOSPITAL_LOGO_HTML}</div>
           <h1 class="text-lg font-bold text-slate-900 tracking-tight">Hospital San Juan Bautista Huaral</h1>
           <p class="text-xs text-slate-500 mt-0.5">Planificación Familiar · Captación y Seguimiento Obstétrico</p>
           <p class="text-[10px] text-sky-700 mt-1 font-medium">${TOTAL_ESTABLECIMIENTOS} IPRESS · Red Huaral-Chancay</p>
@@ -593,7 +553,7 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
       return `
         <div class="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-slate-200 px-3 py-2.5 flex items-center justify-between gap-2">
           <div class="flex items-center gap-2 min-w-0 flex-1">
-            <div class="w-9 h-9 shrink-0">${LOGO_SVG}</div>
+            <div class="w-9 h-9 shrink-0">${HOSPITAL_LOGO_HTML}</div>
             <div class="min-w-0 flex-1">
               <div class="text-xs font-bold text-slate-900 truncate">${esc(s.nombreCompleto || 'Hospital SJB Huaral')}</div>
               ${s.isAdmin ? `<select aria-label="Establecimiento activo" onchange="cambiarEstablecimiento(this.value)" ${state.changingEstab ? 'disabled' : ''} class="mt-0.5 w-full max-w-[250px] min-h-[30px] px-2 py-0.5 rounded-lg border border-sky-200 bg-sky-50 text-[10px] text-sky-950 font-medium truncate">
@@ -611,7 +571,7 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
           </div>
         </div>
         ${!navigator.onLine ? '<div class="mx-4 mt-3 p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-[11px] text-amber-900 font-medium">Sin conexión. Las captaciones se guardarán cifradas en este dispositivo y se sincronizarán automáticamente.</div>' : ''}
-        <main class="flex-1 p-4 pb-24 space-y-4">
+        <main class="flex-1 p-4 pb-[calc(5rem+env(safe-area-inset-bottom))] space-y-4">
           ${renderAlertaBanner()}
           ${state.activeTab === 'CAPTAR' ? renderCaptar() : ''}
           ${state.activeTab === 'PACIENTES' ? renderPacientes() : ''}
@@ -619,7 +579,7 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
           ${state.activeTab === 'AGENDA' ? renderAgenda() : ''}
           ${state.activeTab === 'PERFIL' ? renderPerfil() : ''}
         </main>
-        <nav class="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-[430px] z-40 bg-white/95 backdrop-blur-md border-t border-slate-200 grid grid-cols-5 items-center h-16 safe-bottom">
+        <nav class="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-[480px] md:max-w-3xl lg:max-w-5xl z-40 bg-white/95 backdrop-blur-md border-t border-slate-200 grid grid-cols-5 items-center h-16 safe-bottom">
           ${navButton('CAPTAR', 'Captar')}
           ${navButton('PACIENTES', 'Pacientes')}
           ${navButton('REPORTES', 'Reportes')}
@@ -1153,6 +1113,8 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
 
     function construirExcelReporte(r) {
       const filas = r.filas || [];
+      const logoDiresa = DIRESA_LOGO_DATA_URI;
+      const logoHospital = HOSPITAL_LOGO_DATA_URI;
       const fechaReporte = r.fecha_objetivo_ddmmyyyy || formatIsoToDdMmYyyy(r.fecha_objetivo);
       const alcance = r.alcance === 'red' ? 'Toda la Red Huaral-Chancay' : ((r.establecimiento && r.establecimiento.nombre) || 'Mi establecimiento');
       const rango = descripcionRangoReporte(r);
@@ -1192,10 +1154,14 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
         '.mono { font-family: Consolas, monospace; mso-number-format: "\@"; }' +
         '.total { background: #FEF3C7; font-weight: bold; color: #78350F; text-align: center; }' +
         '</style></head><body>' +
+        '<table style="width:100%">' +
+        '<tr>' +
+        '<td width="240" align="center" valign="middle"><img src="' + logoDiresa + '" width="220" height="75" alt="DIRESA Lima" /></td>' +
+        '<td align="center" valign="middle"><div class="title">HOSPITAL SAN JUAN BAUTISTA HUARAL</div><div class="sub">RED DE SALUD HUARAL-CHANCAY · PLANIFICACIÓN FAMILIAR</div><div class="sub2">REPORTE DE PROGRAMACIÓN DE MÉTODOS POR FECHA</div></td>' +
+        '<td width="110" align="center" valign="middle"><img src="' + logoHospital + '" width="80" height="85" alt="Hospital San Juan Bautista Huaral" /></td>' +
+        '</tr>' +
+        '</table>' +
         '<table>' +
-        '<tr><td colspan="15" class="title">HOSPITAL SAN JUAN BAUTISTA HUARAL</td></tr>' +
-        '<tr><td colspan="15" class="sub">RED DE SALUD HUARAL-CHANCAY · PLANIFICACIÓN FAMILIAR</td></tr>' +
-        '<tr><td colspan="15" class="sub2">REPORTE DE PROGRAMACIÓN DE MÉTODOS POR FECHA</td></tr>' +
         '<tr><td class="label">Fecha de reporte:</td><td colspan="14" class="meta">' + esc(fechaReporte) + '</td></tr>' +
         '<tr><td class="label">Alcance:</td><td colspan="14" class="meta">' + esc(alcance) + '</td></tr>' +
         '<tr><td class="label">Rango consultado:</td><td colspan="14" class="meta">' + esc(rango) + '</td></tr>' +
@@ -1370,7 +1336,7 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
       const esJefa = Boolean(s.isJefa);
       const puedeReset = Boolean(s.puedeResetearObstetra);
       return `<div class="p-4 rounded-2xl bg-white border border-slate-200 space-y-3">
-        <div class="flex items-center gap-3"><div class="w-12 h-12 shrink-0">${LOGO_SVG}</div><div class="min-w-0"><div class="text-sm font-bold text-slate-900">${esc(s.nombreCompleto)}</div><div class="text-xs text-slate-500 font-mono">DNI / CODPSAL: ${esc(s.dni)}</div><div class="text-xs text-sky-700">${esc(s.estab_nombre || establishName(s.cod_estab))}</div><div class="text-[10px] font-bold text-slate-600 mt-0.5">Rol: ${esc(s.rol_etiqueta || s.rol || 'OBSTETRA')}</div></div></div>
+        <div class="flex items-center gap-3"><div class="w-12 h-12 shrink-0">${HOSPITAL_LOGO_HTML}</div><div class="min-w-0"><div class="text-sm font-bold text-slate-900">${esc(s.nombreCompleto)}</div><div class="text-xs text-slate-500 font-mono">DNI / CODPSAL: ${esc(s.dni)}</div><div class="text-xs text-sky-700">${esc(s.estab_nombre || establishName(s.cod_estab))}</div><div class="text-[10px] font-bold text-slate-600 mt-0.5">Rol: ${esc(s.rol_etiqueta || s.rol || 'OBSTETRA')}</div></div></div>
         <div class="pt-3 border-t border-slate-100 flex items-center justify-between text-xs"><span class="text-slate-600">Instalación en celular</span><button type="button" onclick="installPwa()" class="min-h-[38px] px-3 rounded-xl bg-slate-900 text-white text-xs font-semibold">Instalar App</button></div>
       </div>
       <div class="p-4 rounded-2xl bg-white border border-slate-200 space-y-2.5">
@@ -1580,14 +1546,12 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
           ${state.syncExport ? `<div class="p-2 rounded-xl bg-slate-50 border border-slate-200 text-[10px] space-y-1"><div class="font-semibold">${esc(state.syncExport.filename)} · ${state.syncExport.rows} filas</div><div class="text-slate-600">${esc((state.syncExport.tables || []).join(', ') || 'Sin tablas locales')}</div><div class="flex gap-2 pt-1"><button type="button" onclick="descargarExportacion()" class="px-2 py-1.5 rounded-lg bg-teal-700 text-white font-semibold">Descargar SQL</button><button type="button" onclick="descargarIndices()" class="px-2 py-1.5 rounded-lg bg-slate-800 text-white font-semibold">Descargar índices</button></div></div>` : ''}
         </div>
         <div class="rounded-xl border border-slate-200 p-3 space-y-2">
-          <h4 class="text-xs font-bold text-slate-900">Personalización del logo de reportes</h4>
-          <p class="text-[10px] text-slate-500">Por defecto se usa el logo oficial DIRESA Lima (SVG Chakana). Puede reemplazarlo con una imagen JPG/PNG; se guarda en este navegador y se aplica a pantalla, PDF y Excel.</p>
-          <div class="flex items-center gap-2">
-            <div class="w-14 h-16 rounded-lg border border-slate-300 bg-white overflow-hidden flex items-center justify-center">${logoReportesHtml()}</div>
-            <label class="min-h-[38px] px-3 rounded-xl bg-slate-900 text-white text-[10px] font-bold flex items-center cursor-pointer">Subir logo<input type="file" accept="image/png,image/jpeg" class="hidden" onchange="guardarLogoPersonalizado(this)" /></label>
-            <button type="button" onclick="restablecerLogoPersonalizado()" class="min-h-[38px] px-3 rounded-xl border border-slate-300 text-[10px] font-bold">Oficial</button>
+          <h4 class="text-xs font-bold text-slate-900">Membrete institucional oficial</h4>
+          <p class="text-[10px] text-slate-500">Los reportes usan siempre los logos originales e intactos: DIRESA Lima (public/logo-diresa-lima.jpg) a la izquierda y Hospital San Juan Bautista Huaral (public/logo.png) a la derecha. No se aplican recortes, filtros ni SVG inventados.</p>
+          <div class="flex items-center gap-3">
+            <div class="h-12 w-40 rounded-lg border border-slate-300 bg-white overflow-hidden flex items-center justify-center">${logoReportesHtml()}</div>
+            <div class="w-12 h-14 rounded-lg border border-slate-300 bg-white overflow-hidden flex items-center justify-center">${HOSPITAL_LOGO_HTML}</div>
           </div>
-          <p class="text-[9px] text-slate-400 font-mono">Respaldo institucional: public/logo-diresa-lima.jpg</p>
         </div>
       </div>`;
     }
@@ -1832,14 +1796,13 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
     }
 
     function logoReportesHtml() {
-      if (state.logoPersonalizadoData) {
-        return '<img src="' + esc(state.logoPersonalizadoData) + '" alt="Logo institucional" style="max-width:100%;max-height:100%;object-fit:contain" />';
-      }
-      return DIRESA_SVG;
+      // SIEMPRE el logo oficial DIRESA Lima (JPG original), sin SVG inventados
+      // ni recortes. Se mantiene la proporción con object-fit: contain.
+      return '<img src="' + DIRESA_LOGO_DATA_URI + '" alt="Gobierno Regional de Lima - Dirección Regional de Salud" style="max-width:100%;max-height:100%;object-fit:contain" />';
     }
 
     function logoReportesDataUri() {
-      return state.logoPersonalizadoData || svgDataUri(DIRESA_SVG);
+      return DIRESA_LOGO_DATA_URI;
     }
 
     function guardarLogoPersonalizado(input) {
@@ -1882,9 +1845,9 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
     function membreteOficialHtml(meta) {
       const m = meta || metaOficial();
       return `<div style="border:2px solid #0f172a;border-radius:14px;background:#ffffff;overflow:hidden">
-        <div style="display:grid;grid-template-columns:82px 1fr 82px;gap:6px;padding:9px;align-items:start;border-bottom:2px solid #0f172a">
+        <div style="display:grid;grid-template-columns:150px 1fr 82px;gap:6px;padding:9px;align-items:start;border-bottom:2px solid #0f172a">
           <div style="text-align:center">
-            <div style="width:54px;height:64px;margin:0 auto 3px">${logoReportesHtml()}</div>
+            <div style="width:140px;height:50px;margin:0 auto 3px">${logoReportesHtml()}</div>
             <div style="font-size:6.5px;line-height:1.3;font-weight:800;color:#7f1d1d;text-transform:uppercase">Gobierno Regional de Lima</div>
             <div style="font-size:6px;line-height:1.25;color:#334155;text-transform:uppercase">Dirección Regional de Salud</div>
           </div>
@@ -1900,7 +1863,7 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
             </div>
           </div>
           <div style="text-align:center">
-            <div style="width:44px;height:50px;margin:0 auto 3px">${LOGO_SVG}</div>
+            <div style="width:44px;height:50px;margin:0 auto 3px">${HOSPITAL_LOGO_HTML}</div>
             <div style="font-size:6.5px;line-height:1.3;font-weight:800;color:#075985;text-transform:uppercase">Red de Salud Huaral Chancay</div>
             <div style="font-size:6px;line-height:1.25;color:#334155;text-transform:uppercase">Hospital San Juan Bautista de Huaral</div>
           </div>
@@ -1920,7 +1883,7 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
       const m = meta || metaOficial();
       const totalCols = Math.max(1, columnas.length);
       const escudo = logoReportesDataUri();
-      const logo = svgDataUri(LOGO_SVG);
+      const logo = HOSPITAL_LOGO_DATA_URI;
       const filasHtml = (filas || []).map(function (fila, indice) {
         return '<tr>' + columnas.map(function (col, i) {
           const valor = fila[i] === null || fila[i] === undefined ? '' : fila[i];
@@ -1946,11 +1909,11 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
         '</style></head><body>' +
         '<table class="membrete" style="width:100%">' +
         '<tr>' +
-        '<td rowspan="5" width="80" align="center">' + (escudo ? '<img src="' + escudo + '" width="48" height="58" />' : '') + '</td>' +
+        '<td rowspan="5" width="240" align="center">' + (escudo ? '<img src="' + escudo + '" width="220" height="75" />' : '') + '</td>' +
         '<td width="210" class="inst">GOBIERNO REGIONAL DE LIMA<br/>DIRECCIÓN REGIONAL DE SALUD LIMA</td>' +
         '<td rowspan="5" class="titulo">' + esc(m.titulo) + '<br/><span class="subtitulo">' + esc(m.subtitulo) + '</span></td>' +
         '<td width="210" class="inst2">RED DE SALUD HUARAL CHANCAY<br/>HOSPITAL SAN JUAN BAUTISTA DE HUARAL</td>' +
-        '<td rowspan="5" width="80" align="center">' + (logo ? '<img src="' + logo + '" width="48" height="52" />' : '') + '</td>' +
+        '<td rowspan="5" width="110" align="center">' + (logo ? '<img src="' + logo + '" width="80" height="85" />' : '') + '</td>' +
         '</tr>' +
         '<tr><td class="dato"><b>Establecimiento:</b> ' + esc(m.establecimiento) + '</td><td class="dato"><b>Periodo:</b> ' + esc(m.periodo || '—') + '</td></tr>' +
         '<tr><td class="dato"><b>Obstetra:</b> ' + esc(m.obstetra || '—') + '</td><td class="dato"><b>Emisión:</b> ' + esc(m.generadoEn) + '</td></tr>' +
@@ -1970,7 +1933,7 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
     function construirDocumentoOficial(meta, columnas, filas, resumenLineas) {
       const m = meta || metaOficial();
       const escudo = logoReportesDataUri();
-      const logo = svgDataUri(LOGO_SVG);
+      const logo = HOSPITAL_LOGO_DATA_URI;
       const filasHtml = (filas || []).map(function (fila) {
         return '<tr>' + columnas.map(function (col, i) {
           const valor = fila[i] === null || fila[i] === undefined ? '' : fila[i];
@@ -2000,11 +1963,11 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
         '.pie { margin-top: 12px; text-align: center; font-size: 8px; color: #64748b; }' +
         '</style></head><body>' +
         '<table class="membrete"><tr>' +
-        '<td rowspan="5" width="10%" align="center">' + (escudo ? '<img src="' + escudo + '" width="52" height="63" />' : '') + '</td>' +
+        '<td rowspan="5" width="22%" align="center">' + (escudo ? '<img src="' + escudo + '" width="200" height="68" />' : '') + '</td>' +
         '<td width="24%" class="inst">GOBIERNO REGIONAL DE LIMA<br/>DIRECCIÓN REGIONAL DE SALUD LIMA</td>' +
         '<td rowspan="5" width="32%" class="titulo">' + esc(m.titulo) + '<br/><span class="subtitulo">' + esc(m.subtitulo) + '</span></td>' +
         '<td width="24%" class="inst2">RED DE SALUD HUARAL CHANCAY<br/>HOSPITAL SAN JUAN BAUTISTA DE HUARAL</td>' +
-        '<td rowspan="5" width="10%" align="center">' + (logo ? '<img src="' + logo + '" width="52" height="58" />' : '') + '</td>' +
+        '<td rowspan="5" width="10%" align="center">' + (logo ? '<img src="' + logo + '" width="80" height="85" />' : '') + '</td>' +
         '</tr>' +
         '<tr><td class="dato"><b>Establecimiento:</b> ' + esc(m.establecimiento) + '</td><td class="dato"><b>Periodo:</b> ' + esc(m.periodo || '—') + '</td></tr>' +
         '<tr><td class="dato"><b>Obstetra:</b> ' + esc(m.obstetra || '—') + '</td><td class="dato"><b>Emisión:</b> ' + esc(m.generadoEn) + '</td></tr>' +
@@ -2744,11 +2707,11 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
     }
 
     function exportarReporteCampo(tipo) {
-      descargarReporteExcel('export_reporte_campo', Object.assign({}, state.campoFiltros, { tipo: tipo }), 'reporte_campo_' + tipo + '_' + localIsoDate(0) + '.csv');
+      descargarReporteExcel('export_reporte_campo', Object.assign({}, state.campoFiltros, { tipo: tipo }), 'reporte_campo_' + tipo + '_' + localIsoDate(0) + '.xls');
     }
 
     function exportarReporteMetodos() {
-      descargarReporteExcel('export_reporte_metodos', Object.assign({}, state.metodosFiltros), 'reporte_metodos_' + localIsoDate(0) + '.csv');
+      descargarReporteExcel('export_reporte_metodos', Object.assign({}, state.metodosFiltros), 'reporte_metodos_' + localIsoDate(0) + '.xls');
     }
 
     // ---------------------------------------------------------------------
