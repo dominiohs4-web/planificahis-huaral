@@ -62,6 +62,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
   <link rel="icon" type="image/x-icon" href="./public/favicon.ico?v=3" />
   <link rel="apple-touch-icon" href="./public/apple-touch-icon.png?v=3" sizes="180x180" />
   <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
   <style>
     body { font-family: 'Plus Jakarta Sans', sans-serif; -webkit-tap-highlight-color: transparent; }
@@ -126,8 +127,10 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
     }
 
     function filtrosReportePorDefecto() {
+      // Ventana clínica útil: últimos 90 días (nunca un rango vacío o de un
+      // solo día). Si el usuario necesita el año, puede cambiarlo en el filtro.
       return {
-        fecha_desde: primerDiaMesIso(),
+        fecha_desde: localIsoDate(-90),
         fecha_hasta: localIsoDate(0),
         estado_paciente: 'TODOS',
         sector: 'TODOS',
@@ -178,6 +181,8 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       formDraft: null,
       formVisible: false,
       nombresDesbloqueados: false,
+      estadoExplicito: null,
+      editandoPaciente: null,
       feedback: null,
       distritoSelect: 'HUARAL',
       distritoOtros: '',
@@ -196,11 +201,11 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       showSecurity: true,
       booted: false,
       reporteVista: 'CAMPO',
-      campoFiltros: Object.assign(filtrosReportePorDefecto(), { alcance: 'establecimiento' }),
+      campoFiltros: Object.assign(filtrosReportePorDefecto(), { alcance: 'establecimiento', ambito: 'establecimiento' }),
       campoData: null,
       campoLoading: false,
       campoError: '',
-      metodosFiltros: filtrosReportePorDefecto(),
+      metodosFiltros: Object.assign(filtrosReportePorDefecto(), { alcance: 'establecimiento', ambito: 'establecimiento' }),
       metodosData: null,
       metodosLoading: false,
       metodosError: '',
@@ -232,7 +237,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       reporteFecha: localIsoDate(0),
       reporteModo: 'exacto',
       reporteAlcance: 'establecimiento',
-      reporteAmbito: 'mis_atenciones',
+      reporteAmbito: 'establecimiento',
       reporteObstetra: '',
       reporteMetodo: 'TODOS',
       reporteProgramacion: null,
@@ -292,6 +297,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       state.formDraft = null;
       state.formVisible = false;
       state.nombresDesbloqueados = false;
+      state.estadoExplicito = null;
       state.campoData = null;
       state.metodosData = null;
       try {
@@ -336,6 +342,16 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
     }
 
     function statusLabel(value) { return ESTADOS[value] || value || 'Sin estado'; }
+
+    let alertasInvalidacionTimer = null;
+    function invalidarCacheAlertas() {
+      if (!state.token) return;
+      if (alertasInvalidacionTimer) clearTimeout(alertasInvalidacionTimer);
+      alertasInvalidacionTimer = setTimeout(function () {
+        alertasInvalidacionTimer = null;
+        apiPost('invalidar_alertas', {}).catch(function () {});
+      }, 350);
+    }
 
     function showFeedback(type, text) {
       state.feedback = { type: type, text: text };
@@ -632,31 +648,65 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       const mapa = {
         AL_DIA: { card: 'bg-emerald-50 border-emerald-300 text-emerald-950', badge: 'bg-emerald-700 text-white', label: 'AL DÍA' },
         TOCA_HOY: { card: 'bg-amber-50 border-amber-400 text-amber-950', badge: 'bg-amber-600 text-white', label: 'TOCA HOY' },
-        PROXIMO_7_DIAS: { card: 'bg-sky-50 border-sky-300 text-sky-950', badge: 'bg-sky-700 text-white', label: 'PRÓXIMOS 7 DÍAS' },
-        VENCIDO_ABANDONO: { card: 'bg-red-50 border-red-400 text-red-950', badge: 'bg-red-700 text-white', label: 'VENCIDA / ABANDONO' },
+        PROXIMO_7_DIAS: { card: 'bg-sky-50 border-sky-300 text-sky-950', badge: 'bg-sky-700 text-white', label: 'PRÓXIMO' },
+        VENCIDO_ABANDONO: { card: 'bg-red-50 border-red-400 text-red-950', badge: 'bg-red-700 text-white', label: 'VENCIDA' },
         SIN_METODO: { card: 'bg-slate-50 border-slate-300 text-slate-800', badge: 'bg-slate-600 text-white', label: 'SIN MÉTODO' }
       };
       const meta = mapa[prog.estadoProgramacion] || mapa.SIN_METODO;
-      const dias = prog.diasParaProximo;
+      const actual = prog.metodoActual || {
+        codigo: prog.codigoMetodo,
+        codigo_his: prog.codigoHis,
+        nombre: prog.nombreMetodo,
+        fecha_aplicacion: prog.fechaUltimaAplicacion,
+        dias_ciclo: prog.diasCiclo,
+        fecha_proximo: prog.fechaProximoMetodo,
+        dias_restantes: prog.diasParaProximo,
+        id_dosis: prog.dosis,
+        obstetra_dni: prog.obstetraDni,
+        obstetra_nombre: prog.obstetraNombre,
+        establecimiento: prog.establecimientoNombre
+      };
+      const dias = actual.dias_restantes;
       const diasTexto = (dias === null || dias === undefined)
         ? 'Sin fecha de próximo método'
         : (Number(dias) === 0 ? 'Le toca HOY' : (Number(dias) > 0 ? 'Faltan ' + Number(dias) + ' días' : 'Vencida hace ' + Math.abs(Number(dias)) + ' días'));
       const origen = prog.establecimientoUltimoMetodo || {};
+      const historial = Array.isArray(prog.historialMetodos) ? prog.historialMetodos : [];
+      const anterior = prog.metodoAnterior || null;
+      const cambio = Boolean(prog.cambioMetodoDetectado || prog.esNuevoMetodo) && anterior;
       return `<div class="p-4 rounded-2xl border-2 ${meta.card} space-y-2.5">
         <div class="flex items-center justify-between gap-2">
-          <div class="text-xs font-extrabold">Estado de Programación · Planificación Familiar</div>
+          <div class="text-xs font-extrabold">MÉTODO ACTUAL EN EL QUE ESTÁ · Planificación Familiar</div>
           <span class="px-2 py-1 rounded-lg text-[10px] font-extrabold shrink-0 ${meta.badge}">${meta.label}</span>
         </div>
-        ${prog.tieneMetodoRegistrado ? `<div class="rounded-xl bg-white/80 border border-white px-3 py-2 space-y-1">
-          <div class="text-[11px] font-bold text-slate-900">${esc(prog.nombreMetodo)} <span class="font-mono">(${esc(prog.codigoMetodo)})</span></div>
+        ${prog.tieneMetodoRegistrado ? `<div class="rounded-xl bg-white/85 border border-white px-3 py-2 space-y-1">
+          <div class="text-sm font-extrabold text-slate-900">${esc(actual.nombre || 'Método registrado')} <span class="font-mono text-[11px]">(${esc(actual.codigo || '')})</span></div>
+          <div class="text-[10px] font-mono text-slate-600">Código HIS original: <b>${esc(actual.codigo_his || '—')}</b></div>
           <div class="grid grid-cols-2 gap-x-2 gap-y-1 text-[11px] font-mono">
-            <div>Aplicado: <b>${esc(prog.fechaUltimaAplicacion || '—')}</b></div>
-            <div>Ciclo: <b>${Number(prog.diasCiclo || 0)} días</b></div>
-            <div>Próximo: <b>${esc(prog.fechaProximoMetodo || '—')}</b></div>
+            <div>Aplicado: <b>${esc(actual.fecha_aplicacion || '—')}</b></div>
+            <div>Ciclo: <b>${Number(actual.dias_ciclo || 0)} días</b></div>
+            <div>Próximo: <b>${esc(actual.fecha_proximo || '—')}</b></div>
             <div class="font-semibold">${esc(diasTexto)}</div>
+            <div>Dosis / ID: <b>${esc(actual.id_dosis || '—')}</b></div>
+            <div>Obstetra: <b>${esc(actual.obstetra_nombre || actual.obstetra_dni || '—')}</b></div>
           </div>
-          ${prog.dosis ? '<div class="text-[10px] text-slate-600">Dosis registrada: <b>' + esc(prog.dosis) + '</b></div>' : ''}
+          ${actual.obstetra_dni ? '<div class="text-[10px] text-slate-600">DNI obstetra: <b class="font-mono">' + esc(actual.obstetra_dni) + '</b></div>' : ''}
+          ${actual.establecimiento ? '<div class="text-[10px] text-slate-600">Establecimiento: <b>' + esc(actual.establecimiento) + '</b></div>' : ''}
         </div>` : '<div class="rounded-xl bg-white/80 border border-white px-3 py-2 text-[11px]">No registra método anticonceptivo vigente en la Red Huaral-Chancay.</div>'}
+        ${cambio ? `<div class="rounded-xl bg-fuchsia-100 border-2 border-fuchsia-400 px-3 py-2 text-[11px] font-bold text-fuchsia-950">🆕 CAMBIO A NUEVO MÉTODO ACTUAL (Antes: ${esc(anterior.nombre || anterior.codigo || 'método anterior')} el ${esc(anterior.fecha || '—')})</div>` : ''}
+        ${historial.length >= 2 ? `<div class="rounded-xl bg-white/80 border border-white px-3 py-2 space-y-1.5">
+          <div class="text-[11px] font-extrabold text-slate-900">📋 Historial de últimos métodos registrados (${historial.length})</div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-[10px] border-collapse min-w-[520px]">
+              <thead><tr class="text-slate-500"><th class="text-left p-1">Fecha</th><th class="text-left p-1">Método / Código</th><th class="text-left p-1">Dosis</th><th class="text-left p-1">Establecimiento</th><th class="text-center p-1">Rol</th></tr></thead>
+              <tbody>${historial.map(function (item, idx) {
+                const etiqueta = idx === 0 ? 'ACTUAL' : (idx === 1 ? 'ANTERIOR' : '');
+                const colorEtiqueta = idx === 0 ? 'bg-emerald-700 text-white' : (idx === 1 ? 'bg-slate-600 text-white' : 'bg-slate-100 text-slate-600');
+                return '<tr class="border-t border-slate-100 align-top"><td class="p-1 font-mono whitespace-nowrap">' + esc(item.fecha || item.fecha_iso || '—') + '</td><td class="p-1"><div class="font-bold">' + esc(item.nombre || '—') + '</div><div class="font-mono text-slate-500">' + esc(item.codigo || '') + (item.codigo_his && item.codigo_his !== item.codigo ? ' · HIS ' + esc(item.codigo_his) : '') + '</div></td><td class="p-1 font-mono">' + esc(item.id_dosis || '—') + '</td><td class="p-1">' + esc(item.establecimiento || item.cod_estab || '—') + '</td><td class="p-1 text-center">' + (etiqueta ? '<span class="inline-block px-1.5 py-0.5 rounded text-[8px] font-extrabold ' + colorEtiqueta + '">' + etiqueta + '</span>' : '') + '</td></tr>';
+              }).join('')}</tbody>
+            </table>
+          </div>
+        </div>` : ''}
         ${origen.nombre ? '<div class="text-[10px] leading-relaxed">Última atención PF: <b>' + esc(origen.nombre) + '</b>' + (origen.esMismoEstablecimiento ? ' (su establecimiento)' : '') + '</div>' : ''}
         <div class="rounded-xl bg-white/70 border border-white px-3 py-2 text-[11px] leading-relaxed"><b>Recomendación:</b> ${esc(prog.recomendacionClinica || '')}</div>
       </div>`;
@@ -784,7 +834,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
             <div><label class="block text-xs text-slate-700 mb-1">Dirección Domiciliaria</label><input id="f-dir" type="text" required value="${esc(draft.direccion || '')}" placeholder="Calle / Av. / Urb. / Referencia" class="w-full min-h-[44px] px-3 rounded-xl border ${esCaso2 ? 'border-amber-400 bg-white' : 'border-slate-300'} text-sm" /></div>
             <div class="grid grid-cols-2 gap-2.5">
               <div><label class="block text-xs text-slate-700 mb-1">Sector</label><input id="f-sec" type="text" required value="${esc(draft.sector || '')}" placeholder="Ej. Sector 28" class="w-full min-h-[44px] px-3 rounded-xl border ${esCaso2 ? 'border-amber-400 bg-white' : 'border-slate-300'} text-sm" /></div>
-              <div><label class="block text-xs text-slate-700 mb-1">Estado</label><select id="f-est" class="w-full min-h-[44px] px-2 rounded-xl border border-slate-300 text-xs bg-white">${Object.keys(ESTADOS).map(function (e) { return '<option value="' + e + '"' + ((draft.estado_paciente || 'INSATISFECHA_SIN_METODO') === e ? ' selected' : '') + '>' + esc(ESTADOS[e]) + '</option>'; }).join('')}</select></div>
+              <div><label class="block text-xs text-slate-700 mb-1">Estado</label><select id="f-est" onchange="marcarEstadoExplicito(this)" class="w-full min-h-[44px] px-2 rounded-xl border border-slate-300 text-xs bg-white">${Object.keys(ESTADOS).map(function (e) { return '<option value="' + e + '"' + ((draft.estado_paciente || 'INSATISFECHA_SIN_METODO') === e ? ' selected' : '') + '>' + esc(ESTADOS[e]) + '</option>'; }).join('')}</select><div class="text-[9px] text-slate-500 mt-1">${state.estadoExplicito ? 'Cambio de estado explícito: se guardará al confirmar.' : 'Solo cambia si usted elige otro estado.'}</div></div>
             </div>
           </div>
           <button type="submit" class="w-full min-h-[48px] rounded-xl bg-sky-700 hover:bg-sky-800 text-white text-sm font-semibold">${esCaso1 ? 'Guardar Actualización de la Paciente' : (esCaso2 ? 'Registrar Paciente en mi Establecimiento' : 'Guardar Paciente')}</button>
@@ -796,22 +846,85 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         return '<div class="p-8 rounded-2xl bg-white border border-slate-200 text-center text-xs text-slate-500">Aún no hay pacientes registradas en pacientes_sin_metodo.</div>';
       }
       return '<div class="space-y-2.5">' + state.pacientes.map(function (p) {
+        const id = Number(p.id);
+        const editando = Number(state.editandoPaciente) === id;
+        const estados = Object.keys(ESTADOS);
+        if (p.estado_paciente && estados.indexOf(p.estado_paciente) === -1) estados.push(p.estado_paciente);
+        const opcionesRapidas = estados.map(function (e) {
+          return '<option value="' + esc(e) + '"' + (p.estado_paciente === e ? ' selected' : '') + '>' + esc(ESTADOS[e] || e) + '</option>';
+        }).join('');
+        const opcionesEdicion = estados.map(function (e) {
+          return '<option value="' + esc(e) + '"' + (p.estado_paciente === e ? ' selected' : '') + '>' + esc(ESTADOS[e] || e) + '</option>';
+        }).join('');
+        const bloqueEdicion = editando ? `
+          <div class="mt-2 p-3 rounded-xl border-2 border-sky-300 bg-sky-50/60 space-y-2.5">
+            <div class="text-[11px] font-extrabold text-sky-900">✏️ Editar datos / Cambiar opinión o estado</div>
+            <div class="grid grid-cols-1 gap-2.5">
+              <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Celular</label><input id="ep-cel-${id}" type="tel" value="${esc(p.celular || '')}" placeholder="987654321" class="w-full min-h-[42px] px-3 rounded-xl border border-slate-300 text-sm font-mono bg-white" /></div>
+              <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Dirección</label><input id="ep-dir-${id}" type="text" value="${esc(p.direccion || '')}" placeholder="Calle / Av. / Urb. / Referencia" class="w-full min-h-[42px] px-3 rounded-xl border border-slate-300 text-sm bg-white" /></div>
+              <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Sector</label><input id="ep-sec-${id}" type="text" value="${esc(p.sector || '')}" placeholder="Ej. Sector 28" class="w-full min-h-[42px] px-3 rounded-xl border border-slate-300 text-sm bg-white" /></div>
+              <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Estado / Opinión sobre el método</label><select id="ep-est-${id}" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white">${opcionesEdicion}</select></div>
+            </div>
+            <div class="grid grid-cols-2 gap-2">
+              <button type="button" onclick="guardarEdicionPaciente(${id})" class="min-h-[42px] rounded-xl bg-sky-700 hover:bg-sky-800 text-white text-xs font-bold">Guardar cambios</button>
+              <button type="button" onclick="cancelarEdicionPaciente()" class="min-h-[42px] rounded-xl border border-slate-300 bg-white text-slate-700 text-xs font-bold">Cancelar</button>
+            </div>
+          </div>` : '';
         return `<div class="p-4 rounded-2xl bg-white border border-slate-200 space-y-2 text-xs">
           <div class="flex items-start justify-between gap-2">
             <div><div class="text-sm font-bold text-slate-900">${esc(p.apellido_paterno)} ${esc(p.apellido_materno)}, ${esc(p.nombres)}</div>
             <div class="text-slate-500 mt-0.5">DNI <span class="font-mono font-semibold text-slate-800">${esc(p.dni)}</span> · ${esc(p.edad)} años · ${esc(p.distrito)}</div></div>
             ${p.atencion_99208 ? '<span class="px-2 py-1 rounded-lg bg-red-100 text-red-800 text-[10px] font-bold shrink-0">99208</span>' : ''}
           </div>
-          <div class="text-slate-600">${esc(p.direccion)} · ${esc(p.sector)}</div>
-          <div class="flex items-center justify-between pt-2 border-t border-slate-100">
+          <div class="text-slate-600">${esc(p.direccion || 'Sin dirección')} · ${esc(p.sector || 'Sin sector')}</div>
+          <div class="flex items-center justify-between gap-2 pt-2 border-t border-slate-100">
             <span class="font-mono text-slate-700">${esc(p.celular || 'Sin teléfono')}</span>
             <span class="font-semibold text-sky-800">${esc(statusLabel(p.estado_paciente))}</span>
           </div>
-          <div class="grid grid-cols-2 gap-1.5 pt-1">${['INSATISFECHA_SIN_METODO', 'SEGUIMIENTO_DOMICILIARIO', 'CONSEJERIA_REALIZADA', 'CAPTADA_CON_METODO'].map(function (e) {
-            return '<button type="button" onclick="cambiarEstado(' + Number(p.id) + ',\'' + e + '\')" class="min-h-[36px] rounded-xl border px-2 text-left text-[10px] ' + (p.estado_paciente === e ? 'border-sky-700 bg-sky-50 font-semibold' : 'border-slate-200') + '">' + esc(ESTADOS[e]) + '</button>';
-          }).join('')}</div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+            <label class="block"><span class="block text-[10px] font-bold text-slate-600 mb-1">Estado rápido</span>
+              <select onchange="cambiarEstado(${id}, this.value)" class="w-full min-h-[38px] px-2 rounded-xl border border-slate-300 text-[11px] bg-white">${opcionesRapidas}</select>
+            </label>
+            <button type="button" onclick="toggleEditarPaciente(${id})" class="min-h-[38px] self-end rounded-xl border-2 border-sky-600 bg-white px-2 text-[11px] font-bold text-sky-800">✏️ Editar datos / Cambiar opinión o estado</button>
+          </div>
+          ${bloqueEdicion}
         </div>`;
       }).join('') + '</div>';
+    }
+
+    function toggleEditarPaciente(id) {
+      state.editandoPaciente = Number(state.editandoPaciente) === Number(id) ? null : Number(id);
+      render();
+    }
+
+    function cancelarEdicionPaciente() {
+      state.editandoPaciente = null;
+      render();
+    }
+
+    async function guardarEdicionPaciente(id) {
+      const paciente = state.pacientes.filter(function (p) { return Number(p.id) === Number(id); })[0];
+      if (!paciente) return;
+      const cel = document.getElementById('ep-cel-' + id);
+      const dir = document.getElementById('ep-dir-' + id);
+      const sec = document.getElementById('ep-sec-' + id);
+      const est = document.getElementById('ep-est-' + id);
+      const payload = {
+        id: Number(id),
+        estado_paciente: est ? est.value : (paciente.estado_paciente || 'INSATISFECHA_SIN_METODO'),
+        celular: cel ? cel.value.trim() : '',
+        direccion: dir ? dir.value.trim() : '',
+        sector: sec ? sec.value.trim() : ''
+      };
+      try {
+        await apiPost('update_estado', payload);
+        state.editandoPaciente = null;
+        state.feedback = { type: 'success', text: 'Datos de la paciente actualizados correctamente.' };
+        await loadOverview();
+        render();
+      } catch (error) {
+        showFeedback('error', error.message);
+      }
     }
 
     const REPORTE_ESTADOS = {
@@ -952,8 +1065,8 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
             </select></div>
           </div>
           ${state.session && !state.session.isAdmin ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">Pacientes a programar</label><select id="rep-ambito" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-[10px] bg-white">
-            ${state.session.rol === 'OBSTETRA' ? '<option value="mis_atenciones" ' + (state.reporteAmbito === 'mis_atenciones' ? 'selected' : '') + '>Mis atenciones (solo pacientes que atendí)</option>' : ''}
             <option value="establecimiento" ${state.reporteAmbito === 'establecimiento' ? 'selected' : ''}>Mi establecimiento (padrón histórico de mi IPRESS)</option>
+            ${state.session.rol === 'OBSTETRA' ? '<option value="mis_atenciones" ' + (state.reporteAmbito === 'mis_atenciones' ? 'selected' : '') + '>Solo mis captaciones (pacientes que atendí)</option>' : ''}
           </select></div>` : ''}
           ${state.session && (state.session.isAdmin || state.session.isJefa) ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">Obstetra (opcional, DNI o vacío = todas)</label><input id="rep-obstetra" type="text" inputmode="numeric" maxlength="11" value="${esc(state.reporteObstetra)}" placeholder="DNI de la obstetra" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs font-mono" /></div>` : ''}
           <button type="button" onclick="buscarProgramacion()" ${state.reporteLoading ? 'disabled' : ''} class="w-full min-h-[46px] rounded-xl bg-slate-900 hover:bg-slate-800 disabled:opacity-60 text-white text-xs font-bold">${state.reporteLoading ? 'Calculando programación...' : 'Buscar Programación'}</button>
@@ -1072,6 +1185,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
 
     async function buscarProgramacion() {
       if (!state.token) return;
+      invalidarCacheAlertas();
       const fechaInput = document.getElementById('rep-fecha');
       const metodoInput = document.getElementById('rep-metodo');
       const alcanceInput = document.getElementById('rep-alcance');
@@ -1120,6 +1234,13 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       const alcance = r.alcance === 'red' ? 'Toda la Red Huaral-Chancay' : ((r.establecimiento && r.establecimiento.nombre) || 'Mi establecimiento');
       const rango = descripcionRangoReporte(r);
       const metodo = etiquetaFiltroMetodo(r);
+      const metaEmisor = metaOficial(
+        'REPORTE DE PROGRAMACIÓN DE MÉTODOS POR FECHA',
+        'Programación de Planificación Familiar',
+        rango,
+        (r.establecimiento && r.establecimiento.nombre) || '',
+        r.obstetra_nombre || ''
+      );
       const filasHtml = filas.map(function (f) {
         return '<tr>' +
           '<td class="center">' + esc(fechaReporte) + '</td>' +
@@ -1177,7 +1298,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         '<th>Fecha de Próximo Método</th><th>Estado</th><th>Celular</th><th>Dirección</th><th>Sector</th><th>Distrito</th>' +
         '</tr></thead><tbody>' + filasHtml +
         '<tr><td colspan="15" class="total">Total de registros: ' + filas.length + '</td></tr>' +
-        '</tbody></table></body></html>';
+        '</tbody></table>' + firmaOficialExcelHtml(metaEmisor) + '</body></html>';
     }
 
     function construirVistaCelularReporte(r) {
@@ -1265,17 +1386,22 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       return lineas.join('\n');
     }
 
-    function exportarReporteExcel() {
+    async function exportarReporteExcel() {
       const r = state.reporteProgramacion;
       if (!r) {
         state.feedback = { type: 'error', text: 'Primero busque la programación que desea exportar.' };
         render();
         return;
       }
-      const fecha = r.fecha_objetivo || localIsoDate(0);
-      descargarArchivo('programacion_pf_' + fecha + '.xls', construirExcelReporte(r), 'application/vnd.ms-excel;charset=utf-8');
-      state.feedback = { type: 'success', text: 'Excel generado con ' + Number((r.resumen && r.resumen.total) || (r.filas || []).length) + ' pacientes. Compatible con Excel de PC, WPS y celular.' };
-      render();
+      try {
+        const datos = await datosOficialesReporte('PROGRAMACION');
+        const resultado = await generarYDescargarXlsxOficial(datos.meta, datos.columnas, datos.filas, datos.resumen, datos.archivo);
+        state.feedback = { type: 'success', text: 'Excel generado con ' + Number((r.resumen && r.resumen.total) || (r.filas || []).length) + ' pacientes (' + resultado.formato + ').' };
+        render();
+      } catch (error) {
+        state.feedback = { type: 'error', text: error.message };
+        render();
+      }
     }
 
     function descargarVistaCelular() {
@@ -1601,14 +1727,15 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         { id: 'CAMPO', label: '01 · Campo' },
         { id: 'PRODUCTIVIDAD', label: '02 · Productividad' },
         { id: 'PROGRAMACION', label: '03 · Programación' },
-        { id: 'PADRON', label: '04 · Padrón' }
+        { id: 'PADRON', label: '04 · Padrón' },
+        { id: 'METODOS', label: '05 · Métodos' }
       ];
       return `
         <div class="space-y-3">
           ${state.feedback ? `<div class="p-3 rounded-xl border text-[11px] ${state.feedback.type === 'error' ? 'bg-red-50 border-red-200 text-red-800' : 'bg-emerald-50 border-emerald-200 text-emerald-900'}">${esc(state.feedback.text)}</div>` : ''}
           <div class="p-4 rounded-2xl bg-slate-900 text-white">
             <div class="text-[10px] font-bold uppercase tracking-wider text-sky-300">Reportes Oficiales · Planificación Familiar</div>
-            <h2 class="text-base font-bold">4 reportes con membrete institucional</h2>
+            <h2 class="text-base font-bold">5 reportes con membrete institucional</h2>
             <p class="text-[11px] text-slate-300 mt-0.5">Hospital San Juan Bautista de Huaral · Red de Salud Huaral-Chancay</p>
           </div>
           ${state.session && state.session.isJefa ? renderEquipoJefatura() : ''}
@@ -1621,6 +1748,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
           ${state.reporteVista === 'PRODUCTIVIDAD' ? renderReporteProductividad() : ''}
           ${state.reporteVista === 'PROGRAMACION' ? renderReporteProgramacion() : ''}
           ${state.reporteVista === 'PADRON' ? renderReportePadron() : ''}
+          ${state.reporteVista === 'METODOS' ? renderReporteMetodos() : ''}
         </div>`;
     }
 
@@ -1664,7 +1792,12 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
           </div>
           <div class="grid grid-cols-2 gap-2">
             <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Sector</label><select onchange="actualizarFiltroCampo('sector', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white"><option value="TODOS">Todos los sectores</option>${sectores.map(function (s) { return '<option value="' + esc(s) + '"' + (f.sector === s ? ' selected' : '') + '>' + esc(s) + '</option>'; }).join('')}</select></div>
-            <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Obstetra</label><select onchange="actualizarFiltroCampo('obstetra', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white"><option value="TODOS">Todas las obstetras</option>${obstetras.map(function (o) { return '<option value="' + esc(o.codpsal_obstetra) + '"' + (f.obstetra === o.codpsal_obstetra ? ' selected' : '') + '>' + esc(o.nombre_obstetra || o.codpsal_obstetra) + '</option>'; }).join('')}</select></div>
+            ${state.session && !state.session.isAdmin && !state.session.isJefa
+              ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">Pacientes a incluir</label><select onchange="actualizarFiltroCampo('ambito', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-[10px] bg-white">
+                  <option value="establecimiento" ${f.ambito !== 'mis_captaciones' ? 'selected' : ''}>Todo mi establecimiento</option>
+                  <option value="mis_captaciones" ${f.ambito === 'mis_captaciones' ? 'selected' : ''}>Solo mis captaciones</option>
+                </select></div>`
+              : `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">Obstetra</label><select onchange="actualizarFiltroCampo('obstetra', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white"><option value="TODOS">Todas las obstetras</option>${obstetras.map(function (o) { return '<option value="' + esc(o.codpsal_obstetra) + '"' + (f.obstetra === o.codpsal_obstetra ? ' selected' : '') + '>' + esc(o.nombre_obstetra || o.codpsal_obstetra) + '</option>'; }).join('')}</select></div>`}
           </div>
           ${state.session && state.session.isAdmin ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">Alcance</label><select onchange="actualizarFiltroCampo('alcance', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-[10px] bg-white">
             <option value="establecimiento" ${f.alcance === 'establecimiento' ? 'selected' : ''}>Mi establecimiento activo</option>
@@ -1744,6 +1877,10 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
             </select></div>
             <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Sector</label><select onchange="actualizarFiltroMetodos('sector', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white"><option value="TODOS">Todos</option>${sectores.map(function (s) { return '<option value="' + esc(s) + '"' + (f.sector === s ? ' selected' : '') + '>' + esc(s) + '</option>'; }).join('')}</select></div>
           </div>
+          ${state.session && !state.session.isAdmin && !state.session.isJefa ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">Pacientes a incluir</label><select onchange="actualizarFiltroMetodos('ambito', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-[10px] bg-white">
+            <option value="establecimiento" ${f.ambito !== 'mis_captaciones' ? 'selected' : ''}>Todo mi establecimiento</option>
+            <option value="mis_captaciones" ${f.ambito === 'mis_captaciones' ? 'selected' : ''}>Solo mis captaciones</option>
+          </select></div>` : ''}
           <button type="button" onclick="cargarReporteMetodos(true)" ${state.metodosLoading ? 'disabled' : ''} class="w-full min-h-[46px] rounded-xl bg-sky-700 hover:bg-sky-800 text-white text-xs font-bold disabled:opacity-60">${state.metodosLoading ? 'Consultando indicadores...' : 'Aplicar filtros y actualizar'}</button>
           ${state.metodosError ? '<div class="p-3 rounded-xl bg-red-50 border border-red-200 text-[11px] text-red-800">' + esc(state.metodosError) + '</div>' : ''}
         </div>
@@ -1879,9 +2016,343 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
 
     function renderBotonesOficiales(tipo) {
       return `<div class="grid grid-cols-1 gap-2">
-        <button type="button" onclick="descargarExcelOficialReporte('${tipo}')" class="min-h-[44px] rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-[11px] font-bold px-2">📊 Descargar Excel Oficial (.xls con membrete y bordes)</button>
+        <button type="button" onclick="descargarExcelOficialReporte('${tipo}')" class="min-h-[44px] rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-[11px] font-bold px-2">📊 Descargar Excel Oficial (.xlsx con logos y firma)</button>
         <button type="button" onclick="imprimirReporteOficial('${tipo}')" class="min-h-[44px] rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-[11px] font-bold px-2">🖨️ Imprimir / Guardar PDF Oficial</button>
       </div>`;
+    }
+
+    function firmaOficialExcelHtml(meta) {
+      const m = meta || metaOficial();
+      return '<table style="width:100%;margin-top:30px"><tr><td align="center">' +
+        '<table style="width:320px;border-collapse:collapse">' +
+        '<tr><td style="border-top:1.5px solid #0f172a;padding-top:6px;text-align:center;font-size:9.5pt;font-weight:bold;color:#0f172a">' + esc(m.emisorNombre || '—') + '</td></tr>' +
+        '<tr><td style="text-align:center;font-size:9.5pt;font-weight:bold;color:#075985">' + esc(m.emisorRol || '—') + ' · DNI ' + esc(m.emisorDni || '—') + '</td></tr>' +
+        '<tr><td style="text-align:center;font-size:8.5pt;color:#475569">' + esc(m.establecimiento || '') + '</td></tr>' +
+        '<tr><td style="text-align:center;font-size:8pt;color:#64748b">Firma y Sello del Responsable del Reporte</td></tr>' +
+        '</table></td></tr></table>';
+    }
+
+    function xlsxColLetter(numero) {
+      let n = Math.max(1, Number(numero) || 1);
+      let letras = '';
+      while (n > 0) {
+        const resto = (n - 1) % 26;
+        letras = String.fromCharCode(65 + resto) + letras;
+        n = Math.floor((n - 1) / 26);
+      }
+      return letras;
+    }
+
+    function xlsxBase64DeDataUri(dataUri) {
+      const texto = String(dataUri || '');
+      const marca = texto.indexOf('base64,');
+      return marca >= 0 ? texto.slice(marca + 7) : '';
+    }
+
+    function xlsxEnvolverBase64(base64) {
+      return String(base64 || '').replace(/(.{76})/g, '$1\r\n');
+    }
+
+    function xlsxDescargarBlob(blob, nombre) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = nombre;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+    }
+
+    function xlsxNormalizarNombre(nombre, extension) {
+      let base = String(nombre || 'reporte_oficial').trim();
+      base = base.replace(/\.(xls|xlsx|mht|mhtml)$/i, '');
+      return base + '.' + (extension === 'mhtml' ? 'xls' : extension);
+    }
+
+    function generarYDescargarMhtmlOficial(meta, columnas, filas, resumenLineas, nombreArchivo) {
+      const m = meta || metaOficial();
+      const nombre = xlsxNormalizarNombre(nombreArchivo, 'mhtml');
+      let html = construirExcelOficial(m, columnas, filas, resumenLineas);
+      html = html.replace(/^\uFEFF/, '');
+      // En MHTML las imágenes se referencian por Content-Location, no por data URI.
+      const escudoActual = logoReportesDataUri() || DIRESA_LOGO_DATA_URI;
+      if (escudoActual) html = html.split(escudoActual).join('diresa_logo.jpg');
+      if (HOSPITAL_LOGO_DATA_URI) html = html.split(HOSPITAL_LOGO_DATA_URI).join('hospital_logo.png');
+      const boundary = '----=_NextPart_PlanificaHIS_' + Date.now();
+      const diresaB64 = xlsxEnvolverBase64(xlsxBase64DeDataUri(DIRESA_LOGO_DATA_URI));
+      const hospitalB64 = xlsxEnvolverBase64(xlsxBase64DeDataUri(HOSPITAL_LOGO_DATA_URI));
+      const partes = [
+        'MIME-Version: 1.0',
+        'Content-Type: multipart/related; boundary="' + boundary + '"; type="text/html"',
+        '',
+        '--' + boundary,
+        'Content-Type: text/html; charset="utf-8"',
+        'Content-Transfer-Encoding: 8bit',
+        'Content-Location: file:///C:/planificahis/reporte.htm',
+        '',
+        html,
+        '',
+        '--' + boundary,
+        'Content-Type: image/jpeg',
+        'Content-Transfer-Encoding: base64',
+        'Content-Location: file:///C:/planificahis/diresa_logo.jpg',
+        '',
+        diresaB64,
+        '',
+        '--' + boundary,
+        'Content-Type: image/png',
+        'Content-Transfer-Encoding: base64',
+        'Content-Location: file:///C:/planificahis/hospital_logo.png',
+        '',
+        hospitalB64,
+        '',
+        '--' + boundary + '--',
+        ''
+      ];
+      descargarArchivo(nombre, partes.join('\r\n'), 'application/vnd.ms-excel');
+      return { formato: 'mhtml', nombre: nombre, filas: (filas || []).length };
+    }
+
+    async function generarYDescargarXlsxOficial(meta, columnas, filas, resumenLineas, nombreArchivo) {
+      const m = meta || metaOficial();
+      const cols = Array.isArray(columnas) ? columnas : [];
+      const rows = Array.isArray(filas) ? filas : [];
+      const resumen = Array.isArray(resumenLineas) ? resumenLineas : [];
+      const nombreXlsx = xlsxNormalizarNombre(nombreArchivo, 'xlsx');
+      const ExcelJSRef = window.ExcelJS || (typeof ExcelJS !== 'undefined' ? ExcelJS : null);
+      if (!ExcelJSRef) {
+        return generarYDescargarMhtmlOficial(m, cols, rows, resumen, nombreXlsx);
+      }
+
+      const workbook = new ExcelJSRef.Workbook();
+      workbook.creator = m.emisorNombre || 'PlanificaHIS';
+      workbook.lastModifiedBy = m.emisorNombre || 'PlanificaHIS';
+      workbook.created = new Date();
+      workbook.modified = new Date();
+      const ws = workbook.addWorksheet('Reporte Oficial', {
+        views: [{ showGridLines: true }],
+        pageSetup: {
+          paperSize: 9, // A4
+          orientation: 'landscape',
+          fitToPage: true,
+          fitToWidth: 1,
+          fitToHeight: 0,
+          horizontalCentered: true,
+          margins: { left: 0.3, right: 0.3, top: 0.4, bottom: 0.4, header: 0.2, footer: 0.2 }
+        }
+      });
+
+      const totalCols = Math.max(5, cols.length);
+      const borde = {
+        top: { style: 'thin', color: { argb: 'FF94A3B8' } },
+        left: { style: 'thin', color: { argb: 'FF94A3B8' } },
+        bottom: { style: 'thin', color: { argb: 'FF94A3B8' } },
+        right: { style: 'thin', color: { argb: 'FF94A3B8' } }
+      };
+      const bordeOscuro = {
+        top: { style: 'medium', color: { argb: 'FF0F172A' } },
+        left: { style: 'medium', color: { argb: 'FF0F172A' } },
+        bottom: { style: 'medium', color: { argb: 'FF0F172A' } },
+        right: { style: 'medium', color: { argb: 'FF0F172A' } }
+      };
+      const rellenoBlanco = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } };
+      const rellenoGris = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF8FAFC' } };
+      const rellenoAzul = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0082C8' } };
+      const rellenoCrema = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEF3C7' } };
+
+      // Anchos de columna calculados con el contenido real.
+      const anchos = [];
+      for (let c = 0; c < totalCols; c++) {
+        const col = cols[c] || {};
+        let maxLen = String(col.label || '').length;
+        for (let r = 0; r < rows.length; r++) {
+          const valor = rows[r] && rows[r][c] !== null && rows[r][c] !== undefined ? String(rows[r][c]) : '';
+          if (valor.length > maxLen) maxLen = valor.length;
+        }
+        const base = Number(col.width || 0) > 0 ? Number(col.width) / 7 : 12;
+        anchos.push(Math.max(9, Math.min(48, Math.max(base, maxLen + 2))));
+        ws.getColumn(c + 1).width = anchos[c];
+      }
+
+      // Membrete institucional. Las imágenes flotan sobre A1:B5 y el extremo derecho.
+      const centroInicio = 3;
+      const derechaInicio = Math.max(centroInicio, totalCols - 1);
+      const centroFin = Math.max(centroInicio, derechaInicio - 1);
+      for (let r = 1; r <= 8; r++) {
+        ws.getRow(r).height = r <= 2 ? 18 : (r === 3 ? 24 : 16);
+        for (let c = 1; c <= totalCols; c++) {
+          const celda = ws.getCell(r, c);
+          celda.fill = rellenoBlanco;
+          celda.border = borde;
+        }
+      }
+      ws.mergeCells(1, 1, 5, 2);
+      ws.mergeCells(1, centroInicio, 2, centroFin);
+      ws.mergeCells(3, centroInicio, 5, centroFin);
+      ws.mergeCells(1, derechaInicio, 5, totalCols);
+
+      const celdaInstitucion = ws.getCell(1, centroInicio);
+      celdaInstitucion.value = 'GOBIERNO REGIONAL DE LIMA\nDIRECCIÓN REGIONAL DE SALUD LIMA';
+      celdaInstitucion.font = { name: 'Arial', size: 9, bold: true, color: { argb: 'FF7F1D1D' } };
+      celdaInstitucion.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+      celdaInstitucion.border = bordeOscuro;
+
+      const celdaTitulo = ws.getCell(3, centroInicio);
+      celdaTitulo.value = {
+        richText: [
+          { font: { name: 'Arial', size: 13, bold: true, color: { argb: 'FF0F172A' } }, text: String(m.titulo || 'REPORTE OFICIAL') + '\n' },
+          { font: { name: 'Arial', size: 9, bold: true, color: { argb: 'FF075985' } }, text: String(m.subtitulo || 'Planificación Familiar') }
+        ]
+      };
+      celdaTitulo.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+      celdaTitulo.border = bordeOscuro;
+
+      const celdaDerecha = ws.getCell(1, derechaInicio);
+      celdaDerecha.value = 'RED DE SALUD HUARAL CHANCAY\nHOSPITAL SAN JUAN BAUTISTA DE HUARAL';
+      celdaDerecha.font = { name: 'Arial', size: 8.5, bold: true, color: { argb: 'FF075985' } };
+      celdaDerecha.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+      celdaDerecha.border = bordeOscuro;
+
+      const filasMeta = [
+        'Establecimiento: ' + String(m.establecimiento || '—'),
+        'Periodo: ' + String(m.periodo || '—') + '   ·   Obstetra: ' + String(m.obstetra || '—'),
+        'Emisor: ' + String(m.emisorNombre || '—') + '   ·   ' + String(m.emisorRol || '—') + '   ·   DNI ' + String(m.emisorDni || '—') + '   ·   Emisión: ' + String(m.generadoEn || '—')
+      ];
+      filasMeta.forEach(function (texto, i) {
+        const fila = 6 + i;
+        ws.mergeCells(fila, 1, fila, totalCols);
+        const celda = ws.getCell(fila, 1);
+        celda.value = texto;
+        celda.font = { name: 'Arial', size: 8.5, color: { argb: 'FF334155' } };
+        celda.fill = rellenoGris;
+        celda.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true };
+        celda.border = borde;
+      });
+
+      try {
+        const diresaBase64 = xlsxBase64DeDataUri(DIRESA_LOGO_DATA_URI);
+        const hospitalBase64 = xlsxBase64DeDataUri(HOSPITAL_LOGO_DATA_URI);
+        if (diresaBase64) {
+          const idDiresa = workbook.addImage({ base64: diresaBase64, extension: 'jpeg' });
+          ws.addImage(idDiresa, { tl: { col: 0, row: 0 }, ext: { width: 170, height: 58 } });
+        }
+        if (hospitalBase64) {
+          const idHospital = workbook.addImage({ base64: hospitalBase64, extension: 'png' });
+          ws.addImage(idHospital, { tl: { col: derechaInicio - 1, row: 0 }, ext: { width: 68, height: 68 } });
+        }
+      } catch (errorImagen) {
+        console.warn('No se pudieron incrustar los logos en ExcelJS:', errorImagen);
+      }
+
+      // Cabecera de la tabla.
+      let cursor = 10;
+      ws.getRow(cursor).height = 30;
+      for (let c = 0; c < cols.length; c++) {
+        const col = cols[c] || {};
+        const celda = ws.getCell(cursor, c + 1);
+        celda.value = String(col.label || '');
+        celda.fill = rellenoAzul;
+        celda.font = { name: 'Arial', size: 9, bold: true, color: { argb: 'FFFFFFFF' } };
+        celda.alignment = { horizontal: col.align || 'center', vertical: 'middle', wrapText: true };
+        celda.border = borde;
+      }
+      cursor++;
+
+      // Filas de datos.
+      const columnasTexto = [];
+      for (let c = 0; c < cols.length; c++) {
+        const col = cols[c] || {};
+        const etiqueta = String(col.label || '');
+        const esTexto = col.text === true || /(^|\s)(DNI|HCL|Celular|C[oó]digo HIS)(\s|$)/i.test(etiqueta);
+        columnasTexto.push(esTexto);
+        if (esTexto) ws.getColumn(c + 1).numFmt = '@';
+      }
+      rows.forEach(function (fila, indice) {
+        for (let c = 0; c < cols.length; c++) {
+          const col = cols[c] || {};
+          const celda = ws.getCell(cursor, c + 1);
+          let valor = fila && fila[c] !== null && fila[c] !== undefined ? fila[c] : '';
+          if (columnasTexto[c]) valor = String(valor);
+          celda.value = valor;
+          celda.font = { name: 'Arial', size: 8.5, color: { argb: 'FF0F172A' } };
+          celda.alignment = { horizontal: col.align || 'left', vertical: 'top', wrapText: true };
+          celda.border = borde;
+          celda.fill = indice % 2 === 1 ? rellenoGris : rellenoBlanco;
+          if (columnasTexto[c]) celda.numFmt = '@';
+        }
+        cursor++;
+      });
+
+      // Total de registros.
+      ws.mergeCells(cursor, 1, cursor, Math.max(1, cols.length));
+      const celdaTotal = ws.getCell(cursor, 1);
+      celdaTotal.value = 'Total de registros: ' + rows.length;
+      celdaTotal.font = { name: 'Arial', size: 9, bold: true, color: { argb: 'FF78350F' } };
+      celdaTotal.fill = rellenoCrema;
+      celdaTotal.alignment = { horizontal: 'center', vertical: 'middle' };
+      celdaTotal.border = borde;
+      cursor++;
+
+      // Resumen estadístico.
+      if (resumen.length) {
+        cursor++;
+        resumen.forEach(function (linea) {
+          ws.mergeCells(cursor, 1, cursor, totalCols);
+          const celda = ws.getCell(cursor, 1);
+          celda.value = String(linea);
+          celda.font = { name: 'Arial', size: 9, bold: true, color: { argb: 'FF334155' } };
+          celda.fill = rellenoGris;
+          celda.alignment = { horizontal: 'left', vertical: 'middle' };
+          celda.border = borde;
+          cursor++;
+        });
+      }
+
+      // Cuatro filas en blanco para firmar.
+      for (let i = 0; i < 4; i++) {
+        ws.getRow(cursor).height = 16;
+        cursor++;
+      }
+
+      // Firma única del emisor, centrada.
+      const firma = [
+        { texto: '____________________________________', font: { size: 10, color: { argb: 'FF0F172A' }, bold: false } },
+        { texto: String(m.emisorNombre || '—'), font: { size: 10, color: { argb: 'FF0F172A' }, bold: true } },
+        { texto: String(m.emisorRol || '—'), font: { size: 9.5, color: { argb: 'FF075985' }, bold: true } },
+        { texto: 'DNI ' + String(m.emisorDni || '—'), font: { size: 9, color: { argb: 'FF334155' }, bold: false } },
+        { texto: String(m.establecimiento || ''), font: { size: 8.5, color: { argb: 'FF475569' }, bold: false } },
+        { texto: 'Firma y Sello del Responsable del Reporte', font: { size: 8, color: { argb: 'FF64748B' }, bold: false } }
+      ];
+      firma.forEach(function (linea) {
+        ws.mergeCells(cursor, 1, cursor, totalCols);
+        const celda = ws.getCell(cursor, 1);
+        celda.value = linea.texto;
+        celda.font = Object.assign({ name: 'Arial' }, linea.font);
+        celda.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+        cursor++;
+      });
+
+      const ultimaFila = Math.max(1, cursor - 1);
+      ws.pageSetup.printArea = 'A1:' + xlsxColLetter(totalCols) + ultimaFila;
+      ws.pageSetup.paperSize = 9;
+      ws.pageSetup.orientation = 'landscape';
+      ws.pageSetup.fitToPage = true;
+      ws.pageSetup.fitToWidth = 1;
+      ws.pageSetup.fitToHeight = 0;
+      ws.pageSetup.horizontalCentered = true;
+      ws.pageSetup.margins = { left: 0.3, right: 0.3, top: 0.4, bottom: 0.4, header: 0.2, footer: 0.2 };
+      ws.views = [{ showGridLines: true }];
+
+      try {
+        const buffer = await workbook.xlsx.writeBuffer();
+        const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+        xlsxDescargarBlob(blob, nombreXlsx);
+        return { formato: 'xlsx', nombre: nombreXlsx, filas: rows.length };
+      } catch (error) {
+        // Si ExcelJS falla en este navegador, el MHTML conserva logos y tabla.
+        return generarYDescargarMhtmlOficial(m, cols, rows, resumen, nombreXlsx);
+      }
     }
 
     function construirExcelOficial(meta, columnas, filas, resumenLineas) {
@@ -1931,7 +2402,8 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         '<tr><td colspan="' + totalCols + '" style="background:#fef3c7;color:#78350f;font-weight:bold;text-align:center">Total de registros: ' + (filas || []).length + '</td></tr>' +
         '</tbody></table><br/>' +
         (resumenLineas && resumenLineas.length ? '<table class="resumen" style="width:100%">' + resumenLineas.map(function (linea) { return '<tr><td>' + esc(linea) + '</td></tr>'; }).join('') + '</table>' : '') +
-        '<p class="pie">Generado por PlanificaHIS el ' + esc(m.generadoEn) + ' · Emisor: ' + esc(m.emisorNombre || '') + ' (' + esc(m.emisorRol || '') + ')</p>' +
+        firmaOficialExcelHtml(m) +
+        '<p class="pie">Generado por PlanificaHIS el ' + esc(m.generadoEn) + '</p>' +
         '</body></html>';
     }
 
@@ -1982,11 +2454,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         '<table class="data"><thead><tr>' + columnas.map(function (col) { return '<th>' + esc(col.label) + '</th>'; }).join('') + '</tr></thead><tbody>' + filasHtml + '</tbody></table>' +
         '<div style="margin-top:5px;font-size:8px;color:#475569">Total de registros: <b>' + (filas || []).length + '</b></div>' +
         (resumenLineas && resumenLineas.length ? '<table class="resumen">' + resumenLineas.map(function (linea) { return '<tr><td>' + esc(linea) + '</td></tr>'; }).join('') + '</table>' : '') +
-        '<div class="firmas">' +
-        '<div class="firma"><div class="linea">' + esc(m.emisorNombre || '') + '</div>' + esc(m.emisorRol || '') + '<br/>DNI ' + esc(m.emisorDni || '') + '</div>' +
-        '<div class="firma"><div class="linea">Jefatura de Obstetras</div>Vo.Bo. / Supervisión</div>' +
-        '<div class="firma"><div class="linea">Estadística e Informática</div>Revisado y conforme</div>' +
-        '</div>' +
+        '<div class="firmas" style="width:100%;margin-top:38px;display:flex;justify-content:center;"><div class="firma" style="width:320px;text-align:center;font-size:9.5px;color:#0f172a;"><div class="linea" style="border-top:1.5px solid #0f172a;margin-bottom:4px;padding-top:6px;font-weight:bold;">' + esc(m.emisorNombre) + '</div><div style="font-weight:bold;color:#075985;">' + esc(m.emisorRol) + ' · DNI ' + esc(m.emisorDni) + '</div><div style="font-size:8.5px;color:#475569;">' + esc(m.establecimiento) + '</div><div style="font-size:8px;color:#64748b;margin-top:2px;">Firma y Sello del Responsable del Reporte</div></div></div>' +
         '<div class="pie">Generado por PlanificaHIS el ' + esc(m.generadoEn) + ' · Impresión oficial con membrete institucional</div>' +
         '<script>window.addEventListener("load",function(){setTimeout(function(){window.focus();window.print();},450);});<\/script>' +
         '</body></html>';
@@ -2006,9 +2474,8 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
     async function descargarExcelOficialReporte(tipo) {
       try {
         const datos = await datosOficialesReporte(tipo);
-        const html = construirExcelOficial(datos.meta, datos.columnas, datos.filas, datos.resumen);
-        descargarArchivo(datos.archivo, html, 'application/vnd.ms-excel;charset=utf-8');
-        showFeedback('success', 'Excel oficial generado: ' + datos.archivo + ' (' + datos.filas.length + ' registros).');
+        const resultado = await generarYDescargarXlsxOficial(datos.meta, datos.columnas, datos.filas, datos.resumen, datos.archivo);
+        showFeedback('success', 'Excel oficial generado: ' + resultado.nombre + ' (' + datos.filas.length + ' registros, formato ' + resultado.formato + ').');
       } catch (error) {
         showFeedback('error', error.message);
       }
@@ -2033,6 +2500,39 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         Array.prototype.push.apply(filas, data.filas || []);
       }
       return Object.assign({}, primera, { filas: filas });
+    }
+
+    async function cargarTodasFilasMetodos() {
+      const filtros = Object.assign({}, state.metodosFiltros, { page: 1, per_page: 100 });
+      const primera = await apiGet('reporte_metodos', filtros);
+      const filas = (primera.filas || []).slice();
+      const pages = Math.min(50, Number((primera.paginacion && primera.paginacion.pages) || 1));
+      for (let p = 2; p <= pages; p++) {
+        const data = await apiGet('reporte_metodos', Object.assign({}, filtros, { page: p }));
+        Array.prototype.push.apply(filas, data.filas || []);
+      }
+      return Object.assign({}, primera, { filas: filas });
+    }
+
+    function columnasReporteMetodos() {
+      return [
+        { label: 'N°', align: 'center', width: 28 },
+        { label: 'DNI', align: 'center', text: true, width: 60 },
+        { label: 'Paciente', width: 150 },
+        { label: 'Edad', align: 'center', width: 32 },
+        { label: 'Celular', align: 'center', text: true, width: 68 },
+        { label: 'Sector', width: 70 },
+        { label: 'Código Método', align: 'center', text: true, width: 55 },
+        { label: 'Método', width: 120 },
+        { label: 'Días de ciclo', align: 'center', width: 40 },
+        { label: 'Fecha última atención', align: 'center', width: 70 },
+        { label: 'Fecha programada siguiente atención', align: 'center', width: 82 },
+        { label: 'Estado del indicador', width: 80 },
+        { label: 'DNI Obstetra', align: 'center', text: true, width: 60 },
+        { label: 'Obstetra', width: 110 },
+        { label: 'Código Establecimiento', align: 'center', text: true, width: 60 },
+        { label: 'Establecimiento', width: 120 }
+      ];
     }
 
     function filaReporteCampo(p, i) {
@@ -2202,8 +2702,8 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
     async function descargarExcelAlerta() {
       try {
         const datos = datosOficialesAlerta();
-        descargarArchivo(datos.archivo, construirExcelOficial(datos.meta, datos.columnas, datos.filas, datos.resumen), 'application/vnd.ms-excel;charset=utf-8');
-        showFeedback('success', 'Excel oficial de alerta generado: ' + datos.archivo + ' (' + datos.filas.length + ' pacientes).');
+        const resultado = await generarYDescargarXlsxOficial(datos.meta, datos.columnas, datos.filas, datos.resumen, datos.archivo);
+        showFeedback('success', 'Excel oficial de alerta generado: ' + resultado.nombre + ' (' + datos.filas.length + ' pacientes, formato ' + resultado.formato + ').');
       } catch (error) {
         showFeedback('error', error.message);
       }
@@ -2335,6 +2835,50 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
           archivo: 'reporte_04_padron_llamadas_' + (d.fecha_corte || localIsoDate(0)) + '.xls'
         };
       }
+      if (tipo === 'METODOS') {
+        const base = await cargarTodasFilasMetodos();
+        const f = base.filtros || state.metodosFiltros;
+        const periodo = fechaDdMmYyyy(f.fecha_desde) + ' al ' + fechaDdMmYyyy(f.fecha_hasta);
+        const meta = metaOficial(
+          'REPORTE 05 · INDICADORES POR MÉTODO ANTICONCEPTIVO',
+          'Programación y estado de la última atención de Planificación Familiar',
+          periodo,
+          (base.establecimiento && base.establecimiento.nombre) || '',
+          ''
+        );
+        return {
+          meta: meta,
+          columnas: columnasReporteMetodos(),
+          filas: (base.filas || []).map(function (p, i) {
+            return [
+              i + 1,
+              p.dni || '',
+              p.paciente_nombre || '',
+              Number(p.edad || 0),
+              p.celular || '',
+              p.sector || '',
+              p.codigo_metodo || '',
+              p.nombre_metodo || '',
+              Number(p.dias_ciclo || 0),
+              fechaDdMmYyyy(p.fecha_ultima_atencion) || '',
+              fechaDdMmYyyy(p.fecha_proxima_cita) || '',
+              p.estado_indicador_etiqueta || '',
+              p.codpsal_obstetra || '',
+              p.nombre_obstetra || '',
+              p.cod_estab || '',
+              p.estab_nombre || ''
+            ];
+          }),
+          resumen: [
+            'Total de pacientes: ' + Number((base.resumen && base.resumen.total) || 0),
+            'Vigentes: ' + Number((base.resumen && base.resumen.vigente) || 0),
+            'Próximas: ' + Number((base.resumen && base.resumen.proxima) || 0),
+            'Vencidas: ' + Number((base.resumen && base.resumen.vencida) || 0),
+            'Sin método: ' + Number((base.resumen && base.resumen.sin_metodo) || 0)
+          ],
+          archivo: 'reporte_05_metodos_' + (f.fecha_desde || localIsoDate(0)) + '.xls'
+        };
+      }
       throw new Error('Tipo de reporte oficial no reconocido.');
     }
 
@@ -2437,15 +2981,18 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
 
     function setPadronGrupo(grupo) {
       state.padronGrupo = grupo || 'todas';
+      invalidarCacheAlertas();
       cargarReportePadron(true);
     }
 
     function setPadronAlcance(alcance) {
       state.padronAlcance = alcance === 'red' ? 'red' : 'establecimiento';
+      invalidarCacheAlertas();
       cargarReportePadron(true);
     }
 
     async function buscarProductividad() {
+      invalidarCacheAlertas();
       const desde = document.getElementById('prod-desde');
       const hasta = document.getElementById('prod-hasta');
       const obstetra = document.getElementById('prod-obstetra');
@@ -2464,20 +3011,24 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       const ultimo = new Date(Number(partes[0]), Number(partes[1]), 0).getDate();
       state.productividadFiltros.fecha_desde = valor + '-01';
       state.productividadFiltros.fecha_hasta = valor + '-' + String(ultimo).padStart(2, '0');
+      invalidarCacheAlertas();
       cargarReporteProductividad(true);
     }
 
     function setVistaReporte(vista) {
       state.reporteVista = vista;
       state.feedback = null;
+      invalidarCacheAlertas();
       render();
       if (vista === 'CAMPO' && !state.campoData) cargarReporteCampo(true);
       if (vista === 'PRODUCTIVIDAD' && !state.productividadData) cargarReporteProductividad(true);
       if (vista === 'PADRON' && !state.padronData) cargarReportePadron(true);
+      if (vista === 'METODOS' && !state.metodosData) cargarReporteMetodos(true);
     }
 
     function filtrarAgenda(grupo) {
       state.agendaGrupo = grupo || 'TODAS';
+      invalidarCacheAlertas();
       render();
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
@@ -2555,12 +3106,14 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
     function actualizarFiltroCampo(campo, valor) {
       state.campoFiltros[campo] = valor;
       state.campoFiltros.page = 1;
+      invalidarCacheAlertas();
       cargarReporteCampo(false);
     }
 
     function actualizarFiltroMetodos(campo, valor) {
       state.metodosFiltros[campo] = valor;
       state.metodosFiltros.page = 1;
+      invalidarCacheAlertas();
       cargarReporteMetodos(false);
     }
 
@@ -2571,6 +3124,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       state.campoFiltros.fecha_desde = valor + '-01';
       state.campoFiltros.fecha_hasta = valor + '-' + String(ultimo).padStart(2, '0');
       state.campoFiltros.page = 1;
+      invalidarCacheAlertas();
       cargarReporteCampo(false);
     }
 
@@ -2581,6 +3135,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       state.metodosFiltros.fecha_desde = valor + '-01';
       state.metodosFiltros.fecha_hasta = valor + '-' + String(ultimo).padStart(2, '0');
       state.metodosFiltros.page = 1;
+      invalidarCacheAlertas();
       cargarReporteMetodos(false);
     }
 
@@ -2588,6 +3143,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
     function buscarCampoDebounce(valor) {
       state.campoFiltros.q = valor;
       state.campoFiltros.page = 1;
+      invalidarCacheAlertas();
       if (campoBuscarTimer) clearTimeout(campoBuscarTimer);
       campoBuscarTimer = setTimeout(function () { cargarReporteCampo(false); }, 420);
     }
@@ -2726,12 +3282,24 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       }
     }
 
-    function exportarReporteCampo(tipo) {
-      descargarReporteExcel('export_reporte_campo', Object.assign({}, state.campoFiltros, { tipo: tipo }), 'reporte_campo_' + tipo + '_' + localIsoDate(0) + '.xls');
+    async function exportarReporteCampo(tipo) {
+      try {
+        const datos = await datosOficialesReporte(tipo === 'productividad' ? 'PRODUCTIVIDAD' : 'CAMPO');
+        const resultado = await generarYDescargarXlsxOficial(datos.meta, datos.columnas, datos.filas, datos.resumen, datos.archivo);
+        showFeedback('success', 'Excel de campo generado: ' + resultado.nombre + ' (' + datos.filas.length + ' registros, formato ' + resultado.formato + ').');
+      } catch (error) {
+        showFeedback('error', error.message);
+      }
     }
 
-    function exportarReporteMetodos() {
-      descargarReporteExcel('export_reporte_metodos', Object.assign({}, state.metodosFiltros), 'reporte_metodos_' + localIsoDate(0) + '.xls');
+    async function exportarReporteMetodos() {
+      try {
+        const datos = await datosOficialesReporte('METODOS');
+        const resultado = await generarYDescargarXlsxOficial(datos.meta, datos.columnas, datos.filas, datos.resumen, datos.archivo);
+        showFeedback('success', 'Excel de métodos generado: ' + resultado.nombre + ' (' + datos.filas.length + ' registros, formato ' + resultado.formato + ').');
+      } catch (error) {
+        showFeedback('error', error.message);
+      }
     }
 
     // ---------------------------------------------------------------------
@@ -2869,6 +3437,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
 
     async function cambiarEstablecimiento(codEstab) {
       if (!state.token || !codEstab || (state.session && codEstab === state.session.cod_estab)) return;
+      invalidarCacheAlertas();
       state.changingEstab = true;
       try {
         const data = await apiPost('change_establecimiento', { cod_estab: codEstab });
@@ -2878,6 +3447,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         state.formDraft = null;
         state.formVisible = false;
         state.nombresDesbloqueados = false;
+      state.estadoExplicito = null;
         state.reporteProgramacion = null;
         state.campoData = null;
         state.metodosData = null;
@@ -2929,8 +3499,14 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         distritoOtros: isOtros ? String(distrito).replace('OTROS:', '').trim() : '',
         direccion: cap.direccion || '',
         sector: cap.sector || '',
-        estado_paciente: cap.estado_paciente || 'INSATISFECHA_SIN_METODO'
+        // Solo se usa para PRESELECCIONAR el selector. El estado clínico no se
+        // modifica salvo que la obstetra elija otro valor de forma explícita.
+        estado_paciente: cap.estado_paciente || ''
       };
+    }
+
+    function marcarEstadoExplicito(select) {
+      state.estadoExplicito = select && select.value ? select.value : null;
     }
 
     function currentDni() {
@@ -2946,11 +3522,13 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         const data = await apiGet('lookup_dni', { dni: dni, cod_estab: state.session.cod_estab });
         data.dni = dni;
         state.hisLookup = data;
+        state.estadoExplicito = null;
         state.formDraft = fillDraftFromLookup(data);
         // Caso 1: pase directo con formulario opcional. Casos 2 y 3: el
         // formulario se abre automáticamente para verificar/actualizar datos.
         state.formVisible = data.casoFlujo !== 'MISMO_ESTABLECIMIENTO';
         state.nombresDesbloqueados = false;
+      state.estadoExplicito = null;
         render();
       } catch (error) {
         state.feedback = { type: 'error', text: error.message };
@@ -2983,7 +3561,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         distritoOtros: otros ? otros.value.trim() : '',
         direccion: document.getElementById('f-dir').value.trim(),
         sector: document.getElementById('f-sec').value.trim(),
-        estado_paciente: document.getElementById('f-est').value
+        estado_paciente: document.getElementById('f-est') ? document.getElementById('f-est').value : ''
       };
       state.formDraft = draft;
       return draft;
@@ -2998,6 +3576,10 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         pase_ups: false
       });
       delete payload.distritoOtros;
+      // El estado SOLO se envía si hubo un cambio explícito del selector.
+      if (state.estadoExplicito === null || state.estadoExplicito === '') {
+        delete payload.estado_paciente;
+      }
       await savePayload(payload, false);
     }
 
@@ -3010,9 +3592,13 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         dni: draft.dni || pre.dni || currentDni(),
         codpsal_obstetra: state.session.dni,
         atencion_99208: Boolean(state.hisLookup.atencion99208 && state.hisLookup.atencion99208.tieneCodigo99208),
-        pase_ups: true,
-        estado_paciente: 'CAPTADA_CON_METODO'
+        pase_ups: true
       };
+      // El pase UPS no debe sobrescribir el estado clínico existente. Solo se
+      // envía si la obstetra cambió el selector de estado de forma explícita.
+      if (state.estadoExplicito !== null && state.estadoExplicito !== '') {
+        payload.estado_paciente = state.estadoExplicito;
+      }
       await savePayload(payload, true);
     }
 
@@ -3025,6 +3611,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
           state.hisLookup = null;
           state.formVisible = false;
           state.nombresDesbloqueados = false;
+          state.estadoExplicito = null;
           render();
         } catch (error) {
           state.feedback = { type: 'error', text: 'No hay conexión y no se pudo guardar la cola cifrada: ' + error.message };
@@ -3039,6 +3626,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         state.hisLookup = null;
         state.formVisible = false;
         state.nombresDesbloqueados = false;
+        state.estadoExplicito = null;
         await loadOverview();
         render();
       } catch (error) {
@@ -3050,6 +3638,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
             state.hisLookup = null;
             state.formVisible = false;
             state.nombresDesbloqueados = false;
+            state.estadoExplicito = null;
             render();
             return;
           } catch (queueError) {

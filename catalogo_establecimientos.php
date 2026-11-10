@@ -191,6 +191,129 @@ if (!function_exists('hospital_establecimientos')) {
     }
 
     /**
+     * Busca variantes históricas reales del establecimiento en las tablas del
+     * hospital. Solo se ejecuta si hay PDO y siempre con consultas limitadas y
+     * almacenadas en caché por request.
+     *
+     * @param array<string, string>|null $est
+     * @param array<int, string> $base
+     * @return array<int, string>
+     */
+    function hospital_variantes_establecimiento_bd(?string $codigo, ?array $est, array $base, ?PDO $pdo = null): array
+    {
+        static $cache = [];
+        $codigo = trim((string)$codigo);
+        if ($codigo === '' || !$pdo instanceof PDO) {
+            return [];
+        }
+        $cacheKey = $codigo . '|' . (string)($est['COD_ESTAB'] ?? '');
+        if (array_key_exists($cacheKey, $cache)) {
+            return $cache[$cacheKey];
+        }
+
+        $resultado = [];
+        $agregar = static function ($valor) use (&$resultado): void {
+            $valor = trim((string)$valor);
+            if ($valor !== '') {
+                $resultado[] = $valor;
+                $sinCeros = ltrim($valor, '0');
+                if ($sinCeros !== '' && $sinCeros !== $valor) {
+                    $resultado[] = $sinCeros;
+                }
+            }
+        };
+
+        $codEstab = trim((string)($est['COD_ESTAB'] ?? $codigo));
+        $corto = ltrim($codEstab, '0');
+        $ubigeo = trim((string)($est['UBIGEO'] ?? ''));
+        $candidatos = array_values(array_unique(array_filter(array_map('strval', array_merge(
+            $base,
+            [$codigo, ltrim($codigo, '0'), $codEstab, $corto]
+        )), static fn (string $v): bool => trim($v) !== '')));
+
+        foreach (['establec', 'maestro_sys_establecimiento'] as $tabla) {
+            try {
+                $columnas = $pdo->query("SHOW COLUMNS FROM `{$tabla}`")->fetchAll(PDO::FETCH_COLUMN, 0);
+            } catch (Throwable $e) {
+                continue;
+            }
+            if (!$columnas) {
+                continue;
+            }
+            $columnas = array_map('strtoupper', array_map('strval', $columnas));
+            $condiciones = [];
+            $params = [];
+            $columnasCodigo = array_values(array_intersect(
+                ['COD_ESTAB', 'COD_2000', 'CODIGO', 'COD_IPRESS', 'CODIGO_ESTAB', 'COD_ESTAB_ANT', 'COD_ESTAB_ANTIGUO'],
+                $columnas
+            ));
+            foreach ($columnasCodigo as $columna) {
+                $marcas = implode(',', array_fill(0, count($candidatos), '?'));
+                $condiciones[] = "`{$columna}` IN ({$marcas})";
+                $params = array_merge($params, $candidatos);
+            }
+            if ($ubigeo !== '' && in_array('UBIGEO', $columnas, true)) {
+                $condiciones[] = '`UBIGEO` = ?';
+                $params[] = $ubigeo;
+            }
+            if (!$condiciones) {
+                continue;
+            }
+            try {
+                $sql = "SELECT * FROM `{$tabla}` WHERE (" . implode(' OR ', $condiciones) . ') LIMIT 80';
+                $stmt = $pdo->prepare($sql);
+                $stmt->execute($params);
+                foreach ($stmt->fetchAll() as $fila) {
+                    foreach (['COD_ESTAB', 'COD_2000', 'CODIGO', 'COD_IPRESS', 'CODIGO_ESTAB', 'COD_ESTAB_ANT', 'COD_ESTAB_ANTIGUO'] as $columna) {
+                        if (array_key_exists($columna, $fila)) {
+                            $agregar($fila[$columna]);
+                        }
+                    }
+                }
+            } catch (Throwable $e) {
+                // Tabla/columna no disponible: se conservan las variantes base.
+            }
+        }
+
+        // Variantes realmente usadas por el HIS. La consulta es index-only sobre
+        // idx_his_dl_estab_fecha y está acotada con LIMIT.
+        try {
+            $marcas = implode(',', array_fill(0, count($candidatos), '?'));
+            $stmt = $pdo->prepare("SELECT DISTINCT COD_ESTAB FROM his_dl WHERE COD_ESTAB IN ({$marcas}) LIMIT 120");
+            $stmt->execute($candidatos);
+            foreach ($stmt->fetchAll(PDO::FETCH_COLUMN, 0) as $variante) {
+                $agregar($variante);
+            }
+        } catch (Throwable $e) {
+            // Sin acceso al HIS: no se bloquea la operación.
+        }
+
+        // Captaciones propias de la app (tabla pequeña). Aquí sí conviene buscar
+        // también por dígitos finales porque almacena códigos digitados a mano.
+        try {
+            $condiciones = [];
+            $params = [];
+            $marcas = implode(',', array_fill(0, count($candidatos), '?'));
+            $condiciones[] = "cod_estab IN ({$marcas})";
+            $params = array_merge($params, $candidatos);
+            if ($corto !== '') {
+                $condiciones[] = 'cod_estab LIKE ?';
+                $params[] = '%' . $corto;
+            }
+            $stmt = $pdo->prepare('SELECT DISTINCT cod_estab FROM pacientes_sin_metodo WHERE (' . implode(' OR ', $condiciones) . ') LIMIT 120');
+            $stmt->execute($params);
+            foreach ($stmt->fetchAll(PDO::FETCH_COLUMN, 0) as $variante) {
+                $agregar($variante);
+            }
+        } catch (Throwable $e) {
+            // La tabla de captación puede no existir en una instalación nueva.
+        }
+
+        $cache[$cacheKey] = array_values(array_unique(array_filter($resultado, static fn ($v): bool => trim((string)$v) !== '')));
+        return $cache[$cacheKey];
+    }
+
+    /**
      * Variantes indexables de un establecimiento para his_dl.COD_ESTAB.
      *
      * El HIS histórico guarda el mismo establecimiento con código IPRESS de 9
@@ -200,11 +323,16 @@ if (!function_exists('hospital_establecimientos')) {
      *
      * @return array<int, string>
      */
-    function hospital_codigos_busqueda_establecimiento(?string $codigo): array
+    function hospital_codigos_busqueda_establecimiento(?string $codigo, ?PDO $pdo = null): array
     {
+        static $cache = [];
         $codigo = trim((string)$codigo);
         if ($codigo === '') {
             return [];
+        }
+        $cacheKey = $codigo . '|' . ($pdo instanceof PDO ? spl_object_id($pdo) : '0');
+        if (array_key_exists($cacheKey, $cache)) {
+            return $cache[$cacheKey];
         }
 
         $est = hospital_establecimiento($codigo);
@@ -248,7 +376,22 @@ if (!function_exists('hospital_establecimientos')) {
 
         // Primero los códigos completos (los que usa el índice) y después las
         // variantes sin ceros a la izquierda. array_unique conserva el orden.
-        return array_values(array_unique(array_merge($completos, $cortos)));
+        $variantes = array_values(array_unique(array_merge($completos, $cortos)));
+
+        if (!$pdo instanceof PDO && class_exists('HospitalHuaralDB')) {
+            try {
+                $pdo = HospitalHuaralDB::getConnection();
+            } catch (Throwable $e) {
+                $pdo = null;
+            }
+        }
+        $historicas = hospital_variantes_establecimiento_bd($codigo, $est, $variantes, $pdo);
+        if ($historicas) {
+            $variantes = array_values(array_unique(array_merge($variantes, $historicas)));
+        }
+
+        $cache[$cacheKey] = $variantes;
+        return $variantes;
     }
 
     function hospital_nombre_establecimiento(?string $codigo): string

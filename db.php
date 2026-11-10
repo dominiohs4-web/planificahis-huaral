@@ -30,74 +30,74 @@ function hospital_catalogo_metodos_oficial(): array
 {
     return [
         '99208.02' => [
-            'codigo_dx' => '99208.02', 'nombre_metodo' => 'Preservativo masculino',
+            'codigo_dx' => '99208.02', 'nombre_metodo' => 'Preservativo o condón masculino',
             'dias_ciclo' => 90, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 1,
-            'alias' => ['9920802'],
+            'alias' => ['9920802', '99208.2'],
         ],
         '99208.06' => [
-            'codigo_dx' => '99208.06', 'nombre_metodo' => 'Preservativo femenino',
+            'codigo_dx' => '99208.06', 'nombre_metodo' => 'Preservativo o condón femenino',
             'dias_ciclo' => 90, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 2,
-            'alias' => ['9920806'],
+            'alias' => ['9920806', '99208.6'],
         ],
         '99208.13' => [
             'codigo_dx' => '99208.13', 'nombre_metodo' => 'Hormonal combinado oral (Píldora)',
             'dias_ciclo' => 120, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 3,
-            'alias' => ['9920813'],
+            'alias' => ['9920813', '99208.03', '9920803'],
         ],
         '99208.04' => [
             'codigo_dx' => '99208.04', 'nombre_metodo' => 'Hormonal combinado inyectable mensual',
             'dias_ciclo' => 30, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 4,
-            'alias' => ['9920804', '90782', '9920801', '99208'],
+            'alias' => ['9920804', '99208.4'],
         ],
         '99208.05' => [
-            'codigo_dx' => '99208.05', 'nombre_metodo' => 'Solo progestágenos inyectable trimestral',
+            'codigo_dx' => '99208.05', 'nombre_metodo' => 'Hormonal de solo progestágenos inyectable trimestral',
             'dias_ciclo' => 90, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 5,
-            'alias' => ['9920805', 'Z304'],
+            'alias' => ['9920805', '99208.5'],
         ],
-        '11975' => [
-            'codigo_dx' => '11975', 'nombre_metodo' => 'Implante subdérmico',
+        '11975.00' => [
+            'codigo_dx' => '11975.00', 'nombre_metodo' => 'Implante subdérmico',
             'dias_ciclo' => 90, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 6,
-            'alias' => ['11975.00', '11981'],
+            'alias' => ['11975', '1197500', '11981', '11981.00', '11982', '11983'],
         ],
-        '58300' => [
-            'codigo_dx' => '58300', 'nombre_metodo' => 'DIU T de cobre',
+        '58300.00' => [
+            'codigo_dx' => '58300.00', 'nombre_metodo' => 'DIU (T de cobre)',
             'dias_ciclo' => 30, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 7,
-            'alias' => ['58300.00'],
+            'alias' => ['58300', '5830000'],
         ],
         '58300.01' => [
-            'codigo_dx' => '58300.01', 'nombre_metodo' => 'DIU LNG',
+            'codigo_dx' => '58300.01', 'nombre_metodo' => 'DIU LNG (Liberador de Levonorgestrel)',
             'dias_ciclo' => 30, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 8,
-            'alias' => ['5830001'],
+            'alias' => ['5830001', '58300.1'],
         ],
-        '58600' => [
-            'codigo_dx' => '58600', 'nombre_metodo' => 'BTB (ligadura de trompas bilateral)',
+        '58600.00' => [
+            'codigo_dx' => '58600.00', 'nombre_metodo' => 'Bloqueo Tubárico Bilateral (BTB)',
             'dias_ciclo' => 365, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 9,
-            'alias' => ['58600.00'],
+            'alias' => ['58600', '5860000', '58605', '58611', '58615'],
         ],
-        '55250' => [
-            'codigo_dx' => '55250', 'nombre_metodo' => 'Vasectomía',
+        '55250.00' => [
+            'codigo_dx' => '55250.00', 'nombre_metodo' => 'Vasectomía',
             'dias_ciclo' => 365, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 10,
-            'alias' => ['55250.00'],
+            'alias' => ['55250', '5525000'],
         ],
         '99208.07' => [
-            'codigo_dx' => '99208.07', 'nombre_metodo' => 'MELA (lactancia materna y amenorrea)',
+            'codigo_dx' => '99208.07', 'nombre_metodo' => 'Método de lactancia materna exclusiva y amenorrea (MELA)',
             'dias_ciclo' => 180, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 11,
-            'alias' => ['9920807'],
+            'alias' => ['9920807', '99208.7'],
         ],
         '99208.09' => [
-            'codigo_dx' => '99208.09', 'nombre_metodo' => 'Billings (método de ovulación)',
+            'codigo_dx' => '99208.09', 'nombre_metodo' => 'Billings o del moco cervical',
             'dias_ciclo' => 60, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 12,
-            'alias' => ['9920809'],
+            'alias' => ['9920809', '99208.9'],
         ],
         '99208.08' => [
-            'codigo_dx' => '99208.08', 'nombre_metodo' => 'Ritmo (calendario)',
+            'codigo_dx' => '99208.08', 'nombre_metodo' => 'Ritmo o de la Regla',
             'dias_ciclo' => 60, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 13,
-            'alias' => ['9920808'],
+            'alias' => ['9920808', '99208.8'],
         ],
         '99208.10' => [
-            'codigo_dx' => '99208.10', 'nombre_metodo' => 'Días fijos / collar',
+            'codigo_dx' => '99208.10', 'nombre_metodo' => 'Método de los días fijos o método del collar',
             'dias_ciclo' => 60, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 14,
-            'alias' => ['9920810', '99208.1'],
+            'alias' => ['9920810'],
         ],
     ];
 }
@@ -299,7 +299,7 @@ final class HospitalHuaralDB
         // (semáforo en /tmp) salvo que DB_AUTO_MIGRATE=1.
         $autoMigrate = getenv('DB_AUTO_MIGRATE') === '1';
         $schemaLock = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR)
-            . DIRECTORY_SEPARATOR . 'planificahis_schema_v6_'
+            . DIRECTORY_SEPARATOR . 'planificahis_schema_v7_'
             . substr(hash('sha256', $host . '|' . $dbname), 0, 12) . '.lock';
         if ($autoMigrate || !is_file($schemaLock)) {
             try {
@@ -370,6 +370,15 @@ final class HospitalHuaralDB
                 // El motor ya tiene la columna o no soporta IF NOT EXISTS.
             }
         }
+        // Metadatos internos de la app (versión de catálogo, marcas de migración).
+        $pdo->exec("
+            CREATE TABLE IF NOT EXISTS `app_config` (
+              `clave` varchar(100) NOT NULL,
+              `valor` varchar(255) NOT NULL DEFAULT '',
+              `actualizado` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+              PRIMARY KEY (`clave`)
+            ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+        ");
         self::ensureCatalogoOficial($pdo);
 
         // Tabla única e independiente de usuarios de la app. Es la ÚNICA fuente
@@ -592,9 +601,11 @@ final class HospitalHuaralDB
     // CATÁLOGO OFICIAL DE 14 MÉTODOS Y RBAC POR DNI
     // ========================================================================
     /**
-     * Siembra/actualiza los 14 métodos oficiales una sola vez por instalación.
-     * Las filas antiguas se migran solo cuando todavía no tienen `alias_codigos`;
-     * después se respetan los días de ciclo editados por Estadística.
+     * Siembra/actualiza los 14 métodos oficiales una sola vez por versión de
+     * catálogo. Al subir CATALOGO_VERSION se reescriben códigos, nombres,
+     * alias y ciclos oficiales (necesario para corregir datos ya sembrados en
+     * producción); después se respetan las ediciones manuales de Estadística
+     * hasta la siguiente versión.
      */
     public static function ensureCatalogoOficial(PDO $pdo): void
     {
@@ -603,29 +614,39 @@ final class HospitalHuaralDB
             return;
         }
         $verificado = true;
+        $catalogoVersion = 'oficial_2026_11_v7';
         try {
-            $oficial = hospital_catalogo_metodos_oficial();
-            $marcas = implode(',', array_fill(0, count($oficial), '?'));
-            $stmt = $pdo->prepare("
-                SELECT COUNT(*) FROM app_catalogo_metodos
-                WHERE codigo_dx IN ({$marcas}) AND alias_codigos <> ''
-            ");
-            $stmt->execute(array_keys($oficial));
-            if ((int)$stmt->fetchColumn() >= count($oficial)) {
+            try {
+                $pdo->exec("
+                    CREATE TABLE IF NOT EXISTS `app_config` (
+                      `clave` varchar(100) NOT NULL,
+                      `valor` varchar(255) NOT NULL DEFAULT '',
+                      `actualizado` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+                      PRIMARY KEY (`clave`)
+                    ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4
+                ");
+            } catch (Throwable $e) {
+                // La tabla pudo crearse en bootstrapSchema.
+            }
+            $stmtVersion = $pdo->prepare("SELECT valor FROM app_config WHERE clave = 'catalogo_metodos_version' LIMIT 1");
+            $stmtVersion->execute();
+            if ((string)$stmtVersion->fetchColumn() === $catalogoVersion) {
                 return;
             }
+
+            $oficial = hospital_catalogo_metodos_oficial();
             $upsert = $pdo->prepare("
                 INSERT INTO app_catalogo_metodos
                     (codigo_dx, nombre_metodo, alias_codigos, dias_ciclo, requiere_cita, activo, orden)
                 VALUES
                     (:codigo, :nombre, :alias, :dias, :cita, :activo, :orden)
                 ON DUPLICATE KEY UPDATE
-                    dias_ciclo = IF(alias_codigos = '', VALUES(dias_ciclo), dias_ciclo),
-                    nombre_metodo = IF(alias_codigos = '', VALUES(nombre_metodo), nombre_metodo),
+                    nombre_metodo = VALUES(nombre_metodo),
+                    alias_codigos = VALUES(alias_codigos),
+                    dias_ciclo = VALUES(dias_ciclo),
                     requiere_cita = VALUES(requiere_cita),
                     activo = VALUES(activo),
-                    orden = VALUES(orden),
-                    alias_codigos = VALUES(alias_codigos)
+                    orden = VALUES(orden)
             ");
             foreach ($oficial as $meta) {
                 $upsert->execute([
@@ -638,6 +659,11 @@ final class HospitalHuaralDB
                     ':orden' => (int)$meta['orden'],
                 ]);
             }
+            $stmtMarca = $pdo->prepare("
+                INSERT INTO app_config (clave, valor) VALUES ('catalogo_metodos_version', :version)
+                ON DUPLICATE KEY UPDATE valor = VALUES(valor)
+            ");
+            $stmtMarca->execute([':version' => $catalogoVersion]);
         } catch (Throwable $e) {
             error_log('[PlanificaHIS] ensureCatalogoOficial: ' . $e->getMessage());
         }
