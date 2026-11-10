@@ -345,6 +345,22 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       return headers;
     }
 
+    /**
+     * Establecimiento que viaja en cada consulta. Los administradores usan
+     * "ALL" por defecto (red completa) y conservan la IPRESS elegida en la
+     * cabecera; la jefatura y las obstetras envían siempre su código fijo.
+     */
+    function codEstabConsulta() {
+      const s = state.session || {};
+      const codigo = String(s.cod_estab || '').trim();
+      const esAdmin = !!(s.isAdmin || s.puedeVerRed || s.puedeCambiarEstablecimiento);
+      if (esAdmin) {
+        const normalizado = codigo.toUpperCase();
+        return (!codigo || normalizado === 'ALL' || normalizado === 'TODOS' || normalizado === 'RED') ? 'ALL' : codigo;
+      }
+      return codigo;
+    }
+
     function paramsConMarcaTiempo(params) {
       return Object.assign({}, params || {}, { _ts: String(Date.now()) });
     }
@@ -1557,6 +1573,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
           rango_modo: state.reporteModo,
           alcance: state.reporteAlcance,
           ambito: state.reporteAmbito,
+          cod_estab: codEstabConsulta(),
           obstetra: state.reporteObstetra || '',
           codigo_metodo: state.reporteMetodo || 'TODOS'
         });
@@ -3055,6 +3072,30 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
 
     async function descargarExcelAlerta() {
       try {
+        // Se refresca contra el backend para aplicar el fallback de
+        // establecimiento y no exportar una lista vacía por un código que el
+        // HIS guarda en otro formato.
+        await loadOverview();
+        if (!state.alertas || Number(state.alertas.total || 0) <= 0) {
+          const padron = await apiGet('reporte_padron', {
+            grupo: 'todas',
+            alcance: state.reporteAlcance || 'establecimiento',
+            cod_estab: codEstabConsulta(),
+            obstetra: 'TODOS'
+          });
+          const listas = { manana: [], hoy: [], vencidas: [] };
+          (padron.filas || []).forEach(function (fila) {
+            const grupo = fila.grupo_alerta || 'hoy';
+            if (listas[grupo]) listas[grupo].push(fila);
+          });
+          state.alertas = {
+            manana: Number((padron.resumen && padron.resumen.manana) || listas.manana.length),
+            hoy: Number((padron.resumen && padron.resumen.hoy) || listas.hoy.length),
+            vencidas: Number((padron.resumen && padron.resumen.vencidas) || listas.vencidas.length),
+            total: Number((padron.resumen && padron.resumen.total) || (padron.filas || []).length),
+            listas: listas
+          };
+        }
         const datos = datosOficialesAlerta();
         const resultado = await generarYDescargarXlsxOficial(datos.meta, datos.columnas, datos.filas, datos.resumen, datos.archivo);
         showFeedback('success', 'Excel oficial de alerta generado: ' + resultado.nombre + ' (' + datos.filas.length + ' pacientes, formato ' + resultado.formato + ').');
@@ -3402,7 +3443,11 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
 
-    function verAlertaManana() {
+    async function verAlertaManana() {
+      const listas = (state.alertas && state.alertas.listas) || {};
+      if (!listas.manana || !listas.manana.length) {
+        await loadOverview();
+      }
       state.agendaGrupo = 'manana';
       state.activeTab = 'AGENDA';
       state.feedback = null;
@@ -3434,6 +3479,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         state.padronData = await apiGet('reporte_padron', {
           grupo: state.padronGrupo || 'todas',
           alcance: state.padronAlcance || 'establecimiento',
+          cod_estab: codEstabConsulta(),
           obstetra: state.padronObstetra || 'TODOS'
         });
       } catch (error) {
@@ -3522,7 +3568,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
     }
 
     function parametrosReporte(filtros) {
-      return Object.assign({}, filtros);
+      return Object.assign({ cod_estab: codEstabConsulta() }, filtros || {});
     }
 
     async function cargarReporteCampo(mostrarSkeleton) {
@@ -3793,7 +3839,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
     async function loadOverview() {
       if (!state.token) return;
       try {
-        const data = await apiGet('overview');
+        const data = await apiGet('overview', { cod_estab: codEstabConsulta() });
         state.pacientes = data.pacientes || [];
         state.agendaAmpollas = data.agendaAmpollas || [];
         state.produccionObstetras = data.produccionObstetras || [];

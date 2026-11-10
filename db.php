@@ -157,21 +157,304 @@ function hospital_es_rol_admin_superior(?string $rol): bool
 }
 
 /**
- * Helper de compatibilidad: acepta un rol en texto o un usuario/arreglo con
- * clave `rol`. Devuelve true para SUPER_ADMIN y ADMIN_ESTADISTICA.
+ * Helper único de administración superior: SUPER_ADMIN, cualquier
+ * ADMIN_ESTADISTICA, la Cuenta Maestra 75100725 o cualquier usuario marcado
+ * explícitamente con `puede_ver_red = 1`.
  *
  * @param array<string, mixed>|string|null $usuario
  */
 function esAdminSuperior($usuario): bool
 {
     if (is_array($usuario)) {
-        $dni = (string)($usuario['dni'] ?? $usuario['CODPSAL'] ?? '');
-        if ($dni !== '' && hospital_es_super_admin($dni)) {
-            return true;
-        }
-        return hospital_es_rol_admin_superior((string)($usuario['rol'] ?? ''));
+        $rol = strtoupper(trim((string)($usuario['rol'] ?? '')));
+        $dni = trim((string)($usuario['dni'] ?? $usuario['CODPSAL'] ?? ''));
+        $puedeVerRed = !empty($usuario['puede_ver_red']) || !empty($usuario['puedeVerRed']);
+        return ($dni !== '' && hospital_es_super_admin($dni))
+            || $rol === 'SUPER_ADMIN'
+            || $rol === 'ADMIN_ESTADISTICA'
+            || $puedeVerRed;
     }
-    return hospital_es_rol_admin_superior((string)$usuario);
+    $rol = strtoupper(trim((string)$usuario));
+    return $rol === 'SUPER_ADMIN' || $rol === 'ADMIN_ESTADISTICA';
+}
+
+/**
+ * Normaliza un código de establecimiento para filtros clínicos.
+ *
+ * REGLA CRÍTICA: los centinelas "ALL", "TODOS", "RED", vacío y null SIEMPRE
+ * significan red completa y NUNCA deben convertirse en "000000ALL" ni en un
+ * código de 9 dígitos. Un código real se devuelve canónico con 9 dígitos.
+ */
+function normalizarCodEstab(?string $codEstab): string
+{
+    $raw = strtoupper(trim((string)$codEstab));
+    if ($raw === '' || $raw === 'ALL' || $raw === 'TODOS' || $raw === 'RED') {
+        return 'ALL';
+    }
+
+    $canonico = hospital_codigo_canonico($raw);
+    if (hospital_establecimiento($canonico) !== null) {
+        return str_pad(trim($canonico), 9, '0', STR_PAD_LEFT);
+    }
+
+    $digitos = preg_replace('/[^0-9]/', '', $raw) ?? '';
+    if ($digitos !== '') {
+        return str_pad($digitos, 9, '0', STR_PAD_LEFT);
+    }
+
+    return $raw;
+}
+
+/**
+ * Columnas reales de una tabla del HIS (mapa MAYÚSCULAS => nombre original).
+ *
+ * @return array<string, string>
+ */
+function hospital_columnas_tabla(PDO $pdo, string $tabla): array
+{
+    static $cache = [];
+    if (!preg_match('/^[A-Za-z0-9_]+$/', $tabla)) {
+        return [];
+    }
+    if (array_key_exists($tabla, $cache)) {
+        return $cache[$tabla];
+    }
+    $columnas = [];
+    try {
+        $filas = $pdo->query("SHOW COLUMNS FROM `{$tabla}`")->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($filas as $fila) {
+            $original = (string)($fila['Field'] ?? '');
+            if ($original !== '') {
+                $columnas[strtoupper($original)] = $original;
+            }
+        }
+    } catch (Throwable $e) {
+        $columnas = [];
+    }
+    $cache[$tabla] = $columnas;
+    return $columnas;
+}
+
+/**
+ * Resuelve TODOS los códigos equivalentes de un establecimiento cruzando las
+ * tablas históricas de la Red (app_catalogo_establecimientos, establec,
+ * maestro_sys_establecimiento, maestro_sys_establec) por código y por nombre.
+ *
+ * Incluye las variantes de formato usadas por el HIS: 9 dígitos, 8 dígitos,
+ * sin ceros a la izquierda y código corto. Para "ALL" devuelve [] (sin filtro).
+ *
+ * @return array<int, string>
+ */
+function obtenerCodigosEstablecimientoEquivalentes(PDO $pdo, string $codEstab): array
+{
+    static $cache = [];
+    $codEstab = trim($codEstab);
+    $normalizado = normalizarCodEstab($codEstab);
+    if ($normalizado === 'ALL') {
+        return [];
+    }
+
+    $cacheKey = $normalizado . '|' . spl_object_id($pdo);
+    if (array_key_exists($cacheKey, $cache)) {
+        return $cache[$cacheKey];
+    }
+
+    /** @var array<string, string> $resultado */
+    $resultado = [];
+    /** @var array<string, string> $nombres */
+    $nombres = [];
+
+    $agregar = static function ($valor) use (&$resultado): void {
+        $valor = trim((string)$valor);
+        if ($valor === '' || strtoupper($valor) === 'ALL' || strtoupper($valor) === 'TODOS') {
+            return;
+        }
+        $resultado[$valor] = $valor;
+        if (preg_match('/^[0-9]+$/', $valor)) {
+            $digitos = ltrim($valor, '0');
+            if ($digitos === '') {
+                $digitos = '0';
+            }
+            foreach ([
+                str_pad($digitos, 9, '0', STR_PAD_LEFT),
+                str_pad($digitos, 8, '0', STR_PAD_LEFT),
+                $digitos,
+            ] as $variante) {
+                if ($variante !== '') {
+                    $resultado[$variante] = $variante;
+                }
+            }
+        }
+    };
+
+    $agregarNombre = static function ($valor) use (&$nombres): void {
+        $valor = trim((string)$valor);
+        if ($valor !== '') {
+            $nombres[strtoupper($valor)] = $valor;
+        }
+    };
+
+    $est = hospital_establecimiento($normalizado) ?: hospital_establecimiento($codEstab);
+    $agregar($codEstab);
+    $agregar($normalizado);
+    if ($est !== null) {
+        $agregar($est['COD_ESTAB'] ?? '');
+        $agregar($est['COD_IPRESS'] ?? '');
+        $agregar($est['COD_IPRESS_ALT'] ?? '');
+        $agregarNombre($est['DESC_ESTAB'] ?? '');
+    }
+
+    // El catálogo local resuelve el código canónico y el IPRESS real. Las
+    // tablas históricas se consultan debajo solo por código exacto y nombre
+    // validado, para no mezclar establecimientos vecinos del mismo distrito.
+    if ($est !== null) {
+        $agregar($est['COD_ESTAB'] ?? '');
+        $agregar($est['COD_IPRESS'] ?? '');
+        $agregar($est['COD_IPRESS_ALT'] ?? '');
+        $agregarNombre($est['DESC_ESTAB'] ?? '');
+    }
+
+    // Variantes legibles del nombre oficial para el cruce por nombre. NO se
+    // parte el nombre en fragmentos genéricos ("SAN JUAN BAUTISTA"), porque
+    // eso mezclaría establecimientos de otras regiones con el mismo nombre.
+    $nombreOficial = trim((string)($est['DESC_ESTAB'] ?? ''));
+    if ($nombreOficial !== '') {
+        $sinPrefijo = preg_replace(
+            '/^(HOSPITAL DE APOYO|HOSPITAL|CENTRO DE SALUD|C\.S\.|PUESTO DE SALUD|P\.S\.)\s+/i',
+            '',
+            $nombreOficial
+        );
+        if (is_string($sinPrefijo) && trim($sinPrefijo) !== '') {
+            $agregarNombre($sinPrefijo);
+        }
+    }
+    $nombreOficialMayus = strtoupper($nombreOficial);
+    $distritoOficial = strtoupper(trim((string)($est['DISTRITO'] ?? '')));
+
+    $tablas = [
+        [
+            'app_catalogo_establecimientos',
+            ['COD_ESTAB', 'COD_IPRESS', 'IPRESS_CORTO'],
+            ['NOMBRE_ESTABLECIMIENTO', 'NOMBRE', 'DESC_ESTAB'],
+            ['COD_ESTAB', 'COD_IPRESS', 'IPRESS_CORTO'],
+        ],
+        [
+            'maestro_sys_establecimiento',
+            ['COD_ESTABLECIMIENTO', 'CODIGO_UNICO', 'ID_ESTABLECIMIENTO'],
+            ['NOMBRE_ESTABLECIMIENTO', 'NOMBRE', 'DESC_ESTAB', 'DESCRIPCION'],
+            ['COD_ESTABLECIMIENTO'],
+        ],
+        [
+            'maestro_sys_establec',
+            ['COD_ESTAB', 'COD_2000', 'ID_ESTAB'],
+            ['DESC_ESTAB', 'NOMBRE_ESTABLECIMIENTO', 'NOMBRE', 'DESCRIPCION'],
+            ['COD_ESTAB', 'COD_2000'],
+        ],
+        [
+            'establec',
+            ['COD_ESTAB', 'COD_2000', 'UGIPRESS'],
+            ['DESC_ESTAB', 'NOMBRE_ESTABLECIMIENTO', 'NOMBRE', 'DESCRIPCION'],
+            ['COD_ESTAB', 'COD_2000', 'UGIPRESS'],
+        ],
+    ];
+
+    foreach ($tablas as [$tabla, $columnasCodigo, $columnasNombre, $columnasSalida]) {
+        $columnasReales = hospital_columnas_tabla($pdo, $tabla);
+        if (!$columnasReales) {
+            continue;
+        }
+
+        $candidatos = array_values($resultado);
+        $nombresBuscar = array_values($nombres);
+        $condiciones = [];
+        $params = [];
+
+        foreach ($columnasCodigo as $columna) {
+            if (!isset($columnasReales[$columna]) || !$candidatos) {
+                continue;
+            }
+            $real = $columnasReales[$columna];
+            $condiciones[] = '`' . $real . '` IN (' . implode(',', array_fill(0, count($candidatos), '?')) . ')';
+            $params = array_merge($params, $candidatos);
+        }
+        foreach ($columnasNombre as $columna) {
+            if (!isset($columnasReales[$columna]) || !$nombresBuscar) {
+                continue;
+            }
+            $real = $columnasReales[$columna];
+            $marcasNombre = implode(',', array_fill(0, count($nombresBuscar), '?'));
+            $condiciones[] = 'UPPER(TRIM(`' . $real . '`)) IN (' . $marcasNombre . ')';
+            foreach ($nombresBuscar as $nombreBuscar) {
+                $params[] = strtoupper($nombreBuscar);
+            }
+        }
+
+        if (!$condiciones) {
+            continue;
+        }
+
+        try {
+            $sql = 'SELECT * FROM `' . $tabla . '` WHERE (' . implode(' OR ', $condiciones) . ') LIMIT 300';
+            $stmt = $pdo->prepare($sql);
+            $stmt->execute($params);
+            foreach ($stmt->fetchAll() as $fila) {
+                // Código y geo de la fila histórica para validar que realmente
+                // corresponde al mismo establecimiento y no a una colisión de
+                // código con otra región (p. ej. Ucayali vs. Huaral).
+                $nombreFila = '';
+                foreach ($columnasNombre as $columnaNombre) {
+                    if (!isset($columnasReales[$columnaNombre])) {
+                        continue;
+                    }
+                    $nombreFila = strtoupper(trim((string)($fila[$columnasReales[$columnaNombre]] ?? '')));
+                    if ($nombreFila !== '') {
+                        break;
+                    }
+                }
+
+                $mismoNombre = $nombreFila !== '' && (
+                    isset($nombres[$nombreFila])
+                    || ($nombreOficialMayus !== '' && (
+                        strpos($nombreFila, $nombreOficialMayus) !== false
+                        || strpos($nombreOficialMayus, $nombreFila) !== false
+                    ))
+                    || ($distritoOficial !== '' && preg_match(
+                        '/(^|[^A-Z])' . preg_quote($distritoOficial, '/') . '([^A-Z]|$)/',
+                        $nombreFila
+                    ) === 1)
+                );
+                // Sin nombre oficial no hay con qué validar: se acepta la fila
+                // localizada por código exacto.
+                $filaSinNombre = $nombreFila === '' || $est === null;
+                if (!$mismoNombre && !$filaSinNombre) {
+                    continue;
+                }
+
+                foreach (array_merge($columnasSalida, $columnasNombre) as $columna) {
+                    if (!isset($columnasReales[$columna])) {
+                        continue;
+                    }
+                    $valor = $fila[$columnasReales[$columna]] ?? null;
+                    if ($valor === null || is_array($valor) || is_object($valor)) {
+                        continue;
+                    }
+                    if (in_array($columna, $columnasNombre, true)) {
+                        $agregarNombre($valor);
+                    } else {
+                        $agregar($valor);
+                    }
+                }
+            }
+        } catch (Throwable $e) {
+            // Tabla/columna histórica no disponible: se conservan las variantes.
+        }
+    }
+
+    $cache[$cacheKey] = array_values(array_unique(array_filter(
+        $resultado,
+        static fn ($valor): bool => trim((string)$valor) !== ''
+    )));
+    return $cache[$cacheKey];
 }
 
 final class HospitalHuaralDB
@@ -1045,17 +1328,17 @@ final class HospitalHuaralDB
     public static function normalizarEstablecimientoSesion(?string $codEstab): string
     {
         $codEstab = trim((string)$codEstab);
-        if (strtoupper($codEstab) === 'ALL') {
-            return 'ALL';
-        }
         if ($codEstab === '') {
             return '000005481';
         }
-        $canonico = hospital_codigo_canonico($codEstab);
-        if (hospital_establecimiento($canonico) === null) {
-            $canonico = $codEstab;
+        $normalizado = normalizarCodEstab($codEstab);
+        if ($normalizado === 'ALL') {
+            return 'ALL';
         }
-        return str_pad(trim($canonico), 9, '0', STR_PAD_LEFT);
+        // Si el código no pertenece al catálogo, se conserva tal cual (con sus
+        // variantes numéricas normalizadas) para no romper instalaciones que
+        // usan códigos históricos de 4 u 8 dígitos.
+        return $normalizado;
     }
 
     /**
@@ -1235,9 +1518,26 @@ final class HospitalHuaralDB
         }
 
         $rol = strtoupper(trim((string)($row['rol'] ?? 'OBSTETRA')));
-        $esAdmin = hospital_es_rol_admin_superior($rol) || $esSuperAdmin;
+        $puedeVerRedGuardado = (int)($row['puede_ver_red'] ?? 0);
+        $esAdmin = esAdminSuperior([
+            'rol' => $rol,
+            'dni' => $dni,
+            'puede_ver_red' => $puedeVerRedGuardado,
+        ]);
+        if ($esAdmin && $puedeVerRedGuardado !== 1) {
+            // La jerarquía administrativa siempre tiene alcance de red, aunque
+            // una fila histórica tenga el flag en 0.
+            try {
+                $pdo->prepare('UPDATE app_usuarios SET puede_ver_red = 1 WHERE dni = :dni LIMIT 1')
+                    ->execute([':dni' => $dni]);
+                self::olvidarAcceso($dni);
+            } catch (Throwable $e) {
+                // El flag se fuerza igualmente en la sesión.
+            }
+            $puedeVerRedGuardado = 1;
+        }
         $estabUsuario = self::normalizarEstablecimientoSesion((string)($row['usuario_cod_estab'] ?? '000005481'));
-        $estabSesion = strtoupper(trim((string)($row['cod_estab'] ?? '')));
+        $estabSesion = normalizarCodEstab((string)($row['cod_estab'] ?? ''));
         if (!$esAdmin) {
             // La obstetra y la jefa NUNCA pueden elegir otro establecimiento.
             $codEstab = $estabUsuario;
@@ -1283,7 +1583,7 @@ final class HospitalHuaralDB
             'rol' => $rol,
             'activo' => (int)($row['activo'] ?? 1),
             'protegido' => (int)($row['protegido'] ?? 0),
-            'puede_ver_red' => (int)($row['puede_ver_red'] ?? 0),
+            'puede_ver_red' => $esAdmin ? 1 : $puedeVerRedGuardado,
             'es_admin' => $esAdmin,
             'expires_at' => $nuevoExpira,
             'last_activity' => $ultimaActividad,
