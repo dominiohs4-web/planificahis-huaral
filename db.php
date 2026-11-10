@@ -14,6 +14,14 @@
  */
 declare(strict_types=1);
 
+/**
+ * DNI de la Cuenta Maestra del Sistema. Es inmutable por diseño: ni siquiera
+ * el propio titular puede desactivarla ni rebajar su rol.
+ */
+if (!defined('SUPER_ADMIN_DNI')) {
+    define('SUPER_ADMIN_DNI', '75100725');
+}
+
 require_once __DIR__ . '/catalogo_establecimientos.php';
 
 /**
@@ -112,7 +120,7 @@ function hospital_dnis_preactivados(): array
 {
     return [
         '75100725' => [
-            'rol' => 'ADMIN_ESTADISTICA',
+            'rol' => 'SUPER_ADMIN',
             'nombre' => 'LUIS FERNANDO INOÑAN SANTISTEBAN',
         ],
         '43246820' => [
@@ -120,6 +128,50 @@ function hospital_dnis_preactivados(): array
             'nombre' => 'DIANA ALEJANDRINA ANICETO AGUEDO',
         ],
     ];
+}
+
+/** ¿El documento corresponde a la Cuenta Maestra del Sistema? */
+function hospital_es_super_admin(?string $dni): bool
+{
+    return preg_replace('/[^0-9A-Za-z]/', '', (string)$dni) === SUPER_ADMIN_DNI;
+}
+
+/**
+ * Jerarquía oficial de roles. Un número mayor implica más privilegios.
+ */
+function hospital_nivel_rol(?string $rol): int
+{
+    return match (strtoupper(trim((string)$rol))) {
+        'SUPER_ADMIN' => 100,
+        'ADMIN_ESTADISTICA' => 50,
+        'JEFA_OBSTETRAS' => 30,
+        'OBSTETRA' => 10,
+        default => 0,
+    };
+}
+
+/** ¿El rol es administrador superior (SUPER_ADMIN o ADMIN_ESTADISTICA)? */
+function hospital_es_rol_admin_superior(?string $rol): bool
+{
+    return hospital_nivel_rol($rol) >= hospital_nivel_rol('ADMIN_ESTADISTICA');
+}
+
+/**
+ * Helper de compatibilidad: acepta un rol en texto o un usuario/arreglo con
+ * clave `rol`. Devuelve true para SUPER_ADMIN y ADMIN_ESTADISTICA.
+ *
+ * @param array<string, mixed>|string|null $usuario
+ */
+function esAdminSuperior($usuario): bool
+{
+    if (is_array($usuario)) {
+        $dni = (string)($usuario['dni'] ?? $usuario['CODPSAL'] ?? '');
+        if ($dni !== '' && hospital_es_super_admin($dni)) {
+            return true;
+        }
+        return hospital_es_rol_admin_superior((string)($usuario['rol'] ?? ''));
+    }
+    return hospital_es_rol_admin_superior((string)$usuario);
 }
 
 final class HospitalHuaralDB
@@ -333,6 +385,7 @@ final class HospitalHuaralDB
               `distrito` varchar(80) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL,
               `direccion` varchar(512) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL,
               `sector` varchar(50) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL,
+              `tipo_doc` varchar(15) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL DEFAULT 'DNI' COMMENT 'DNI, CE, PASAPORTE, PTP, CNV',
               `estado_paciente` varchar(30) CHARACTER SET utf8 COLLATE utf8_general_ci NULL DEFAULT 'INSATISFECHA_SIN_METODO',
               `codpsal_obstetra` varchar(11) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL COMMENT 'DNI de la obstetra que capta',
               `cod_estab` varchar(9) CHARACTER SET utf8 COLLATE utf8_general_ci NULL DEFAULT NULL,
@@ -457,7 +510,7 @@ final class HospitalHuaralDB
                     ':nombre' => $metaPre['nombre'],
                     ':rol' => $metaPre['rol'],
                     ':estab' => '000005481',
-                    ':red' => $metaPre['rol'] === 'ADMIN_ESTADISTICA' ? 1 : 0,
+                    ':red' => hospital_es_rol_admin_superior($metaPre['rol']) ? 1 : 0,
                 ]);
             }
         } catch (Throwable $e) {
@@ -488,6 +541,7 @@ final class HospitalHuaralDB
         // Los MODIFY garantizan que el texto cifrado AES-256-GCM nunca se trunque:
         // enc:gcm:<24 hex IV>:<32 hex tag>:<ciphertext hex> exige VARCHAR(512).
         foreach ([
+            "ALTER TABLE `pacientes_sin_metodo` ADD COLUMN IF NOT EXISTS `tipo_doc` varchar(15) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL DEFAULT 'DNI' AFTER `dni`",
             "ALTER TABLE `pacientes_sin_metodo` ADD COLUMN IF NOT EXISTS `cod_estab` varchar(9) NULL DEFAULT NULL AFTER `codpsal_obstetra`",
             "ALTER TABLE `pacientes_sin_metodo` ADD COLUMN IF NOT EXISTS `atencion_99208` tinyint(1) NOT NULL DEFAULT 0 AFTER `cod_estab`",
             "ALTER TABLE `auditoria_seguridad_app` ADD COLUMN IF NOT EXISTS `actor_estab` varchar(9) NOT NULL DEFAULT '' AFTER `actor_dni`",
@@ -707,11 +761,15 @@ final class HospitalHuaralDB
     }
 
     /**
-     * Rol efectivo. La tabla manda; si el DNI no tiene fila se reconocen los
-     * accesos pre-activados (ADMIN_ESTADISTICA / JEFA_OBSTETRAS).
+     * Rol efectivo. El DNI de la Cuenta Maestra SIEMPRE es SUPER_ADMIN y la
+     * tabla no puede rebajarlo; en el resto, la tabla manda y si no hay fila
+     * se reconocen los accesos pre-activados.
      */
     public static function rolUsuario(string $dni): string
     {
+        if (hospital_es_super_admin($dni)) {
+            return 'SUPER_ADMIN';
+        }
         $acceso = self::accesoUsuario($dni);
         if ($acceso !== null) {
             $rol = strtoupper(trim((string)($acceso['rol'] ?? '')));
@@ -723,6 +781,9 @@ final class HospitalHuaralDB
 
     public static function accesoActivo(string $dni): bool
     {
+        if (hospital_es_super_admin($dni)) {
+            return true;
+        }
         $acceso = self::accesoUsuario($dni);
         if ($acceso === null) {
             // Una sesión histórica sin fila no se bloquea aquí; el login y la
@@ -733,27 +794,33 @@ final class HospitalHuaralDB
     }
 
     /**
-     * Solo el Administrador de Estadística tiene alcance de red. La Jefatura de
-     * Obstetras queda estrictamente limitada a su establecimiento.
+     * Solo los administradores superiores (SUPER_ADMIN / ADMIN_ESTADISTICA)
+     * tienen alcance de red. La Jefatura de Obstetras queda estrictamente
+     * limitada a su establecimiento.
      */
     public static function esRolRed(string $rol): bool
     {
-        return strtoupper(trim($rol)) === 'ADMIN_ESTADISTICA';
+        return hospital_es_rol_admin_superior($rol);
     }
 
     public static function puedeGestionarAccesos(string $rol): bool
     {
-        return strtoupper(trim($rol)) === 'ADMIN_ESTADISTICA';
+        return hospital_es_rol_admin_superior($rol);
     }
 
     public static function puedeResetearObstetra(string $rol): bool
     {
-        return in_array(strtoupper(trim($rol)), ['ADMIN_ESTADISTICA', 'JEFA_OBSTETRAS'], true);
+        return in_array(
+            strtoupper(trim($rol)),
+            ['SUPER_ADMIN', 'ADMIN_ESTADISTICA', 'JEFA_OBSTETRAS'],
+            true
+        );
     }
 
     public static function rolEtiqueta(string $rol): string
     {
         return match (strtoupper(trim($rol))) {
+            'SUPER_ADMIN' => 'Super Administrador del Sistema',
             'ADMIN_ESTADISTICA' => 'Administrador de Estadística',
             'JEFA_OBSTETRAS' => 'Jefa de Obstetras',
             default => 'Obstetra',

@@ -108,6 +108,87 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       'VEINTISIETE DE NOVIEMBRE'
     ];
 
+    // Soporte multi-documento alineado con his_dl.COD_DOC:
+    // 1=DNI, 2=CE, 3=Pasaporte, 4=PTP/extranjero, 6=CNV/SIS.
+    const TIPOS_DOCUMENTO = {
+      DNI: { etiqueta: 'DNI', codigoHis: '1', maxlength: 8, inputmode: 'numeric', pattern: '[0-9]{8}', placeholder: 'DNI (8 dígitos)', soloDigitos: true },
+      CE: { etiqueta: 'Carné de Extranjería', codigoHis: '2', maxlength: 12, inputmode: 'text', pattern: '[A-Za-z0-9]{9,12}', placeholder: 'CE (9 a 12 caracteres)', soloDigitos: false },
+      PASAPORTE: { etiqueta: 'Pasaporte', codigoHis: '3', maxlength: 12, inputmode: 'text', pattern: '[A-Za-z0-9]{6,12}', placeholder: 'Pasaporte (6 a 12)', soloDigitos: false },
+      PTP: { etiqueta: 'PTP / Extranjero', codigoHis: '4', maxlength: 15, inputmode: 'text', pattern: '[A-Za-z0-9\\-]{6,15}', placeholder: 'PTP (6 a 15)', soloDigitos: false },
+      CNV: { etiqueta: 'CNV / SIS u otro', codigoHis: '6', maxlength: 15, inputmode: 'text', pattern: '[A-Za-z0-9\\-]{6,15}', placeholder: 'CNV / SIS (6 a 15)', soloDigitos: false }
+    };
+
+    function docConfig(tipo) {
+      return TIPOS_DOCUMENTO[tipo] || TIPOS_DOCUMENTO.DNI;
+    }
+
+    function normalizarDocumentoPorTipo(valor, tipo) {
+      const cfg = docConfig(tipo);
+      let limpio = String(valor || '').toUpperCase();
+      limpio = cfg.soloDigitos ? limpio.replace(/[^0-9]/g, '') : limpio.replace(/[^0-9A-Z\-]/g, '');
+      return limpio.slice(0, cfg.maxlength);
+    }
+
+    function tipoDocumentoDesdeInput(valor) {
+      const v = String(valor || '').trim();
+      if (/^[0-9]{8}$/.test(v)) return 'DNI';
+      if (/^[0-9]{9,12}$/.test(v)) return 'CE';
+      if (/[A-Za-z]/.test(v) && v.length >= 9 && v.length <= 12) return 'CE';
+      if (/^[A-Za-z0-9]{6,12}$/.test(v)) return 'PASAPORTE';
+      return 'PTP';
+    }
+
+    function currentTipoDoc() {
+      const select = document.getElementById('f-tipo-doc');
+      if (select && select.value) return select.value;
+      return (state.formDraft && state.formDraft.tipo_doc) || 'DNI';
+    }
+
+    function aplicarTipoDocEnInput(tipo) {
+      const cfg = docConfig(tipo);
+      const input = document.getElementById('f-dni');
+      if (!input) return;
+      input.maxLength = cfg.maxlength;
+      input.setAttribute('inputmode', cfg.inputmode);
+      input.setAttribute('pattern', cfg.pattern);
+      input.placeholder = cfg.placeholder;
+      input.value = normalizarDocumentoPorTipo(input.value, tipo);
+    }
+
+    function onChangeTipoDoc(tipo) {
+      if (state.formDraft) state.formDraft.tipo_doc = tipo;
+      aplicarTipoDocEnInput(tipo);
+    }
+
+    function onDocumentoInput(input) {
+      let tipo = currentTipoDoc();
+      // Auto-detección: si el usuario aún está en DNI y escribe letras o más de
+      // 8 caracteres, se infiere CE/Pasaporte/PTP sin bloquear el historial HIS.
+      if (tipo === 'DNI' && (input.value.length > 8 || /[A-Za-z]/.test(input.value))) {
+        const detectado = tipoDocumentoDesdeInput(input.value);
+        const select = document.getElementById('f-tipo-doc');
+        if (select) {
+          select.value = detectado;
+          tipo = detectado;
+          if (state.formDraft) state.formDraft.tipo_doc = detectado;
+          aplicarTipoDocEnInput(detectado);
+        }
+      }
+      const limpio = normalizarDocumentoPorTipo(input.value, tipo);
+      if (input.value !== limpio) input.value = limpio;
+    }
+
+    function onDocumentoPaste(event) {
+      const input = event.target;
+      const tipo = currentTipoDoc();
+      const texto = (event.clipboardData || window.clipboardData).getData('text');
+      if (texto) {
+        event.preventDefault();
+        input.value = normalizarDocumentoPorTipo(texto, tipo);
+        onDocumentoInput(input);
+      }
+    }
+
     // Logo oficial del Hospital San Juan Bautista Huaral (public/logo.png).
     // Se usa SIEMPRE la imagen original, sin SVG inventados ni filtros.
     const HOSPITAL_LOGO_HTML = '<img src="' + HOSPITAL_LOGO_DATA_URI + '" alt="Hospital San Juan Bautista Huaral" style="width:100%;height:100%;object-fit:contain;" />';
@@ -218,6 +299,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       padronError: '',
       padronGrupo: 'todas',
       padronAlcance: 'establecimiento',
+      padronObstetra: 'TODOS',
       accesosData: null,
       accesosLoading: false,
       accesosError: '',
@@ -730,6 +812,11 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         : 'w-full min-h-[44px] px-3 rounded-xl border border-slate-300 text-sm';
       const nombreActual = (lookup && lookup.establecimiento && lookup.establecimiento.nombre) || state.session.estab_nombre || establishName(state.session.cod_estab);
       const distritoActual = (lookup && lookup.establecimiento && lookup.establecimiento.distrito) || 'HUARAL';
+      const tipoDocForm = draft.tipo_doc || (lookup && lookup.documento && lookup.documento.tipo_doc) || 'DNI';
+      const cfgDocForm = docConfig(tipoDocForm);
+      const opcionesTipoDoc = Object.keys(TIPOS_DOCUMENTO).map(function (codigo) {
+        return '<option value="' + codigo + '"' + (tipoDocForm === codigo ? ' selected' : '') + '>' + esc(TIPOS_DOCUMENTO[codigo].etiqueta) + '</option>';
+      }).join('');
       return `
         <div class="grid grid-cols-3 gap-2">
           <div class="p-3 rounded-2xl bg-white border border-slate-200"><div class="text-[10px] text-slate-500 leading-tight">Sin Método Captadas</div><div class="text-lg font-bold text-amber-700 font-mono mt-0.5">${Number(state.stats.insatisfechasSinMetodo || 0)}</div></div>
@@ -738,21 +825,32 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         </div>
 
         <div class="p-4 rounded-2xl bg-white border border-slate-200 space-y-3">
-          <div class="text-xs font-bold text-slate-900">1. Validar DNI de la Paciente</div>
+          <div class="text-xs font-bold text-slate-900">1. Validar Documento de Identidad de la Paciente</div>
           <div class="rounded-xl bg-sky-50 border border-sky-200 px-3 py-2 text-[11px] text-sky-950">
             <div class="font-semibold">Búsqueda en toda la Red con establecimiento activo:</div>
             <div class="mt-0.5">${esc(state.session.estab_nombre || establishName(state.session.cod_estab))}</div>
             <div class="text-sky-700 mt-0.5">UPS Planificación Familiar (COD_SERVSA 302304 / catálogo de métodos y administraciones)</div>
           </div>
-          <div class="flex gap-2">
-            <input id="f-dni" type="text" inputmode="numeric" maxlength="15" value="${esc(draft.dni || '')}" placeholder="Ingrese DNI (8 dígitos)" class="flex-1 min-h-[46px] px-3.5 rounded-xl border border-slate-300 text-sm font-mono" />
-            <button type="button" onclick="validarDni()" class="min-h-[46px] px-4 rounded-xl bg-sky-700 hover:bg-sky-800 text-white text-xs font-semibold shrink-0">Validar</button>
+          <div class="grid grid-cols-[118px_1fr] gap-2">
+            <select id="f-tipo-doc" onchange="onChangeTipoDoc(this.value)" class="min-h-[46px] px-2 rounded-xl border border-slate-300 text-[11px] bg-white font-semibold">${opcionesTipoDoc}</select>
+            <input id="f-dni" type="text" inputmode="${cfgDocForm.inputmode}" pattern="${cfgDocForm.pattern}" maxlength="${cfgDocForm.maxlength}" value="${esc(draft.dni || '')}" oninput="onDocumentoInput(this)" onpaste="onDocumentoPaste(event)" placeholder="${esc(cfgDocForm.placeholder)}" class="w-full min-h-[46px] px-3 rounded-xl border border-slate-300 text-sm font-mono uppercase" />
           </div>
+          <button type="button" onclick="validarDni()" class="w-full min-h-[46px] rounded-xl bg-sky-700 hover:bg-sky-800 text-white text-xs font-semibold">Validar Documento en toda la Red</button>
 
           ${lookup ? `<div class="p-3.5 rounded-xl border text-xs space-y-1 ${prog && prog.tieneMetodoRegistrado ? 'bg-emerald-50 border-emerald-300 text-emerald-950' : 'bg-amber-50 border-amber-300 text-amber-950'}">
             ${prog && prog.tieneMetodoRegistrado
               ? '<div class="font-bold">Método registrado en la Red: ' + esc(prog.nombreMetodo) + ' (' + esc(prog.codigoMetodo) + ')</div><p>' + esc((lookup.hisRecord && (lookup.hisRecord.Apellido_p + ' ' + lookup.hisRecord.Apellido_m + ', ' + (lookup.hisRecord.Dnombres || lookup.hisRecord.Pnombre))) || '') + '.</p>'
               : '<div class="font-bold">' + (lookup.foundInHis ? 'Paciente en base del hospital pero SIN método vigente' : 'Paciente nueva sin método registrado') + '</div><p>Complete sus datos abajo para registrarla en seguimiento.</p>'}
+          </div>` : ''}
+
+          ${lookup && lookup.registroPrevio && lookup.registroPrevio.ya_registrada ? `<div class="p-3.5 rounded-xl border-2 border-sky-400 bg-sky-50 text-xs text-sky-950 space-y-1">
+            <div class="font-extrabold">✅ Paciente ya registrada en la app</div>
+            <p class="leading-relaxed">${esc(lookup.mensajeRegistroPrevio || '')}</p>
+            <div class="grid grid-cols-2 gap-1 text-[10px] font-mono">
+              <div><span class="text-slate-500">EESS:</span> <b>${esc(lookup.registroPrevio.establecimiento || '—')}</b></div>
+              <div><span class="text-slate-500">Fecha:</span> <b>${esc(lookup.registroPrevio.fecha_registro || '—')}</b></div>
+              <div class="col-span-2"><span class="text-slate-500">Estado:</span> <b>${esc(lookup.registroPrevio.estado_etiqueta || lookup.registroPrevio.estado || '—')}</b></div>
+            </div>
           </div>` : ''}
         </div>
 
@@ -833,7 +931,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
             </div>
             <div><label class="block text-xs text-slate-700 mb-1">Dirección Domiciliaria</label><input id="f-dir" type="text" required value="${esc(draft.direccion || '')}" placeholder="Calle / Av. / Urb. / Referencia" class="w-full min-h-[44px] px-3 rounded-xl border ${esCaso2 ? 'border-amber-400 bg-white' : 'border-slate-300'} text-sm" /></div>
             <div class="grid grid-cols-2 gap-2.5">
-              <div><label class="block text-xs text-slate-700 mb-1">Sector</label><input id="f-sec" type="text" required value="${esc(draft.sector || '')}" placeholder="Ej. Sector 28" class="w-full min-h-[44px] px-3 rounded-xl border ${esCaso2 ? 'border-amber-400 bg-white' : 'border-slate-300'} text-sm" /></div>
+              <div><label class="block text-xs text-slate-700 mb-1">Sector</label><input id="f-sec" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="10" required value="${esc(draft.sector || '')}" placeholder="Ej: 01" oninput="this.value = this.value.replace(/[^0-9]/g, '');" onpaste="this.value = this.value.replace(/[^0-9]/g, '');" class="w-full min-h-[44px] px-3 rounded-xl border ${esCaso2 ? 'border-amber-400 bg-white' : 'border-slate-300'} text-sm font-mono" /></div>
               <div><label class="block text-xs text-slate-700 mb-1">Estado</label><select id="f-est" onchange="marcarEstadoExplicito(this)" class="w-full min-h-[44px] px-2 rounded-xl border border-slate-300 text-xs bg-white">${Object.keys(ESTADOS).map(function (e) { return '<option value="' + e + '"' + ((draft.estado_paciente || 'INSATISFECHA_SIN_METODO') === e ? ' selected' : '') + '>' + esc(ESTADOS[e]) + '</option>'; }).join('')}</select><div class="text-[9px] text-slate-500 mt-1">${state.estadoExplicito ? 'Cambio de estado explícito: se guardará al confirmar.' : 'Solo cambia si usted elige otro estado.'}</div></div>
             </div>
           </div>
@@ -862,7 +960,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
             <div class="grid grid-cols-1 gap-2.5">
               <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Celular</label><input id="ep-cel-${id}" type="tel" value="${esc(p.celular || '')}" placeholder="987654321" class="w-full min-h-[42px] px-3 rounded-xl border border-slate-300 text-sm font-mono bg-white" /></div>
               <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Dirección</label><input id="ep-dir-${id}" type="text" value="${esc(p.direccion || '')}" placeholder="Calle / Av. / Urb. / Referencia" class="w-full min-h-[42px] px-3 rounded-xl border border-slate-300 text-sm bg-white" /></div>
-              <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Sector</label><input id="ep-sec-${id}" type="text" value="${esc(p.sector || '')}" placeholder="Ej. Sector 28" class="w-full min-h-[42px] px-3 rounded-xl border border-slate-300 text-sm bg-white" /></div>
+              <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Sector</label><input id="ep-sec-${id}" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="10" value="${esc(p.sector || '')}" placeholder="Ej: 01" oninput="this.value = this.value.replace(/[^0-9]/g, '');" onpaste="this.value = this.value.replace(/[^0-9]/g, '');" class="w-full min-h-[42px] px-3 rounded-xl border border-slate-300 text-sm bg-white font-mono" /></div>
               <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Estado / Opinión sobre el método</label><select id="ep-est-${id}" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white">${opcionesEdicion}</select></div>
             </div>
             <div class="grid grid-cols-2 gap-2">
@@ -1021,6 +1119,61 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       });
     }
 
+    function obstetrasParaReporte() {
+      const mapa = {};
+      const agregar = function (dni, nombre) {
+        const codigo = String(dni || '').trim();
+        if (!codigo) return;
+        const actual = mapa[codigo];
+        const etiqueta = String(nombre || '').trim();
+        if (!etiqueta) {
+          if (!actual) mapa[codigo] = 'OBST. ' + codigo;
+          return;
+        }
+        if (!actual || actual.indexOf('OBST. ') === 0) {
+          mapa[codigo] = etiqueta;
+        }
+      };
+      ((state.equipoData && state.equipoData.obstetras) || []).forEach(function (o) {
+        agregar(o.dni, o.nombre_completo || [o.nombres, o.apellido_paterno, o.apellido_materno].filter(Boolean).join(' '));
+      });
+      ((state.campoData && state.campoData.obstetras) || []).forEach(function (o) {
+        agregar(o.codpsal_obstetra, o.nombre_obstetra);
+      });
+      ((state.metodosData && state.metodosData.obstetras) || []).forEach(function (o) {
+        agregar(o.codpsal_obstetra, o.nombre_obstetra);
+      });
+      return Object.keys(mapa).map(function (dni) {
+        return { dni: dni, nombre: mapa[dni] };
+      }).sort(function (a, b) {
+        return a.nombre.localeCompare(b.nombre);
+      });
+    }
+
+    function opcionesObstetrasReporte(valorSeleccionado, etiquetaTodas) {
+      const actual = String(valorSeleccionado || 'TODOS');
+      const opciones = ['<option value="TODOS"' + (actual === 'TODOS' || actual === '' ? ' selected' : '') + '>' + esc(etiquetaTodas || 'Todas las obstetras') + '</option>'];
+      obstetrasParaReporte().forEach(function (o) {
+        opciones.push('<option value="' + esc(o.dni) + '"' + (actual === o.dni ? ' selected' : '') + '>' + esc(o.nombre) + ' · ' + esc(o.dni) + '</option>');
+      });
+      return opciones.join('');
+    }
+
+    function reporteObstetraFijaHtml(mensaje) {
+      const s = state.session || {};
+      return `<div class="p-3 rounded-xl bg-slate-50 border border-slate-200 text-[10px] text-slate-700 space-y-0.5">
+        <div class="font-bold text-slate-900">🔒 ${esc(s.nombreCompleto || 'OBSTETRA')}</div>
+        <div class="font-mono">DNI / CODPSAL: ${esc(s.dni || '')}</div>
+        <div>🏥 ${esc(s.estab_nombre || establishName(s.cod_estab || ''))}</div>
+        <div class="text-slate-500">${esc(mensaje || 'Solo sus captaciones en su establecimiento asignado.')}</div>
+      </div>`;
+    }
+
+    function reporteEstablecimientoFijoHtml() {
+      const s = state.session || {};
+      return `<div class="text-[10px] text-slate-500">🏥 ${esc(s.estab_nombre || establishName(s.cod_estab || ''))} · Establecimiento fijo asignado</div>`;
+    }
+
     function renderReporteProgramacion() {
       const r = state.reporteProgramacion;
       const hoy = localIsoDate(0);
@@ -1059,16 +1212,14 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
               <option value="vencidas" ${state.reporteModo === 'vencidas' ? 'selected' : ''}>Vencidas</option>
               <option value="todos" ${state.reporteModo === 'todos' ? 'selected' : ''}>Todos</option>
             </select></div>
-            <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Alcance</label><select id="rep-alcance" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-[10px] bg-white">
+            ${state.session && state.session.isAdmin ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">Alcance</label><select id="rep-alcance" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-[10px] bg-white">
               <option value="establecimiento" ${state.reporteAlcance === 'establecimiento' ? 'selected' : ''}>Mi establecimiento</option>
-              ${state.session && state.session.isAdmin ? '<option value="red" ' + (state.reporteAlcance === 'red' ? 'selected' : '') + '>Toda la Red</option>' : ''}
-            </select></div>
+              <option value="red" ${state.reporteAlcance === 'red' ? 'selected' : ''}>Toda la Red</option>
+            </select></div>` : ''}
           </div>
-          ${state.session && !state.session.isAdmin ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">Pacientes a programar</label><select id="rep-ambito" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-[10px] bg-white">
-            <option value="establecimiento" ${state.reporteAmbito === 'establecimiento' ? 'selected' : ''}>Mi establecimiento (padrón histórico de mi IPRESS)</option>
-            ${state.session.rol === 'OBSTETRA' ? '<option value="mis_atenciones" ' + (state.reporteAmbito === 'mis_atenciones' ? 'selected' : '') + '>Solo mis captaciones (pacientes que atendí)</option>' : ''}
-          </select></div>` : ''}
-          ${state.session && (state.session.isAdmin || state.session.isJefa) ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">Obstetra (opcional, DNI o vacío = todas)</label><input id="rep-obstetra" type="text" inputmode="numeric" maxlength="11" value="${esc(state.reporteObstetra)}" placeholder="DNI de la obstetra" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs font-mono" /></div>` : ''}
+          ${state.session && !state.session.isAdmin && state.session.isJefa ? `<div class="space-y-1"><label class="block text-[10px] font-bold text-slate-600 mb-1">Obstetra de mi establecimiento</label><select id="rep-obstetra" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-[10px] bg-white">${opcionesObstetrasReporte(state.reporteObstetra, 'Todas las obstetras de mi establecimiento')}</select>${reporteEstablecimientoFijoHtml()}</div>` : ''}
+          ${state.session && state.session.isAdmin ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">Obstetra (opcional, DNI o vacío = todas)</label><input id="rep-obstetra" type="text" inputmode="numeric" maxlength="11" value="${esc(state.reporteObstetra)}" placeholder="DNI de la obstetra" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs font-mono" /></div>` : ''}
+          ${state.session && !state.session.isAdmin && !state.session.isJefa ? reporteObstetraFijaHtml('Programación limitada a sus propias captaciones y a su establecimiento.') : ''}
           <button type="button" onclick="buscarProgramacion()" ${state.reporteLoading ? 'disabled' : ''} class="w-full min-h-[46px] rounded-xl bg-slate-900 hover:bg-slate-800 disabled:opacity-60 text-white text-xs font-bold">${state.reporteLoading ? 'Calculando programación...' : 'Buscar Programación'}</button>
           ${state.reporteError ? '<div class="p-3 rounded-xl bg-red-50 border border-red-200 text-[11px] text-red-800">' + esc(state.reporteError) + '</div>' : ''}
         </div>
@@ -1461,9 +1612,10 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       const s = state.session;
       const esAdmin = Boolean(s.isAdmin);
       const esJefa = Boolean(s.isJefa);
+      const esSuperAdmin = Boolean(s.esSuperAdmin || s.rol === 'SUPER_ADMIN');
       const puedeReset = Boolean(s.puedeResetearObstetra);
-      return `<div class="p-4 rounded-2xl bg-white border border-slate-200 space-y-3">
-        <div class="flex items-center gap-3"><div class="w-12 h-12 shrink-0">${HOSPITAL_LOGO_HTML}</div><div class="min-w-0"><div class="text-sm font-bold text-slate-900">${esc(s.nombreCompleto)}</div><div class="text-xs text-slate-500 font-mono">DNI / CODPSAL: ${esc(s.dni)}</div><div class="text-xs text-sky-700">${esc(s.estab_nombre || establishName(s.cod_estab))}</div><div class="text-[10px] font-bold text-slate-600 mt-0.5">Rol: ${esc(s.rol_etiqueta || s.rol || 'OBSTETRA')}</div></div></div>
+      return `<div class="p-4 rounded-2xl bg-white border ${esSuperAdmin ? 'border-2 border-amber-400' : 'border border-slate-200'} space-y-3">
+        <div class="flex items-center gap-3"><div class="w-12 h-12 shrink-0">${HOSPITAL_LOGO_HTML}</div><div class="min-w-0"><div class="text-sm font-bold text-slate-900">${esc(s.nombreCompleto)} ${esSuperAdmin ? '<span class="ml-1 px-2 py-0.5 rounded-lg bg-gradient-to-r from-amber-400 via-yellow-300 to-sky-500 text-slate-950 text-[9px] font-black border border-amber-500 align-middle">★ SUPER ADMIN</span>' : ''}</div><div class="text-xs text-slate-500 font-mono">DNI / CODPSAL: ${esc(s.dni)}</div><div class="text-xs text-sky-700">${esc(s.estab_nombre || establishName(s.cod_estab))}</div><div class="text-[10px] font-bold text-slate-600 mt-0.5">Rol: ${esc(s.rol_etiqueta || s.rol || 'OBSTETRA')}</div></div></div>
         <div class="pt-3 border-t border-slate-100 flex items-center justify-between text-xs"><span class="text-slate-600">Instalación en celular</span><button type="button" onclick="installPwa()" class="min-h-[38px] px-3 rounded-xl bg-slate-900 text-white text-xs font-semibold">Instalar App</button></div>
       </div>
       <div class="p-4 rounded-2xl bg-white border border-slate-200 space-y-2.5">
@@ -1561,10 +1713,15 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
 
     function renderAdminDirectorio() {
       const roles = (state.accesosData && state.accesosData.roles) || [
+        { codigo: 'SUPER_ADMIN', etiqueta: 'Super Administrador del Sistema' },
         { codigo: 'OBSTETRA', etiqueta: 'Obstetra' },
         { codigo: 'JEFA_OBSTETRAS', etiqueta: 'Jefa de Obstetras' },
         { codigo: 'ADMIN_ESTADISTICA', etiqueta: 'Administrador de Estadística' }
       ];
+      const esSuper = Boolean(state.session && (state.session.esSuperAdmin || state.session.rol === 'SUPER_ADMIN'));
+      const rolesEditables = roles.filter(function (r) {
+        return r.codigo !== 'SUPER_ADMIN' && (esSuper || r.codigo !== 'ADMIN_ESTADISTICA');
+      });
       const accesos = (state.accesosData && state.accesosData.accesos) || [];
       const filtros = state.accesosFiltros || {};
       return `<div class="space-y-3">
@@ -1585,19 +1742,23 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         <button type="button" onclick="abrirAccesoModal()" class="w-full min-h-[42px] rounded-xl bg-emerald-700 text-white text-xs font-bold">+ Agregar / Activar Usuario o Jefa</button>
         ${state.accesosError ? '<div class="p-2 rounded-xl bg-red-50 border border-red-200 text-[10px] text-red-800">' + esc(state.accesosError) + '</div>' : ''}
         <div class="space-y-2">
-          ${accesos.length ? accesos.map(function (a) { return `<div class="p-2.5 rounded-xl border ${Number(a.activo) === 1 ? 'border-emerald-200 bg-emerald-50/50' : 'border-red-200 bg-red-50/50'} space-y-1.5">
-            <div class="flex items-start justify-between gap-2"><div class="min-w-0"><div class="text-[11px] font-bold text-slate-900 truncate">${esc(a.nombre_completo)}</div><div class="font-mono text-[9px] text-slate-600">DNI ${esc(a.dni)} · ${esc(a.rol_etiqueta || a.rol)}</div><div class="text-[9px] text-slate-500">${esc(a.estab_nombre || '')}</div></div><span class="px-2 py-0.5 rounded-lg text-[8px] font-extrabold ${Number(a.activo) === 1 ? 'bg-emerald-700 text-white' : 'bg-red-700 text-white'}">${Number(a.activo) === 1 ? 'ACTIVO' : 'INACTIVO'}</span></div>
+          ${accesos.length ? accesos.map(function (a) {
+            const protegido = Boolean(a.protegido) || String(a.dni) === '75100725' || a.rol === 'SUPER_ADMIN';
+            const esAdminPeer = a.rol === 'ADMIN_ESTADISTICA' && !esSuper && !protegido;
+            const rolEtiqueta = protegido ? 'SUPER ADMIN · Cuenta Maestra' : (a.rol_etiqueta || a.rol);
+            return `<div class="p-2.5 rounded-xl border ${protegido ? 'border-amber-400 bg-gradient-to-br from-amber-50 via-yellow-50 to-sky-50' : (Number(a.activo) === 1 ? 'border-emerald-200 bg-emerald-50/50' : 'border-red-200 bg-red-50/50')} space-y-1.5">
+            <div class="flex items-start justify-between gap-2"><div class="min-w-0"><div class="flex items-center gap-1.5 flex-wrap"><div class="text-[11px] font-bold text-slate-900 truncate">${esc(a.nombre_completo)}</div>${protegido ? '<span class="px-2 py-0.5 rounded-lg bg-gradient-to-r from-amber-400 via-yellow-300 to-sky-500 text-slate-950 text-[8px] font-black border border-amber-500 shadow-sm">★ SUPER ADMIN</span>' : ''}</div><div class="font-mono text-[9px] text-slate-600">DNI ${esc(a.dni)} · ${esc(rolEtiqueta)}</div><div class="text-[9px] text-slate-500">${esc(a.estab_nombre || '')}</div></div><span class="px-2 py-0.5 rounded-lg text-[8px] font-extrabold ${Number(a.activo) === 1 ? 'bg-emerald-700 text-white' : 'bg-red-700 text-white'}">${Number(a.activo) === 1 ? 'ACTIVO' : 'INACTIVO'}</span></div>
             <div class="grid grid-cols-3 gap-1 text-center text-[9px] font-mono">
               <div class="p-1 rounded-lg bg-white border border-slate-200"><div class="text-slate-500">Captadas</div><b>${Number(a.total_captadas || 0)}</b></div>
               <div class="p-1 rounded-lg bg-white border border-slate-200"><div class="text-slate-500">Últ. captura</div><b>${esc((a.ultima_captura || '—').slice(0, 10))}</b></div>
               <div class="p-1 rounded-lg bg-white border border-slate-200"><div class="text-slate-500">Últ. login</div><b>${esc((a.ultimo_login || '—').slice(0, 10))}</b></div>
             </div>
-            <div class="grid grid-cols-2 gap-1">
-              <select onchange="cambiarRolUsuario('${esc(a.dni)}', this.value)" class="min-h-[30px] px-1 rounded-lg border border-slate-300 bg-white text-[8px] font-bold">${roles.map(function (r) { return '<option value="' + esc(r.codigo) + '"' + (a.rol === r.codigo ? ' selected' : '') + '>' + esc(r.etiqueta) + '</option>'; }).join('')}</select>
+            ${protegido ? `<div class="rounded-xl border-2 border-amber-400 bg-white/70 px-2.5 py-2 text-[9px] font-bold text-slate-800 flex items-start gap-2"><span class="text-base leading-none">🔒</span><span>Cuenta Maestra Protegida. Solo el titular DNI 75100725 puede administrarla; no se permite desactivarla, rebajarla de rol ni restablecerla por terceros.</span></div>` : (esAdminPeer ? `<div class="rounded-xl border-2 border-sky-300 bg-sky-50 px-2.5 py-2 text-[9px] font-bold text-sky-900 flex items-start gap-2"><span class="text-base leading-none">🔒</span><span>Cuenta de Administrador de Estadística. Solo el Super Administrador Principal puede modificarla o desactivarla.</span></div>` : `<div class="grid grid-cols-2 gap-1">
+              <select onchange="cambiarRolUsuario('${esc(a.dni)}', this.value)" class="min-h-[30px] px-1 rounded-lg border border-slate-300 bg-white text-[8px] font-bold">${rolesEditables.map(function (r) { return '<option value="' + esc(r.codigo) + '"' + (a.rol === r.codigo ? ' selected' : '') + '>' + esc(r.etiqueta) + '</option>'; }).join('')}</select>
               <button type="button" onclick="editarAcceso('${esc(a.dni)}')" class="min-h-[30px] rounded-lg border border-slate-300 bg-white text-[8px] font-bold">Editar datos</button>
               <button type="button" onclick="cambiarEstadoAcceso('${esc(a.dni)}',${Number(a.activo) === 1 ? 0 : 1})" class="min-h-[30px] rounded-lg ${Number(a.activo) === 1 ? 'bg-red-700' : 'bg-emerald-700'} text-white text-[8px] font-bold">${Number(a.activo) === 1 ? 'Desactivar' : 'Activar'}</button>
               <button type="button" onclick="resetearClaveUsuario('${esc(a.dni)}','${esc(String(a.nombre_completo).replace(/'/g, ' '))}')" class="min-h-[30px] rounded-lg bg-amber-700 text-white text-[8px] font-bold">Clave = DNI</button>
-            </div>
+            </div>`)}
             <div class="text-[9px] text-slate-500 truncate">✉️ ${esc(a.email || '—')} · 📞 ${esc(a.celular || '—')}</div>
           </div>`; }).join('') : '<div class="p-3 text-[10px] text-slate-500 text-center">Presione “Buscar / Actualizar” para listar usuarios.</div>'}
         </div>
@@ -1606,11 +1767,14 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
     }
 
     function renderAccesoModal() {
-      const roles = (state.accesosData && state.accesosData.roles) || [
+      const roles = ((state.accesosData && state.accesosData.roles) || [
         { codigo: 'OBSTETRA', etiqueta: 'Obstetra' },
         { codigo: 'JEFA_OBSTETRAS', etiqueta: 'Jefa de Obstetras' },
         { codigo: 'ADMIN_ESTADISTICA', etiqueta: 'Administrador de Estadística' }
-      ];
+      ]).filter(function (r) {
+        const esSuper = Boolean(state.session && (state.session.esSuperAdmin || state.session.rol === 'SUPER_ADMIN'));
+        return r.codigo !== 'SUPER_ADMIN' && (esSuper || r.codigo !== 'ADMIN_ESTADISTICA');
+      });
       const form = state.accesoForm || {};
       return `<div class="fixed inset-0 z-50 bg-slate-900/60 flex items-end sm:items-center justify-center p-3">
         <div class="w-full max-w-[420px] max-h-[88vh] overflow-y-auto rounded-2xl bg-white border border-slate-300 p-4 space-y-3">
@@ -1757,7 +1921,6 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       const d = state.campoData;
       const resumen = (d && d.resumen) || { total_pacientes: 0, satisfechas: 0, insatisfechas: 0, con_99208: 0 };
       const sectores = (d && d.sectores) || [];
-      const obstetras = (d && d.obstetras) || [];
       const pag = (d && d.paginacion) || { page: 1, pages: 1, total: 0 };
       const filas = (d && d.filas) || [];
       const productividad = (d && d.productividad) || [];
@@ -1792,12 +1955,11 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
           </div>
           <div class="grid grid-cols-2 gap-2">
             <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Sector</label><select onchange="actualizarFiltroCampo('sector', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white"><option value="TODOS">Todos los sectores</option>${sectores.map(function (s) { return '<option value="' + esc(s) + '"' + (f.sector === s ? ' selected' : '') + '>' + esc(s) + '</option>'; }).join('')}</select></div>
-            ${state.session && !state.session.isAdmin && !state.session.isJefa
-              ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">Pacientes a incluir</label><select onchange="actualizarFiltroCampo('ambito', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-[10px] bg-white">
-                  <option value="establecimiento" ${f.ambito !== 'mis_captaciones' ? 'selected' : ''}>Todo mi establecimiento</option>
-                  <option value="mis_captaciones" ${f.ambito === 'mis_captaciones' ? 'selected' : ''}>Solo mis captaciones</option>
-                </select></div>`
-              : `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">Obstetra</label><select onchange="actualizarFiltroCampo('obstetra', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white"><option value="TODOS">Todas las obstetras</option>${obstetras.map(function (o) { return '<option value="' + esc(o.codpsal_obstetra) + '"' + (f.obstetra === o.codpsal_obstetra ? ' selected' : '') + '>' + esc(o.nombre_obstetra || o.codpsal_obstetra) + '</option>'; }).join('')}</select></div>`}
+            ${state.session && state.session.isAdmin
+              ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">Obstetra</label><select onchange="actualizarFiltroCampo('obstetra', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white">${opcionesObstetrasReporte(f.obstetra, 'Todas las obstetras')}</select></div>`
+              : state.session && state.session.isJefa
+                ? `<div class="space-y-1"><label class="block text-[10px] font-bold text-slate-600 mb-1">Obstetra de mi establecimiento</label><select onchange="actualizarFiltroCampo('obstetra', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white">${opcionesObstetrasReporte(f.obstetra, 'Todas las obstetras de mi establecimiento')}</select>${reporteEstablecimientoFijoHtml()}</div>`
+                : `<div class="col-span-2">${reporteObstetraFijaHtml('Reporte limitado a sus propias captaciones y a su establecimiento.')}</div>`}
           </div>
           ${state.session && state.session.isAdmin ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">Alcance</label><select onchange="actualizarFiltroCampo('alcance', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-[10px] bg-white">
             <option value="establecimiento" ${f.alcance === 'establecimiento' ? 'selected' : ''}>Mi establecimiento activo</option>
@@ -1877,10 +2039,11 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
             </select></div>
             <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Sector</label><select onchange="actualizarFiltroMetodos('sector', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white"><option value="TODOS">Todos</option>${sectores.map(function (s) { return '<option value="' + esc(s) + '"' + (f.sector === s ? ' selected' : '') + '>' + esc(s) + '</option>'; }).join('')}</select></div>
           </div>
-          ${state.session && !state.session.isAdmin && !state.session.isJefa ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">Pacientes a incluir</label><select onchange="actualizarFiltroMetodos('ambito', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-[10px] bg-white">
-            <option value="establecimiento" ${f.ambito !== 'mis_captaciones' ? 'selected' : ''}>Todo mi establecimiento</option>
-            <option value="mis_captaciones" ${f.ambito === 'mis_captaciones' ? 'selected' : ''}>Solo mis captaciones</option>
-          </select></div>` : ''}
+          ${state.session && state.session.isAdmin
+            ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">DNI obstetra (opcional)</label><input type="text" inputmode="numeric" value="${esc(f.obstetra !== 'TODOS' ? f.obstetra : '')}" placeholder="Todas las obstetras" onchange="actualizarFiltroMetodos('obstetra', this.value.replace(/\\D/g, '') || 'TODOS')" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs font-mono" /></div>`
+            : state.session && state.session.isJefa
+              ? `<div class="space-y-1"><label class="block text-[10px] font-bold text-slate-600 mb-1">Obstetra de mi establecimiento</label><select onchange="actualizarFiltroMetodos('obstetra', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white">${opcionesObstetrasReporte(f.obstetra, 'Todas las obstetras de mi establecimiento')}</select>${reporteEstablecimientoFijoHtml()}</div>`
+              : `<div class="col-span-2">${reporteObstetraFijaHtml('Indicadores limitados a sus propias captaciones y a su establecimiento.')}</div>`}
           <button type="button" onclick="cargarReporteMetodos(true)" ${state.metodosLoading ? 'disabled' : ''} class="w-full min-h-[46px] rounded-xl bg-sky-700 hover:bg-sky-800 text-white text-xs font-bold disabled:opacity-60">${state.metodosLoading ? 'Consultando indicadores...' : 'Aplicar filtros y actualizar'}</button>
           ${state.metodosError ? '<div class="p-3 rounded-xl bg-red-50 border border-red-200 text-[11px] text-red-800">' + esc(state.metodosError) + '</div>' : ''}
         </div>
@@ -2914,8 +3077,13 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
           </select></div>` : ''}
           <div class="grid grid-cols-2 gap-2">
             <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Mes / Año rápido</label><input type="month" onchange="aplicarMesProductividad(this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs font-mono" /></div>
-            <div><label class="block text-[10px] font-bold text-slate-600 mb-1">DNI obstetra (opcional)</label><input id="prod-obstetra" type="text" inputmode="numeric" value="${esc(f.obstetra !== 'TODOS' ? f.obstetra : '')}" placeholder="TODOS" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs font-mono" /></div>
+            ${state.session && state.session.isAdmin
+              ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">DNI obstetra (opcional)</label><input id="prod-obstetra" type="text" inputmode="numeric" value="${esc(f.obstetra !== 'TODOS' ? f.obstetra : '')}" placeholder="TODOS" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs font-mono" /></div>`
+              : state.session && state.session.isJefa
+                ? `<div class="space-y-1"><label class="block text-[10px] font-bold text-slate-600 mb-1">Obstetra de mi establecimiento</label><select id="prod-obstetra" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-[10px] bg-white">${opcionesObstetrasReporte(f.obstetra, 'Todas las obstetras de mi establecimiento')}</select>${reporteEstablecimientoFijoHtml()}</div>`
+                : ''}
           </div>
+          ${state.session && !state.session.isAdmin && !state.session.isJefa ? reporteObstetraFijaHtml('Productividad limitada a sus propias captaciones y a su establecimiento.') : ''}
           <button type="button" onclick="buscarProductividad()" ${state.productividadLoading ? 'disabled' : ''} class="w-full min-h-[46px] rounded-xl bg-sky-700 hover:bg-sky-800 disabled:opacity-60 text-white text-xs font-bold">${state.productividadLoading ? 'Consultando productividad...' : 'Aplicar filtros y actualizar'}</button>
           ${state.productividadError ? '<div class="p-3 rounded-xl bg-red-50 border border-red-200 text-[11px] text-red-800">' + esc(state.productividadError) + '</div>' : ''}
         </div>
@@ -2964,6 +3132,11 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
             <option value="establecimiento" ${state.padronAlcance === 'establecimiento' ? 'selected' : ''}>Mi establecimiento activo</option>
             <option value="red" ${state.padronAlcance === 'red' ? 'selected' : ''}>Toda la Red (53 IPRESS)</option>
           </select></div>` : ''}
+          ${state.session && state.session.isAdmin
+            ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">DNI obstetra (opcional)</label><input type="text" inputmode="numeric" value="${esc(state.padronObstetra !== 'TODOS' ? state.padronObstetra : '')}" placeholder="Todas las obstetras" onchange="setPadronObstetra(this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs font-mono" /></div>`
+            : state.session && state.session.isJefa
+              ? `<div class="space-y-1"><label class="block text-[10px] font-bold text-slate-600 mb-1">Obstetra de mi establecimiento</label><select onchange="setPadronObstetra(this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-[10px] bg-white">${opcionesObstetrasReporte(state.padronObstetra, 'Todas las obstetras de mi establecimiento')}</select>${reporteEstablecimientoFijoHtml()}</div>`
+              : `<div>${reporteObstetraFijaHtml('Padrón limitado a sus propias captaciones y a su establecimiento.')}</div>`}
           <button type="button" onclick="cargarReportePadron(true)" ${state.padronLoading ? 'disabled' : ''} class="w-full min-h-[44px] rounded-xl bg-sky-700 hover:bg-sky-800 disabled:opacity-60 text-white text-xs font-bold">${state.padronLoading ? 'Consultando padrón...' : 'Actualizar padrón de llamadas'}</button>
           ${state.padronError ? '<div class="p-3 rounded-xl bg-red-50 border border-red-200 text-[11px] text-red-800">' + esc(state.padronError) + '</div>' : ''}
         </div>
@@ -2991,6 +3164,13 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       cargarReportePadron(true);
     }
 
+    function setPadronObstetra(valor) {
+      const limpio = String(valor || '').replace(/[^0-9A-Za-z]/g, '');
+      state.padronObstetra = limpio && limpio !== 'TODOS' ? limpio : 'TODOS';
+      invalidarCacheAlertas();
+      cargarReportePadron(true);
+    }
+
     async function buscarProductividad() {
       invalidarCacheAlertas();
       const desde = document.getElementById('prod-desde');
@@ -3000,7 +3180,11 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       if (hasta && hasta.value) state.productividadFiltros.fecha_hasta = hasta.value;
       const alcance = document.getElementById('prod-alcance');
       if (alcance && alcance.value) state.productividadFiltros.alcance = alcance.value;
-      state.productividadFiltros.obstetra = obstetra && obstetra.value.trim() ? obstetra.value.replace(/\D/g, '') : 'TODOS';
+      if (obstetra && obstetra.value.trim()) {
+        state.productividadFiltros.obstetra = obstetra.value.replace(/\D/g, '') || 'TODOS';
+      } else if (!state.session || !state.session.isJefa) {
+        state.productividadFiltros.obstetra = 'TODOS';
+      }
       state.productividadFiltros.page = 1;
       await cargarReporteProductividad(true);
     }
@@ -3062,7 +3246,11 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       state.padronError = '';
       if (mostrarSkeleton) render();
       try {
-        state.padronData = await apiGet('reporte_padron', { grupo: state.padronGrupo || 'todas', alcance: state.padronAlcance || 'establecimiento' });
+        state.padronData = await apiGet('reporte_padron', {
+          grupo: state.padronGrupo || 'todas',
+          alcance: state.padronAlcance || 'establecimiento',
+          obstetra: state.padronObstetra || 'TODOS'
+        });
       } catch (error) {
         state.padronError = error.message;
       } finally {
@@ -3488,7 +3676,8 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         : (cap.distrito || distritoActual || his.DESC_DIST || 'HUARAL');
       const isOtros = String(distrito).indexOf('OTROS:') === 0;
       return {
-        dni: data.dni || pre.dni || his.DNI || cap.dni || '',
+        dni: (data.documento && data.documento.numero) || data.dni || pre.dni || his.DNI || cap.dni || '',
+        tipo_doc: (data.documento && data.documento.tipo_doc) || data.tipo_doc || cap.tipo_doc || pre.tipo_doc || 'DNI',
         apellido_paterno: cap.apellido_paterno || pre.apellido_paterno || his.Apellido_p || '',
         apellido_materno: cap.apellido_materno || pre.apellido_materno || his.Apellido_m || '',
         nombres: cap.nombres || pre.nombres || his.Dnombres || his.Pnombre || '',
@@ -3511,16 +3700,31 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
 
     function currentDni() {
       const input = document.getElementById('f-dni');
-      return input ? input.value.replace(/\D/g, '') : '';
+      return normalizarDocumentoPorTipo(input ? input.value : '', currentTipoDoc());
     }
 
     async function validarDni() {
+      const tipo = currentTipoDoc();
       const dni = currentDni();
-      if (dni.length < 8) { state.feedback = { type: 'error', text: 'Ingrese un DNI válido de 8 dígitos.' }; render(); return; }
+      const cfg = docConfig(tipo);
+      const patron = new RegExp('^' + cfg.pattern + '$');
+      if (!patron.test(dni)) {
+        const mensajes = {
+          DNI: 'Ingrese un DNI válido de exactamente 8 dígitos numéricos.',
+          CE: 'El Carné de Extranjería debe tener entre 9 y 12 caracteres alfanuméricos.',
+          PASAPORTE: 'El Pasaporte debe tener entre 6 y 12 caracteres alfanuméricos.',
+          PTP: 'El PTP debe tener entre 6 y 15 caracteres alfanuméricos.',
+          CNV: 'El documento CNV/SIS debe tener entre 6 y 15 caracteres alfanuméricos.'
+        };
+        state.feedback = { type: 'error', text: mensajes[tipo] || 'Ingrese un documento de identidad válido.' };
+        render();
+        return;
+      }
       state.feedback = null;
       try {
-        const data = await apiGet('lookup_dni', { dni: dni, cod_estab: state.session.cod_estab });
+        const data = await apiGet('lookup_dni', { dni: dni, tipo_doc: tipo, cod_estab: state.session.cod_estab });
         data.dni = dni;
+        data.tipo_doc = tipo;
         state.hisLookup = data;
         state.estadoExplicito = null;
         state.formDraft = fillDraftFromLookup(data);
@@ -3551,6 +3755,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       const otros = document.getElementById('f-dist-otros');
       const draft = {
         dni: currentDni(),
+        tipo_doc: currentTipoDoc(),
         apellido_paterno: document.getElementById('f-app').value.trim(),
         apellido_materno: document.getElementById('f-apm').value.trim(),
         nombres: document.getElementById('f-nom').value.trim(),
@@ -3590,6 +3795,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       const draft = state.formDraft || {};
       const payload = {
         dni: draft.dni || pre.dni || currentDni(),
+        tipo_doc: draft.tipo_doc || pre.tipo_doc || currentTipoDoc(),
         codpsal_obstetra: state.session.dni,
         atencion_99208: Boolean(state.hisLookup.atencion99208 && state.hisLookup.atencion99208.tieneCodigo99208),
         pase_ups: true

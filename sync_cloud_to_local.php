@@ -24,7 +24,10 @@
  *   - local-to-cloud sube SOLO las tablas originales y NUNCA crea tablas en el
  *     servidor del hospital. Las tablas `app_*`, `pacientes_sin_metodo` y
  *     `auditoria_seguridad_app` jamás salen de la nube ni se replican al HIS.
- *   - NUNCA ejecuta CREATE, ALTER, DROP, TRUNCATE ni DELETE.
+ *   - NUNCA ejecuta CREATE, ALTER, DROP, TRUNCATE ni DELETE sobre las tablas
+ *     del HIS. La única excepción es una migración idempotente y aditiva
+ *     (ADD COLUMN IF NOT EXISTS) sobre la tabla PROPIA `pacientes_sin_metodo`
+ *     para asegurar la columna `tipo_doc` del soporte multi-documento.
  *   - INSERT ... ON DUPLICATE KEY UPDATE (idempotente) y lotes con LIMIT estricto.
  *   - Incremental local-to-cloud: `ANO >= año actual - 1` en tablas clínicas y
  *     keyset por PK en tablas pequeñas; `--full` fuerza la carga completa.
@@ -222,6 +225,34 @@ function table_exists(PDO $pdo, string $table): bool
     $stmt = $pdo->prepare('SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :t');
     $stmt->execute([':t' => $table]);
     return (int)$stmt->fetchColumn() > 0;
+}
+
+/**
+ * Migración aditiva y estrictamente acotada a la tabla PROPIA de la app.
+ * Asegura `pacientes_sin_metodo.tipo_doc` para el soporte multi-documento
+ * (DNI, CE, Pasaporte, PTP, CNV/SIS). Nunca toca tablas del HIS.
+ *
+ * @return array<string, mixed>
+ */
+function sync_asegurar_esquema_app(PDO $local): array
+{
+    $tabla = 'pacientes_sin_metodo';
+    if (!table_exists($local, $tabla)) {
+        return ['tabla' => $tabla, 'aplicado' => false, 'motivo' => 'tabla_no_existe'];
+    }
+    try {
+        if (in_array('tipo_doc', table_columns($local, $tabla), true)) {
+            return ['tabla' => $tabla, 'aplicado' => false, 'motivo' => 'columna_ya_existe'];
+        }
+        $local->exec(
+            "ALTER TABLE `pacientes_sin_metodo` "
+            . "ADD COLUMN `tipo_doc` varchar(15) CHARACTER SET utf8 COLLATE utf8_general_ci "
+            . "NOT NULL DEFAULT 'DNI' AFTER `dni`"
+        );
+        return ['tabla' => $tabla, 'aplicado' => true, 'motivo' => 'columna_creada'];
+    } catch (Throwable $e) {
+        return ['tabla' => $tabla, 'aplicado' => false, 'motivo' => 'error', 'detalle' => $e->getMessage()];
+    }
 }
 
 /** @return array<int, string> */
@@ -521,10 +552,15 @@ $report = [
     'sinceYear' => $sinceYear,
     'dump' => $dumpPath !== '' ? $dumpPath : null,
     'neverSynced' => $neverTables,
+    'schemaMigration' => [],
     'directions' => [],
     'tables' => [],
     'errors' => [],
 ];
+
+if (!$dryRun) {
+    $report['schemaMigration'] = sync_asegurar_esquema_app($local);
+}
 
 $dumpHandle = null;
 if ($dumpPath !== '') {

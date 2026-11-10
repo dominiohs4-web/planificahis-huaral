@@ -19,6 +19,10 @@ declare(strict_types=1);
 require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/catalogo_establecimientos.php';
 
+if (!defined('SUPER_ADMIN_DNI')) {
+    define('SUPER_ADMIN_DNI', '75100725');
+}
+
 // ---------------------------------------------------------------------------
 // Cabeceras de seguridad clínica (OWASP ASVS L3) y CORS controlado
 // ---------------------------------------------------------------------------
@@ -173,13 +177,14 @@ function require_session(): array
         ]);
     }
     $dni = (string)($session['dni'] ?? '');
+    $esSuperAdmin = hospital_es_super_admin($dni);
     $acceso = $dni !== '' ? HospitalHuaralDB::accesoUsuario($dni) : null;
-    if ($acceso === null) {
+    if ($acceso === null && !$esSuperAdmin) {
         json_error('Su cuenta no existe en la tabla única app_usuarios. Solicite al Administrador de Estadística que la active.', 403, [
             'code' => 'ACCESS_NOT_FOUND',
         ]);
     }
-    if (!HospitalHuaralDB::accesoActivo($dni)) {
+    if (!$esSuperAdmin && !HospitalHuaralDB::accesoActivo($dni)) {
         json_error('Su acceso a la aplicación fue desactivado. Contacte al Administrador de Estadística.', 403, [
             'code' => 'ACCESS_DISABLED',
         ]);
@@ -230,9 +235,10 @@ function session_profile_payload(PDO $pdo, array $session): array
         'verified2FA' => false,
         'platform' => (string)($session['platform'] ?? 'Web Desktop'),
         'isAdmin' => $esAdmin,
+        'esSuperAdmin' => hospital_es_super_admin($dni),
         'isJefa' => es_jefa_session(['dni' => $dni]),
-        'puedeVerRed' => $esAdmin,
-        'puedeCambiarEstablecimiento' => $esAdmin,
+        'puedeVerRed' => puede_ver_red(['dni' => $dni]),
+        'puedeCambiarEstablecimiento' => puede_ver_red(['dni' => $dni]),
         'puedeGestionarAccesos' => puede_gestionar_accesos(['dni' => $dni]),
         'puedeResetearObstetra' => puede_resetear_obstetra(['dni' => $dni]),
         'accesoActivo' => HospitalHuaralDB::accesoActivo($dni),
@@ -241,10 +247,132 @@ function session_profile_payload(PDO $pdo, array $session): array
     ];
 }
 
+function rol_sesion(array $session): string
+{
+    return HospitalHuaralDB::rolUsuario((string)($session['dni'] ?? ''));
+}
+
+function es_super_admin_session(array $session): bool
+{
+    return hospital_es_super_admin((string)($session['dni'] ?? ''));
+}
+
+function es_admin_superior_session(array $session): bool
+{
+    return hospital_es_rol_admin_superior(rol_sesion($session));
+}
+
+function es_obstetra_session(array $session): bool
+{
+    return rol_sesion($session) === 'OBSTETRA';
+}
+
+/**
+ * Bloquea cualquier intento de un actor distinto de la Cuenta Maestra de
+ * modificar o desactivar el DNI 75100725. Registra auditoría forense y
+ * responde con el JSON exacto exigido por la jefatura.
+ */
+function denegar_superadmin_protegido(array $session, string $dniObjetivo, string $contexto): void
+{
+    if (!hospital_es_super_admin($dniObjetivo)) {
+        return;
+    }
+    if (hospital_es_super_admin((string)($session['dni'] ?? ''))) {
+        return;
+    }
+    HospitalHuaralDB::registrarAuditoria(
+        (string)($session['dni'] ?? ''),
+        'INTENTO_MODIFICAR_SUPERADMIN',
+        'Intento bloqueado de ' . $contexto . ' sobre la Cuenta Maestra DNI ' . SUPER_ADMIN_DNI . '.',
+        (string)($session['cod_estab'] ?? ''),
+        (string)($session['platform'] ?? 'Web Desktop')
+    );
+    json_out([
+        'ok' => false,
+        'error' => 'ACCESO DENEGADO: Usted no tiene privilegios para modificar datos ni desactivar la cuenta del Super Administrador Principal del Sistema.',
+    ], 403);
+}
+
+/** ¿La cuenta objetivo es otro Administrador de Estadística? */
+function es_admin_estadistica_objetivo(?array $acceso): bool
+{
+    if ($acceso === null) {
+        return false;
+    }
+    return strtoupper(trim((string)($acceso['rol'] ?? ''))) === 'ADMIN_ESTADISTICA';
+}
+
+/**
+ * Normaliza el tipo de documento a las siglas usadas por la PWA.
+ * Acepta también los códigos COD_DOC del HIS (1, 2, 3, 4, 6).
+ */
+function tipo_documento_normalizado(?string $tipo): string
+{
+    $tipo = strtoupper(trim((string)$tipo));
+    return match ($tipo) {
+        '', 'DNI', '1', 'DOCUMENTO NACIONAL DE IDENTIDAD' => $tipo === '' ? '' : 'DNI',
+        'CE', 'C.E.', 'CARNET DE EXTRANJERIA', 'CARNET DE EXTRANJERÍA', '2' => 'CE',
+        'PASAPORTE', 'PASSPORT', '3' => 'PASAPORTE',
+        'PTP', 'PERMISO TEMPORAL DE PERMANENCIA', '4' => 'PTP',
+        'CNV', '6', 'OTRO', 'OTROS', 'SIS', 'CNV/SIS' => 'CNV',
+        default => $tipo,
+    };
+}
+
+/**
+ * Valida y normaliza un documento según su tipo.
+ *
+ * @return array{ok: bool, tipo: string, documento: string, error: string}
+ */
+function validar_documento_paciente(string $documento, ?string $tipo = null): array
+{
+    $documento = strtoupper(preg_replace('/\s+/', '', trim($documento)) ?? '');
+    $documento = preg_replace('/[^0-9A-Z\-]/', '', $documento) ?? '';
+    $tipo = tipo_documento_normalizado($tipo);
+    if ($tipo === '') {
+        $tipo = preg_match('/^[0-9]{8}$/', $documento) ? 'DNI' : 'PASAPORTE';
+    }
+    $patrones = [
+        'DNI' => '/^[0-9]{8}$/',
+        'CE' => '/^[A-Z0-9]{9,12}$/',
+        'PASAPORTE' => '/^[A-Z0-9]{6,12}$/',
+        'PTP' => '/^[A-Z0-9\-]{6,15}$/',
+        'CNV' => '/^[A-Z0-9\-]{6,15}$/',
+    ];
+    $patron = $patrones[$tipo] ?? null;
+    if ($patron === null) {
+        return ['ok' => false, 'tipo' => $tipo, 'documento' => $documento, 'error' => 'Tipo de documento no válido.'];
+    }
+    if ($documento === '' || !preg_match($patron, $documento)) {
+        $mensajes = [
+            'DNI' => 'El DNI debe tener exactamente 8 dígitos numéricos.',
+            'CE' => 'El Carné de Extranjería debe tener entre 9 y 12 caracteres alfanuméricos.',
+            'PASAPORTE' => 'El Pasaporte debe tener entre 6 y 12 caracteres alfanuméricos.',
+            'PTP' => 'El Permiso Temporal de Permanencia debe tener entre 6 y 15 caracteres alfanuméricos.',
+            'CNV' => 'El documento CNV/SIS debe tener entre 6 y 15 caracteres alfanuméricos.',
+        ];
+        return ['ok' => false, 'tipo' => $tipo, 'documento' => $documento, 'error' => $mensajes[$tipo] ?? 'Documento no válido.'];
+    }
+    return ['ok' => true, 'tipo' => $tipo, 'documento' => $documento, 'error' => ''];
+}
+
+/** Etiqueta legible del tipo de documento. */
+function etiqueta_tipo_documento(?string $tipo): string
+{
+    return match (tipo_documento_normalizado($tipo)) {
+        'DNI' => 'DNI',
+        'CE' => 'Carné de Extranjería',
+        'PASAPORTE' => 'Pasaporte',
+        'PTP' => 'Permiso Temporal de Permanencia (PTP)',
+        'CNV' => 'CNV / SIS u otro documento',
+        default => 'Documento de identidad',
+    };
+}
+
 function is_admin_session(array $session): bool
 {
     $dni = (string)($session['dni'] ?? '');
-    if ($dni !== '' && HospitalHuaralDB::rolUsuario($dni) === 'ADMIN_ESTADISTICA') {
+    if ($dni !== '' && hospital_es_rol_admin_superior(HospitalHuaralDB::rolUsuario($dni))) {
         return true;
     }
     return in_array($dni, array_map('strval', array_filter([
@@ -313,6 +441,62 @@ function variantes_codpsal_dni(string $dni): array
 function es_alcance_red(array $session, string $alcance): bool
 {
     return is_admin_session($session) && strtolower(trim($alcance)) === 'red';
+}
+
+/**
+ * Resuelve el alcance efectivo de CUALQUIER reporte aplicando la jerarquía:
+ *  - OBSTETRA: siempre su propio DNI y su establecimiento (ignora parámetros).
+ *  - JEFA_OBSTETRAS: siempre su establecimiento; puede elegir una obstetra
+ *    suya o "TODAS", pero nunca otra IPRESS ni alcance de red.
+ *  - ADMIN_ESTADISTICA / SUPER_ADMIN: red completa o establecimiento, con
+ *    filtro opcional por obstetra.
+ *
+ * @return array{
+ *   solo_mis: bool, dni_obstetra: string, codigos_estab: array<int, string>,
+ *   alcance_red: bool, rol: string, es_jefa: bool, es_obstetra: bool
+ * }
+ */
+function resolver_alcance_reporte(array $session, string $obstetraSolicitado = '', string $alcanceSolicitado = 'establecimiento'): array
+{
+    $rol = rol_sesion($session);
+    $esJefa = $rol === 'JEFA_OBSTETRAS';
+    $esObstetra = !puede_ver_red($session) && !$esJefa;
+    $filtro = preg_replace('/[^0-9A-Za-z]/', '', $obstetraSolicitado) ?? '';
+    if ($filtro === 'TODOS') {
+        $filtro = '';
+    }
+    if ($esObstetra) {
+        return [
+            'solo_mis' => true,
+            'dni_obstetra' => (string)($session['dni'] ?? ''),
+            'codigos_estab' => codigos_establecimiento_sesion($session),
+            'alcance_red' => false,
+            'rol' => $rol,
+            'es_jefa' => false,
+            'es_obstetra' => true,
+        ];
+    }
+    if ($esJefa) {
+        return [
+            'solo_mis' => false,
+            'dni_obstetra' => $filtro,
+            'codigos_estab' => codigos_establecimiento_sesion($session),
+            'alcance_red' => false,
+            'rol' => $rol,
+            'es_jefa' => true,
+            'es_obstetra' => false,
+        ];
+    }
+    $alcanceRed = es_alcance_red($session, $alcanceSolicitado);
+    return [
+        'solo_mis' => false,
+        'dni_obstetra' => $filtro,
+        'codigos_estab' => $alcanceRed ? [] : codigos_establecimiento_sesion($session),
+        'alcance_red' => $alcanceRed,
+        'rol' => $rol,
+        'es_jefa' => false,
+        'es_obstetra' => false,
+    ];
 }
 
 /**
@@ -551,7 +735,8 @@ if ($action === 'session_restore' || $action === 'check_session') {
         json_error('No existe una sesión persistente válida.', 401, ['code' => 'AUTH_REQUIRED']);
     }
     $accesoRestore = HospitalHuaralDB::accesoUsuario((string)$session['dni']);
-    if ($accesoRestore === null || !HospitalHuaralDB::accesoActivo((string)$session['dni'])) {
+    $esSuperRestore = hospital_es_super_admin((string)$session['dni']);
+    if ((!$esSuperRestore && $accesoRestore === null) || (!$esSuperRestore && !HospitalHuaralDB::accesoActivo((string)$session['dni']))) {
         HospitalHuaralDB::revokeSession((string)$session['token']);
         json_error('Su cuenta no está activa en app_usuarios. Inicie sesión o contacte al Administrador de Estadística.', 403, ['code' => 'ACCESS_DISABLED']);
     }
@@ -600,7 +785,7 @@ if ($action === 'login') {
                 ':dni' => $dni,
                 ':nombre' => (string)$preactivado['nombre'],
                 ':rol' => (string)$preactivado['rol'],
-                ':red' => $preactivado['rol'] === 'ADMIN_ESTADISTICA' ? 1 : 0,
+                ':red' => hospital_es_rol_admin_superior((string)$preactivado['rol']) ? 1 : 0,
             ]);
             HospitalHuaralDB::olvidarAcceso($dni);
             $stmt->execute([':dni' => $dni]);
@@ -615,7 +800,7 @@ if ($action === 'login') {
         // Respuesta genérica: no se revela si el DNI existe (anti-enumeración).
         json_error('DNI o contraseña incorrectos.', 401, ['remainingAttempts' => max(0, 4 - (int)$limit['hits'])]);
     }
-    if ((int)($user['activo'] ?? 1) !== 1) {
+    if ((int)($user['activo'] ?? 1) !== 1 && !hospital_es_super_admin($dni)) {
         json_error('La cuenta se encuentra inactiva. Contacte a la Unidad de Estadística e Informática.', 403, [
             'code' => 'ACCESS_DISABLED',
         ]);
@@ -682,8 +867,8 @@ if ($action === 'login') {
     if ($nombreCompleto === '') {
         $nombreCompleto = 'OBSTETRA ' . $dni;
     }
-    $rol = strtoupper(trim((string)($user['rol'] ?? ''))) ?: 'OBSTETRA';
-    $esAdmin = $rol === 'ADMIN_ESTADISTICA';
+    $rol = HospitalHuaralDB::rolUsuario($dni);
+    $esAdmin = hospital_es_rol_admin_superior($rol);
     $esJefa = $rol === 'JEFA_OBSTETRAS';
 
     // LOGIN DIRECTO DE UN SOLO PASO: credenciales válidas => sesión persistente
@@ -715,6 +900,7 @@ if ($action === 'login') {
             'verified2FA' => false,
             'platform' => $platform,
             'isAdmin' => $esAdmin,
+            'esSuperAdmin' => hospital_es_super_admin($dni),
             'isJefa' => $esJefa,
             'puedeVerRed' => $esAdmin,
             'puedeCambiarEstablecimiento' => $esAdmin,
@@ -1001,6 +1187,13 @@ if ($action === 'recuperar_clave') {
         HospitalHuaralDB::registrarAuditoria($dni, 'AUTH_RECOVERY_FAILED', 'Recuperación rechazada: DNI sin cuenta en app_usuarios.', '', $platform);
         json_error('Los datos de recuperación no coinciden. Verifique DNI, PIN y establecimiento.', 401);
     }
+    if (hospital_es_super_admin($dni)) {
+        HospitalHuaralDB::registrarAuditoria($dni, 'INTENTO_MODIFICAR_SUPERADMIN', 'Intento bloqueado de recuperación/restablecimiento de la Cuenta Maestra.', '', $platform);
+        json_out([
+            'ok' => false,
+            'error' => 'ACCESO DENEGADO: Usted no tiene privilegios para modificar datos ni desactivar la cuenta del Super Administrador Principal del Sistema.',
+        ], 403);
+    }
     if ((int)($usuario['activo'] ?? 1) !== 1) {
         json_error('Su cuenta está desactivada. Contacte al Administrador de Estadística.', 403, ['code' => 'ACCESS_DISABLED']);
     }
@@ -1254,6 +1447,12 @@ if ($action === 'listar_accesos') {
 
     foreach ($accesos as &$acceso) {
         $dniAcceso = (string)($acceso['dni'] ?? '');
+        if (hospital_es_super_admin($dniAcceso)) {
+            $acceso['rol'] = 'SUPER_ADMIN';
+            $acceso['activo'] = 1;
+            $acceso['puede_ver_red'] = 1;
+            $acceso['protegido'] = true;
+        }
         $acceso['rol_etiqueta'] = HospitalHuaralDB::rolEtiqueta((string)$acceso['rol']);
         $acceso['estab_nombre'] = hospital_nombre_establecimiento((string)$acceso['cod_estab']);
         $acceso['pin_configurado'] = (string)($acceso['pin_recuperacion'] ?? '') !== '';
@@ -1267,6 +1466,7 @@ if ($action === 'listar_accesos') {
         'success' => true,
         'accesos' => $accesos,
         'roles' => [
+            ['codigo' => 'SUPER_ADMIN', 'etiqueta' => 'Super Administrador del Sistema'],
             ['codigo' => 'OBSTETRA', 'etiqueta' => 'Obstetra'],
             ['codigo' => 'JEFA_OBSTETRAS', 'etiqueta' => 'Jefa de Obstetras'],
             ['codigo' => 'ADMIN_ESTADISTICA', 'etiqueta' => 'Administrador de Estadística'],
@@ -1337,7 +1537,9 @@ if ($action === 'guardar_acceso') {
     if (!puede_gestionar_accesos($session)) {
         json_error('Solo el Administrador de Estadística puede gestionar accesos.', 403, ['code' => 'ADMIN_REQUIRED']);
     }
+    $actorEsSuperAdmin = hospital_es_super_admin((string)$session['dni']);
     $dni = preg_replace('/[^0-9]/', '', (string)($body['dni'] ?? '')) ?? '';
+    denegar_superadmin_protegido($session, $dni, 'guardar/editar el acceso');
     $nombres = strtoupper(HospitalHuaralDB::sanitizeText($body['nombres'] ?? '', 120));
     $apellidoPaterno = strtoupper(HospitalHuaralDB::sanitizeText($body['apellido_paterno'] ?? '', 80));
     $apellidoMaterno = strtoupper(HospitalHuaralDB::sanitizeText($body['apellido_materno'] ?? '', 80));
@@ -1353,8 +1555,14 @@ if ($action === 'guardar_acceso') {
     if (strlen($dni) < 8 || strlen($dni) > 11) {
         json_error('El DNI debe tener entre 8 y 11 dígitos.', 400);
     }
-    if (!in_array($rol, ['ADMIN_ESTADISTICA', 'JEFA_OBSTETRAS', 'OBSTETRA'], true)) {
+    if (!in_array($rol, ['SUPER_ADMIN', 'ADMIN_ESTADISTICA', 'JEFA_OBSTETRAS', 'OBSTETRA'], true)) {
         json_error('Rol inválido. Use OBSTETRA, JEFA_OBSTETRAS o ADMIN_ESTADISTICA.', 400);
+    }
+    if ($rol === 'SUPER_ADMIN' && !hospital_es_super_admin($dni)) {
+        json_error('El rol SUPER_ADMIN está reservado para la Cuenta Maestra Principal del Sistema.', 403, ['code' => 'SUPERADMIN_RESERVED']);
+    }
+    if ($rol === 'ADMIN_ESTADISTICA' && !$actorEsSuperAdmin) {
+        json_error('Solo el Super Administrador puede asignar el rol de Administrador de Estadística.', 403, ['code' => 'ADMIN_REQUIRED']);
     }
     if (hospital_establecimiento($codEstab) === null) {
         json_error('Seleccione un establecimiento válido de la Red Huaral-Chancay.', 400);
@@ -1379,9 +1587,40 @@ if ($action === 'guardar_acceso') {
         $nombre = 'OBSTETRA ' . $dni;
     }
     $pinHash = $pin !== '' ? HospitalHuaralDB::hashPassword($pin) : '';
-    $puedeVerRed = $rol === 'ADMIN_ESTADISTICA' ? 1 : 0;
+    $puedeVerRed = hospital_es_rol_admin_superior($rol) ? 1 : 0;
 
     $existente = HospitalHuaralDB::accesoUsuario($dni);
+    if (!$actorEsSuperAdmin && $dni !== (string)$session['dni'] && es_admin_estadistica_objetivo($existente)) {
+        HospitalHuaralDB::registrarAuditoria(
+            (string)$session['dni'],
+            'INTENTO_MODIFICAR_ADMIN',
+            'Intento bloqueado de modificar a otro Administrador de Estadística (DNI ' . $dni . ').',
+            (string)$session['cod_estab'],
+            (string)$session['platform']
+        );
+        json_error('Solo el Super Administrador Principal puede modificar los datos de otro Administrador de Estadística.', 403, [
+            'code' => 'ADMIN_PEER_DENEGADO',
+        ]);
+    }
+    if (hospital_es_super_admin($dni)) {
+        // La Cuenta Maestra nunca puede rebajarse ni desactivarse a sí misma.
+        if ($rol !== 'SUPER_ADMIN' || $activo !== 1) {
+            HospitalHuaralDB::registrarAuditoria(
+                (string)$session['dni'],
+                'INTENTO_MODIFICAR_SUPERADMIN',
+                'La Cuenta Maestra intentó rebajar su rol o desactivarse a sí misma.',
+                (string)$session['cod_estab'],
+                (string)$session['platform']
+            );
+            json_out([
+                'ok' => false,
+                'error' => 'La Cuenta Maestra del Sistema no puede rebajarse de rol ni desactivarse a sí misma.',
+            ], 403);
+        }
+        $rol = 'SUPER_ADMIN';
+        $puedeVerRed = 1;
+        $activo = 1;
+    }
     if ($existente === null) {
         $pdo->prepare("
             INSERT INTO app_usuarios
@@ -1478,10 +1717,38 @@ if ($action === 'cambiar_estado_acceso') {
     if (!puede_gestionar_accesos($session)) {
         json_error('Solo el Administrador de Estadística puede gestionar accesos.', 403, ['code' => 'ADMIN_REQUIRED']);
     }
+    $actorEsSuperAdmin = hospital_es_super_admin((string)$session['dni']);
     $dni = preg_replace('/[^0-9]/', '', (string)($body['dni'] ?? '')) ?? '';
     $activo = !empty($body['activo']) ? 1 : 0;
     if ($dni === '') {
         json_error('DNI inválido.', 400);
+    }
+    denegar_superadmin_protegido($session, $dni, 'cambiar el estado del acceso');
+    $accesoObjetivo = HospitalHuaralDB::accesoUsuario($dni);
+    if (!$actorEsSuperAdmin && $dni !== (string)$session['dni'] && es_admin_estadistica_objetivo($accesoObjetivo)) {
+        HospitalHuaralDB::registrarAuditoria(
+            (string)$session['dni'],
+            'INTENTO_MODIFICAR_ADMIN',
+            'Intento bloqueado de cambiar el estado de otro Administrador de Estadística (DNI ' . $dni . ').',
+            (string)$session['cod_estab'],
+            (string)$session['platform']
+        );
+        json_error('Solo el Super Administrador Principal puede desactivar o modificar a otro Administrador de Estadística.', 403, [
+            'code' => 'ADMIN_PEER_DENEGADO',
+        ]);
+    }
+    if (hospital_es_super_admin($dni) && $activo === 0) {
+        HospitalHuaralDB::registrarAuditoria(
+            (string)$session['dni'],
+            'INTENTO_MODIFICAR_SUPERADMIN',
+            'Intento de desactivar la Cuenta Maestra DNI ' . SUPER_ADMIN_DNI . '.',
+            (string)$session['cod_estab'],
+            (string)$session['platform']
+        );
+        json_out([
+            'ok' => false,
+            'error' => 'La Cuenta Maestra Principal del Sistema no puede ser desactivada.',
+        ], 403);
     }
     if ($dni === (string)$session['dni'] && $activo === 0) {
         json_error('No puede desactivar su propio acceso de administrador.', 409);
@@ -1515,7 +1782,21 @@ if ($action === 'resetear_clave_usuario' || $action === 'resetear_clave_obstetra
     if ($acceso === null) {
         json_error('No se encontró una cuenta de app_usuarios con ese DNI.', 404);
     }
+    denegar_superadmin_protegido($session, $dni, 'restablecer la clave');
+    $actorEsSuperAdmin = hospital_es_super_admin((string)$session['dni']);
     $rolObjetivo = strtoupper(trim((string)($acceso['rol'] ?? 'OBSTETRA')));
+    if (!$actorEsSuperAdmin && $dni !== (string)$session['dni'] && $rolObjetivo === 'ADMIN_ESTADISTICA') {
+        HospitalHuaralDB::registrarAuditoria(
+            (string)$session['dni'],
+            'INTENTO_MODIFICAR_ADMIN',
+            'Intento bloqueado de restablecer la clave de otro Administrador de Estadística (DNI ' . $dni . ').',
+            (string)$session['cod_estab'],
+            (string)$session['platform']
+        );
+        json_error('Solo el Super Administrador Principal puede restablecer la clave de otro Administrador de Estadística.', 403, [
+            'code' => 'ADMIN_PEER_DENEGADO',
+        ]);
+    }
     if (!is_admin_session($session)) {
         if ($rolObjetivo !== 'OBSTETRA') {
             json_error('La Jefatura de Obstetras solo puede restablecer la clave de obstetras de su establecimiento.', 403);
@@ -1585,15 +1866,16 @@ if ($action === 'overview') {
         $wherePacientes[] = 'p.cod_estab IN (' . implode(',', array_fill(0, count($codigosEstabSesion), '?')) . ')';
         $scopeParamsPacientes = array_merge($scopeParamsPacientes, $codigosEstabSesion);
     }
+    // Aislamiento estricto de la pestaña Pacientes:
+    //  - OBSTETRA: SIEMPRE solo sus captaciones y su establecimiento.
+    //  - JEFA: todo su establecimiento, con filtro opcional por obstetra.
+    //  - ADMIN/SUPER_ADMIN: toda la red (o el establecimiento si lo eligen).
     $ambitoOverview = strtolower(trim((string)($_GET['ambito'] ?? '')));
-    $soloMisOverview = $esObstetraSesion && (
-        in_array($ambitoOverview, ['mis_atenciones', 'mis_captaciones'], true)
-        || (string)($_GET['mis_captaciones'] ?? '0') === '1'
-    );
+    $soloMisOverview = $esObstetraSesion;
     if ($soloMisOverview) {
         $wherePacientes[] = 'p.codpsal_obstetra = ?';
         $scopeParamsPacientes[] = (string)$session['dni'];
-    } elseif (!$esObstetraSesion && $obstetraFiltro !== '') {
+    } elseif ($obstetraFiltro !== '') {
         $wherePacientes[] = 'p.codpsal_obstetra = ?';
         $scopeParamsPacientes[] = $obstetraFiltro;
     }
@@ -2024,14 +2306,11 @@ function alertas_programaticas_datos(PDO $pdo, array $session, ?array $catalogo 
     if ($obstetraAlertas === 'TODOS') {
         $obstetraAlertas = '';
     }
-    // La obstetra ve por defecto TODO su establecimiento. "Solo mis captaciones"
-    // es una elección explícita, nunca el filtro predeterminado.
+    // Aislamiento estricto de alertas: la obstetra SIEMPRE ve solo sus
+    // captaciones y su establecimiento; la Jefatura ve su establecimiento con
+    // filtro opcional por obstetra; los administradores conservan alcance total.
     $ambitoAlertas = strtolower(trim((string)($_GET['ambito'] ?? '')));
-    $soloMisAlertas = $esObstetraAlertas && (
-        $ambitoAlertas === 'mis_atenciones'
-        || $ambitoAlertas === 'mis_captaciones'
-        || (string)($_GET['mis_captaciones'] ?? '0') === '1'
-    );
+    $soloMisAlertas = $esObstetraAlertas;
     $condObstetraAlertas = '';
     $paramsObstetraAlertas = [];
     if ($soloMisAlertas) {
@@ -3173,17 +3452,25 @@ if ($action === 'lookup_dni') {
     $bucket = 'lookup:' . hash('sha256', (string)($session['token'] ?? ($session['dni'] . '|' . $ip)));
     $limit = HospitalHuaralDB::rateLimitStatus($bucket, 30, 60);
     if (!$limit['allowed']) {
-        HospitalHuaralDB::registrarAuditoria($session['dni'], 'LOOKUP_RATE_LIMITED', 'Límite de 30 consultas de DNI por minuto excedido. Posible scraping bloqueado.', $session['cod_estab'], $session['platform']);
-        json_error('Límite de 30 consultas de DNI por minuto alcanzado. Espere y vuelva a intentar.', 429, [
+        HospitalHuaralDB::registrarAuditoria($session['dni'], 'LOOKUP_RATE_LIMITED', 'Límite de 30 consultas de documento por minuto excedido. Posible scraping bloqueado.', $session['cod_estab'], $session['platform']);
+        json_error('Límite de 30 consultas de documento por minuto alcanzado. Espere y vuelva a intentar.', 429, [
             'retryAfter' => $limit['retryAfter'],
         ]);
     }
     HospitalHuaralDB::rateLimitHit($bucket, 60);
 
-    $dni = preg_replace('/[^0-9]/', '', (string)($_GET['dni'] ?? '')) ?? '';
-    if (strlen($dni) < 8 || strlen($dni) > 15) {
-        json_error('Formato de DNI inválido. Use únicamente números (8 a 15 dígitos).', 400);
+    $documentoRaw = (string)($_GET['dni'] ?? $_GET['documento'] ?? '');
+    $tipoSolicitado = (string)($_GET['tipo_doc'] ?? $_GET['tipo_documento'] ?? '');
+    $validacionDocumento = validar_documento_paciente($documentoRaw, $tipoSolicitado);
+    if (!$validacionDocumento['ok']) {
+        json_error(
+            $validacionDocumento['error'] . ' Seleccione el tipo de documento correcto (DNI, CE, Pasaporte, PTP o CNV/SIS).',
+            400,
+            ['code' => 'DOCUMENTO_INVALIDO', 'tipo_doc' => $validacionDocumento['tipo']]
+        );
     }
+    $dni = $validacionDocumento['documento'];
+    $tipoDoc = $validacionDocumento['tipo'];
 
     $codEstab = hospital_codigo_canonico((string)($_GET['cod_estab'] ?? $session['cod_estab']));
     if (hospital_establecimiento($codEstab) === null) {
@@ -3195,7 +3482,7 @@ if ($action === 'lookup_dni') {
     $hisRecord = null;
     try {
         $stmt = $pdo->prepare("
-            SELECT h.ID, h.DNI, h.COD_ESTAB, h.COD_SERVSA, h.CODPSAL,
+            SELECT h.ID, h.DNI, h.COD_ESTAB, h.COD_SERVSA, h.CODPSAL, h.COD_DOC,
                    TRIM(h.Apellido_p) AS Apellido_p, TRIM(h.Apellido_m) AS Apellido_m,
                    TRIM(h.Pnombre) AS Pnombre, TRIM(h.Dnombres) AS Dnombres,
                    h.EDAD, h.SEXO, h.UBIGEO, h.FICHAFAM, h.HCLFAM,
@@ -3335,8 +3622,30 @@ if ($action === 'lookup_dni') {
         $existing['celular'] = HospitalHuaralDB::decryptPII((string)$existing['celular']);
         $existing['correo'] = HospitalHuaralDB::decryptPII((string)$existing['correo']);
         $existing['direccion'] = HospitalHuaralDB::decryptPII((string)$existing['direccion']);
+        $tipoDocExistente = tipo_documento_normalizado((string)($existing['tipo_doc'] ?? $tipoDoc)) ?: $tipoDoc;
+        $existing['tipo_doc'] = $tipoDocExistente;
+        $existing['tipo_doc_etiqueta'] = etiqueta_tipo_documento($tipoDocExistente);
+        $existing['estab_nombre'] = hospital_nombre_establecimiento((string)($existing['cod_estab'] ?? ''));
+        $existing['estado_etiqueta'] = str_replace('_', ' ', (string)($existing['estado_paciente'] ?? ''));
         unset($existing['encrypted_raw']);
     }
+    $registroPrevio = $existing ? [
+        'ya_registrada' => true,
+        'cod_estab' => (string)($existing['cod_estab'] ?? ''),
+        'establecimiento' => (string)($existing['estab_nombre'] ?? hospital_nombre_establecimiento((string)($existing['cod_estab'] ?? ''))),
+        'fecha_registro' => (string)($existing['fecha_registro'] ?? ''),
+        'estado' => (string)($existing['estado_paciente'] ?? ''),
+        'estado_etiqueta' => (string)($existing['estado_etiqueta'] ?? ''),
+        'obstetra_dni' => (string)($existing['codpsal_obstetra'] ?? ''),
+    ] : [
+        'ya_registrada' => false,
+        'cod_estab' => '',
+        'establecimiento' => '',
+        'fecha_registro' => '',
+        'estado' => '',
+        'estado_etiqueta' => '',
+        'obstetra_dni' => '',
+    ];
 
     $hasActiveMethod = false;
     $catalogoMetodos = catalogo_metodos_planificacion($pdo);
@@ -3397,14 +3706,28 @@ if ($action === 'lookup_dni') {
     // Caso B: datos mínimos para que el formulario se abra precargado desde HIS.
     $precargaDesdeHis = null;
     if ($hisRecord) {
+        $tipoDocHis = $tipoDoc;
+        if (isset($hisRecord['COD_DOC']) && (string)$hisRecord['COD_DOC'] !== '') {
+            $tipoDocHis = tipo_documento_normalizado((string)$hisRecord['COD_DOC']) ?: $tipoDoc;
+        }
         $precargaDesdeHis = [
             'apellido_paterno' => (string)($hisRecord['Apellido_p'] ?? ''),
             'apellido_materno' => (string)($hisRecord['Apellido_m'] ?? ''),
             'nombres' => (string)($hisRecord['Dnombres'] ?? ($hisRecord['Pnombre'] ?? '')),
             'edad' => (int)($hisRecord['EDAD'] ?? 0),
             'dni' => (string)($hisRecord['DNI'] ?? $dni),
+            'tipo_doc' => $tipoDocHis,
+            'tipo_doc_etiqueta' => etiqueta_tipo_documento($tipoDocHis),
         ];
     }
+    $mensajeRegistroPrevio = $registroPrevio['ya_registrada']
+        ? sprintf(
+            'La paciente YA ESTÁ REGISTRADA en la app: %s, fecha %s, estado %s.',
+            $registroPrevio['establecimiento'] !== '' ? $registroPrevio['establecimiento'] : 'establecimiento no registrado',
+            $registroPrevio['fecha_registro'] !== '' ? $registroPrevio['fecha_registro'] : 'sin fecha',
+            $registroPrevio['estado_etiqueta'] !== '' ? $registroPrevio['estado_etiqueta'] : 'sin estado'
+        )
+        : 'La paciente no tiene una captación previa registrada en la app.';
 
     HospitalHuaralDB::registrarAuditoria(
         $session['dni'],
@@ -3423,6 +3746,15 @@ if ($action === 'lookup_dni') {
 
     json_out([
         'foundInHis' => (bool)$hisRecord,
+        'foundInApp' => $registroPrevio['ya_registrada'],
+        'documento' => [
+            'numero' => $dni,
+            'tipo_doc' => $tipoDoc,
+            'tipo_doc_etiqueta' => etiqueta_tipo_documento($tipoDoc),
+        ],
+        'pacienteYaRegistrada' => $registroPrevio['ya_registrada'],
+        'registroPrevio' => $registroPrevio,
+        'mensajeRegistroPrevio' => $mensajeRegistroPrevio,
         'foundInEstablecimiento' => $hisRecord
             ? (hospital_codigo_canonico((string)$hisRecord['COD_ESTAB']) === $codEstab)
             : false,
@@ -3567,44 +3899,31 @@ if ($action === 'reporte_programacion') {
         }
     }
 
-    $verRed = puede_ver_red($session);
-    $rolReporte = HospitalHuaralDB::rolUsuario((string)$session['dni']);
-    $esObstetraReporte = $rolReporte === 'OBSTETRA';
-    $modoRedReporte = es_alcance_red($session, $alcance);
+    $reporteCtx = resolver_alcance_reporte(
+        $session,
+        (string)($_GET['obstetra'] ?? ''),
+        $alcance
+    );
+    $modoRedReporte = $reporteCtx['alcance_red'];
+    $obstetraReporte = $reporteCtx['dni_obstetra'];
+    $alcance = $modoRedReporte ? 'red' : 'establecimiento';
+    $ambitoReporte = $reporteCtx['solo_mis'] ? 'mis_captaciones' : 'establecimiento';
 
     // El establecimiento se aplica SIEMPRE en la consulta principal. Nunca se
-    // mezclan establecimientos.
+    // mezclan establecimientos para Jefatura/Obstetra; solo los administradores
+    // superiores pueden solicitar alcance de red.
     $condicionEstabH = '';
     $paramsEstab = [];
-    if (!$modoRedReporte) {
-        $variantes = codigos_establecimiento_sesion($session);
+    if (!$modoRedReporte && $reporteCtx['codigos_estab']) {
+        $variantes = $reporteCtx['codigos_estab'];
         $placeholdersEstab = implode(',', array_fill(0, count($variantes), '?'));
         $condicionEstabH = " AND h.COD_ESTAB IN ({$placeholdersEstab}) ";
         $paramsEstab = $variantes;
     }
 
-    $ambitoReporte = strtolower(trim((string)($_GET['ambito'] ?? 'establecimiento')));
-    if (!in_array($ambitoReporte, ['mis_atenciones', 'mis_captaciones', 'establecimiento'], true)) {
-        $ambitoReporte = 'establecimiento';
-    }
-    $obstetraReporte = preg_replace('/[^0-9A-Za-z]/', '', (string)($_GET['obstetra'] ?? '')) ?? '';
-    if ($obstetraReporte === 'TODOS') {
-        $obstetraReporte = '';
-    }
     $condicionObstetra = '';
     $paramsObstetra = [];
-    if ($esObstetraReporte) {
-        // La obstetra ve por defecto TODO su establecimiento y puede alternar
-        // explícitamente a "Solo mis captaciones".
-        if (in_array($ambitoReporte, ['mis_atenciones', 'mis_captaciones'], true)) {
-            $variantesPropias = variantes_codpsal_dni((string)$session['dni']);
-            $condicionObstetra = ' AND h.CODPSAL IN (' . implode(',', array_fill(0, count($variantesPropias), '?')) . ') ';
-            $paramsObstetra = $variantesPropias;
-            $obstetraReporte = (string)$session['dni'];
-        } else {
-            $obstetraReporte = '';
-        }
-    } elseif ($obstetraReporte !== '') {
+    if ($obstetraReporte !== '') {
         $variantesObstetraReporte = variantes_codpsal_dni($obstetraReporte);
         $condicionObstetra = ' AND h.CODPSAL IN (' . implode(',', array_fill(0, count($variantesObstetraReporte), '?')) . ') ';
         $paramsObstetra = $variantesObstetraReporte;
@@ -3986,7 +4305,7 @@ if ($action === 'reporte_programacion') {
         if ($obstetraNombreReporte === '') {
             $obstetraNombreReporte = 'OBSTETRA ' . $obstetraReporte;
         }
-    } elseif ($esObstetraReporte) {
+    } elseif ($reporteCtx['es_obstetra']) {
         $obstetraNombreReporte = HospitalHuaralDB::nombrePersona((string)$session['dni'], $pdo);
     } elseif ($modoRedReporte) {
         $obstetraNombreReporte = 'TODAS LAS OBSTETRAS DE LA RED';
@@ -4034,7 +4353,7 @@ if ($action === 'reporte_programacion') {
             'emisor' => [
                 'dni' => (string)$session['dni'],
                 'nombre' => HospitalHuaralDB::nombrePersona((string)$session['dni'], $pdo),
-                'rol' => HospitalHuaralDB::rolEtiqueta($rolReporte),
+                'rol' => HospitalHuaralDB::rolEtiqueta($reporteCtx['rol']),
             ],
         ],
     ]);
@@ -4119,7 +4438,7 @@ if ($action === 'reporte_padron') {
         ? HospitalHuaralDB::nombrePersona($obstetraPadron, $pdo)
         : ((string)($perfil['rol'] ?? '') === 'OBSTETRA'
             ? (string)($perfil['nombreCompleto'] ?? '')
-            : ($modoRedPadron ? 'TODAS LAS OBSTETRAS DE LA RED' : (string)($perfil['estab_nombre'] ?? '')));
+            : ($modoRedPadron ? 'TODAS LAS OBSTETRAS DE LA RED' : 'TODAS LAS OBSTETRAS DEL ESTABLECIMIENTO'));
     if ($obstetraNombrePadron === '') {
         $obstetraNombrePadron = (string)($perfil['nombreCompleto'] ?? '');
     }
@@ -4329,20 +4648,14 @@ function reporte_campo_datos(PDO $pdo, array $session, array $input, int $page =
         // establecimiento; sin cod_estab se conserva el alcance de red.
         $alcanceRecibidoCampo = ($codEstabSolicitadoCampo !== '' || !is_admin_session($session)) ? 'establecimiento' : 'red';
     }
-    $alcance = $alcanceRecibidoCampo === 'red' ? 'red' : 'establecimiento';
-    $verRed = puede_ver_red($session);
-    $rolCampo = HospitalHuaralDB::rolUsuario((string)($session['dni'] ?? ''));
-    $esObstetraCampo = $rolCampo === 'OBSTETRA';
-    $ambitoCampo = strtolower(trim((string)($input['ambito'] ?? '')));
-    $soloMisCaptacionesCampo = $esObstetraCampo && (
-        in_array($ambitoCampo, ['mis_atenciones', 'mis_captaciones'], true)
-        || (string)($input['mis_captaciones'] ?? '0') === '1'
+    $reporteCtxCampo = resolver_alcance_reporte(
+        $session,
+        (string)($input['obstetra'] ?? ''),
+        $alcanceRecibidoCampo
     );
-    $modoRedCampo = es_alcance_red($session, $alcance);
-    // La Jefatura y la obstetra nunca amplían su alcance fuera de su IPRESS.
-    if (!$modoRedCampo) {
-        $alcance = 'establecimiento';
-    }
+    $soloMisCaptacionesCampo = $reporteCtxCampo['es_obstetra'];
+    $modoRedCampo = $reporteCtxCampo['alcance_red'];
+    $alcance = $modoRedCampo ? 'red' : 'establecimiento';
     if ($modoRedCampo) {
         $codigosEstab = [];
     } elseif (is_admin_session($session) && $codEstabSolicitadoCampo !== '') {
@@ -4350,8 +4663,9 @@ function reporte_campo_datos(PDO $pdo, array $session, array $input, int $page =
         $variantesSolicitadasCampo = hospital_codigos_busqueda_establecimiento($codEstabSolicitadoCampo);
         $codigosEstab = $variantesSolicitadasCampo ?: [$codEstabSolicitadoCampo];
     } else {
-        $codigosEstab = codigos_establecimiento_sesion($session);
+        $codigosEstab = $reporteCtxCampo['codigos_estab'];
     }
+    $obstetra = $reporteCtxCampo['dni_obstetra'];
 
     $where = ['p.fecha_registro >= :desde', 'p.fecha_registro < :hasta_exclusivo'];
     $params = [':desde' => $desde, ':hasta_exclusivo' => $hastaExclusivo];
@@ -4370,8 +4684,7 @@ function reporte_campo_datos(PDO $pdo, array $session, array $input, int $page =
         $where[] = 'p.sector = :sector';
         $params[':sector'] = $sector;
     }
-    $obstetra = preg_replace('/[^0-9A-Za-z]/', '', (string)($input['obstetra'] ?? '')) ?? '';
-    if (!$soloMisCaptacionesCampo && $obstetra !== '' && $obstetra !== 'TODOS') {
+    if (!$soloMisCaptacionesCampo && $obstetra !== '') {
         $where[] = 'p.codpsal_obstetra = :obstetra';
         $params[':obstetra'] = $obstetra;
     }
@@ -4601,7 +4914,7 @@ function reporte_campo_datos(PDO $pdo, array $session, array $input, int $page =
                 ? HospitalHuaralDB::nombrePersona($obstetra, $pdo)
                 : ($modoRedCampo
                     ? 'TODAS LAS OBSTETRAS DE LA RED'
-                    : (($rolCampo === 'JEFA_OBSTETRAS') ? HospitalHuaralDB::nombrePersona((string)$session['dni'], $pdo) : 'TODAS LAS OBSTETRAS DEL ESTABLECIMIENTO'))),
+                    : 'TODAS LAS OBSTETRAS DEL ESTABLECIMIENTO')),
         'generado_en' => date('c'),
     ];
 }
@@ -4623,27 +4936,23 @@ function reporte_metodos_datos(PDO $pdo, array $session, array $input, int $page
     if ($alcanceRecibidoMetodos === '') {
         $alcanceRecibidoMetodos = ($codEstabSolicitadoMetodos !== '' || !is_admin_session($session)) ? 'establecimiento' : 'red';
     }
-    $alcance = $alcanceRecibidoMetodos === 'red' ? 'red' : 'establecimiento';
-    $verRed = puede_ver_red($session);
-    $rolMetodos = HospitalHuaralDB::rolUsuario((string)($session['dni'] ?? ''));
-    $esObstetraMetodos = $rolMetodos === 'OBSTETRA';
-    $ambitoMetodos = strtolower(trim((string)($input['ambito'] ?? '')));
-    $soloMisCaptacionesMetodos = $esObstetraMetodos && (
-        in_array($ambitoMetodos, ['mis_atenciones', 'mis_captaciones'], true)
-        || (string)($input['mis_captaciones'] ?? '0') === '1'
+    $reporteCtxMetodos = resolver_alcance_reporte(
+        $session,
+        (string)($input['obstetra'] ?? ''),
+        $alcanceRecibidoMetodos
     );
-    $modoRedMetodos = es_alcance_red($session, $alcance);
-    if (!$modoRedMetodos) {
-        $alcance = 'establecimiento';
-    }
+    $soloMisCaptacionesMetodos = $reporteCtxMetodos['es_obstetra'];
+    $modoRedMetodos = $reporteCtxMetodos['alcance_red'];
+    $alcance = $modoRedMetodos ? 'red' : 'establecimiento';
     if ($modoRedMetodos) {
         $codigosEstab = [];
     } elseif (is_admin_session($session) && $codEstabSolicitadoMetodos !== '') {
         $variantesSolicitadasMetodos = hospital_codigos_busqueda_establecimiento($codEstabSolicitadoMetodos);
         $codigosEstab = $variantesSolicitadasMetodos ?: [$codEstabSolicitadoMetodos];
     } else {
-        $codigosEstab = codigos_establecimiento_sesion($session);
+        $codigosEstab = $reporteCtxMetodos['codigos_estab'];
     }
+    $obstetraMetodos = $reporteCtxMetodos['dni_obstetra'];
     $catalogo = catalogo_metodos_planificacion($pdo);
 
     $where = ['p.fecha_registro >= :desde', 'p.fecha_registro < :hasta_exclusivo'];
@@ -4651,6 +4960,9 @@ function reporte_metodos_datos(PDO $pdo, array $session, array $input, int $page
     if ($soloMisCaptacionesMetodos) {
         $where[] = 'p.codpsal_obstetra = :propio';
         $params[':propio'] = (string)$session['dni'];
+    } elseif ($obstetraMetodos !== '') {
+        $where[] = 'p.codpsal_obstetra = :obstetra_metodos';
+        $params[':obstetra_metodos'] = $obstetraMetodos;
     }
     $sector = strtoupper(trim((string)($input['sector'] ?? '')));
     if ($sector !== '' && $sector !== 'TODOS') {
@@ -4706,6 +5018,10 @@ function reporte_metodos_datos(PDO $pdo, array $session, array $input, int $page
             $paramsObsFallback = [];
             if ($soloMisCaptacionesMetodos) {
                 $variantesObsFallback = variantes_codpsal_dni((string)$session['dni']);
+                $condObsFallback = ' AND h.CODPSAL IN (' . implode(',', array_fill(0, count($variantesObsFallback), '?')) . ')';
+                $paramsObsFallback = $variantesObsFallback;
+            } elseif ($obstetraMetodos !== '') {
+                $variantesObsFallback = variantes_codpsal_dni($obstetraMetodos);
                 $condObsFallback = ' AND h.CODPSAL IN (' . implode(',', array_fill(0, count($variantesObsFallback), '?')) . ')';
                 $paramsObsFallback = $variantesObsFallback;
             }
@@ -4923,6 +5239,7 @@ function reporte_metodos_datos(PDO $pdo, array $session, array $input, int $page
             'codigo_metodo' => $codigoFiltro !== '' ? $codigoFiltro : 'TODOS',
             'estado_vencimiento' => $estadoFiltro !== '' ? $estadoFiltro : 'TODOS',
             'sector' => $sector !== '' ? $sector : 'TODOS',
+            'obstetra' => $obstetraMetodos !== '' ? $obstetraMetodos : 'TODOS',
             'alcance' => $alcance,
             'ambito' => $soloMisCaptacionesMetodos ? 'mis_captaciones' : 'establecimiento',
         ],
@@ -5317,7 +5634,16 @@ if ($action === 'save_paciente') {
     $session = require_session();
     $paseUps = !empty($body['pase_ups']);
 
-    $dni = preg_replace('/[^0-9]/', '', (string)($body['dni'] ?? '')) ?? '';
+    $tipoDocInput = (string)($body['tipo_doc'] ?? $body['tipo_documento'] ?? 'DNI');
+    $validacionDocumentoPaciente = validar_documento_paciente((string)($body['dni'] ?? $body['documento'] ?? ''), $tipoDocInput);
+    if (!$validacionDocumentoPaciente['ok']) {
+        json_error($validacionDocumentoPaciente['error'], 400, [
+            'code' => 'DOCUMENTO_INVALIDO',
+            'tipo_doc' => $validacionDocumentoPaciente['tipo'],
+        ]);
+    }
+    $dni = $validacionDocumentoPaciente['documento'];
+    $tipoDoc = $validacionDocumentoPaciente['tipo'];
     $apPaterno = strtoupper(HospitalHuaralDB::sanitizeText($body['apellido_paterno'] ?? '', 50));
     $apMaterno = strtoupper(HospitalHuaralDB::sanitizeText($body['apellido_materno'] ?? '', 50));
     $nombres = strtoupper(HospitalHuaralDB::sanitizeText($body['nombres'] ?? '', 80));
@@ -5346,8 +5672,8 @@ if ($action === 'save_paciente') {
     $codEstab = $session['cod_estab'];
     $atencion99208Solicitada = !empty($body['atencion_99208']) ? 1 : 0;
 
-    if (strlen($dni) < 8 || strlen($dni) > 15) {
-        json_error('El DNI de la paciente debe contener entre 8 y 15 dígitos numéricos.', 400);
+    if (strlen($dni) < 6 || strlen($dni) > 15) {
+        json_error('El número de documento de la paciente no tiene una longitud válida (6 a 15 caracteres).', 400);
     }
 
     // Caso A: el pase directo solo es válido si el HIS confirma atención previa
@@ -5386,7 +5712,7 @@ if ($action === 'save_paciente') {
             $correo = $correo ?: HospitalHuaralDB::decryptPII((string)$existente['correo']);
             $direccion = $direccion ?: HospitalHuaralDB::decryptPII((string)$existente['direccion']);
             $distrito = $distrito ?: strtoupper((string)$existente['distrito']);
-            $sector = $sector ?: strtoupper((string)$existente['sector']);
+            $sector = $sector ?: preg_replace('/[^0-9]/', '', (string)$existente['sector']) ?? '';
         } else {
             try {
                 $stmtHis = $pdo->prepare('SELECT TRIM(Apellido_p) AS ap, TRIM(Apellido_m) AS am, TRIM(Dnombres) AS nom, EDAD FROM his_dl WHERE DNI = :dni ORDER BY ANO DESC, MES DESC, DIA DESC LIMIT 1');
@@ -5404,12 +5730,25 @@ if ($action === 'save_paciente') {
             }
             $direccion = $direccion ?: 'NO REGISTRADA - ACTUALIZAR EN CAMPO';
             $distrito = $distrito ?: 'HUARAL';
-            $sector = $sector ?: 'UPS PLANIFICACION FAMILIAR';
+            $sector = $sector ?: '0';
         }
     }
 
     if ($distrito === '') {
         $distrito = 'HUARAL';
+    }
+    if ($paseUps && trim($sector) === '') {
+        // El pase directo puede no traer sector; se usa 0 (sin sector) para
+        // mantener la regla estricta de solo dígitos.
+        $sector = '0';
+    }
+
+    // Sector estrictamente numérico (se permiten ceros a la izquierda: 01, 1, 2).
+    $sector = trim($sector);
+    if ($sector === '' || !preg_match('/^[0-9]+$/', $sector)) {
+        json_error('El campo Sector solo permite números (ejemplo: 01, 1, 2). No se permiten letras ni símbolos.', 422, [
+            'code' => 'SECTOR_NO_NUMERICO',
+        ]);
     }
 
     if ($apPaterno === '' || $apMaterno === '' || $nombres === '' || $direccion === '' || $sector === '') {
@@ -5432,11 +5771,12 @@ if ($action === 'save_paciente') {
 
     $stmt = $pdo->prepare("
         INSERT INTO pacientes_sin_metodo
-            (dni, apellido_paterno, apellido_materno, nombres, edad, celular, correo, distrito, direccion, sector, estado_paciente, codpsal_obstetra, cod_estab, atencion_99208)
+            (dni, tipo_doc, apellido_paterno, apellido_materno, nombres, edad, celular, correo, distrito, direccion, sector, estado_paciente, codpsal_obstetra, cod_estab, atencion_99208)
         VALUES
-            (:dni, :ap_p, :ap_m, :nom, :edad, :cel, :cor, :dist, :dir, :sec,
+            (:dni, :tipo_doc, :ap_p, :ap_m, :nom, :edad, :cel, :cor, :dist, :dir, :sec,
              COALESCE(:est_insert, :est_default), :obst, :estab, :a99208)
         ON DUPLICATE KEY UPDATE
+            tipo_doc = VALUES(tipo_doc),
             apellido_paterno = VALUES(apellido_paterno),
             apellido_materno = VALUES(apellido_materno),
             nombres = VALUES(nombres),
@@ -5453,6 +5793,7 @@ if ($action === 'save_paciente') {
     ");
     $stmt->execute([
         ':dni' => $dni,
+        ':tipo_doc' => $tipoDoc,
         ':ap_p' => $apPaterno,
         ':ap_m' => $apMaterno,
         ':nom' => $nombres,
@@ -5548,8 +5889,14 @@ if ($action === 'update_estado') {
         $cambiosContacto[] = 'dirección';
     }
     if (array_key_exists('sector', $body)) {
+        $sectorUpdate = trim((string)($body['sector'] ?? ''));
+        if ($sectorUpdate === '' || !preg_match('/^[0-9]+$/', $sectorUpdate)) {
+            json_error('El campo Sector solo permite números (ejemplo: 01, 1, 2). No se permiten letras ni símbolos.', 422, [
+                'code' => 'SECTOR_NO_NUMERICO',
+            ]);
+        }
         $sets[] = 'sector = :sector';
-        $params[':sector'] = strtoupper(HospitalHuaralDB::sanitizeText($body['sector'] ?? '', 50));
+        $params[':sector'] = $sectorUpdate;
         $cambiosContacto[] = 'sector';
     }
     $stmt = $pdo->prepare('UPDATE pacientes_sin_metodo SET ' . implode(', ', $sets) . ' WHERE id = :id LIMIT 1');
