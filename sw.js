@@ -3,7 +3,7 @@
  * - Nunca cachea api.php, sync_cloud_to_local.php ni respuestas clínicas.
  * - No intercepta métodos distintos de GET.
  */
-const SW_VERSION = 'planificahis-php-v2.2.0';
+const SW_VERSION = 'planificahis-v9';
 const PRECACHE = [
   './index.php',
   './manifest.webmanifest',
@@ -45,8 +45,8 @@ self.addEventListener('activate', (event) => {
 
 function isClinicalApi(url) {
   return (
-    url.pathname.endsWith('/api.php') ||
-    url.pathname.endsWith('/sync_cloud_to_local.php') ||
+    url.pathname.indexOf('api.php') !== -1 ||
+    url.pathname.indexOf('sync_cloud_to_local.php') !== -1 ||
     url.pathname.indexOf('/api/') !== -1 ||
     url.searchParams.has('action')
   );
@@ -54,11 +54,19 @@ function isClinicalApi(url) {
 
 self.addEventListener('fetch', (event) => {
   const request = event.request;
-  if (request.method !== 'GET') return;
+  // Las API clínicas y cualquier escritura van SIEMPRE a la red, sin leer ni
+  // escribir cachés. El token viaja por cabecera y la respuesta es no-store.
+  if (request.method !== 'GET') {
+    event.respondWith(fetch(request, { cache: 'no-store' }));
+    return;
+  }
 
   const url = new URL(request.url);
+  if (url.href.indexOf('api.php') !== -1 || isClinicalApi(url)) {
+    event.respondWith(fetch(request, { cache: 'no-store' }));
+    return;
+  }
   if (url.origin !== self.location.origin) return;
-  if (isClinicalApi(url)) return;
   if (url.pathname.endsWith('/sw.js')) return;
 
   if (request.mode === 'navigate') {

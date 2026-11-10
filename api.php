@@ -49,7 +49,7 @@ header('X-Content-Type-Options: nosniff');
 header('X-Frame-Options: DENY');
 header('Referrer-Policy: no-referrer');
 header('Strict-Transport-Security: max-age=63072000; includeSubDomains; preload');
-header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0, private');
 header('Pragma: no-cache');
 header('Expires: 0');
 header('Content-Security-Policy: default-src \'none\'; frame-ancestors \'none\'; base-uri \'none\'; form-action \'none\'; object-src \'none\'');
@@ -57,7 +57,7 @@ header('Cross-Origin-Opener-Policy: same-origin');
 header('Cross-Origin-Resource-Policy: same-origin');
 header('X-Permitted-Cross-Domain-Policies: none');
 header('Permissions-Policy: geolocation=(), camera=(), microphone=(), payment=(), usb=()');
-header('Vary: Origin');
+header('Vary: Authorization, X-App-Token, Cookie');
 
 // ---------------------------------------------------------------------------
 // MANEJADOR GLOBAL DE ERRORES: NINGÚN endpoint puede devolver un HTTP 500
@@ -126,7 +126,7 @@ if ($requestOrigin !== '') {
         // navegador aplique la política CORS sin abrir la API a cualquier sitio.
         header('Access-Control-Allow-Origin: ' . $requestOrigin);
         header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
-        header('Access-Control-Allow-Headers: Authorization, Content-Type, X-Requested-With, X-Sync-Token');
+        header('Access-Control-Allow-Headers: Authorization, Content-Type, X-Requested-With, X-Sync-Token, X-App-Token');
         header('Access-Control-Expose-Headers: Retry-After');
         header('Access-Control-Max-Age: 600');
     } else {
@@ -216,8 +216,13 @@ function session_profile_payload(PDO $pdo, array $session): array
         $nombreCompleto = 'OBSTETRA ' . $dni;
     }
     $codEstab = (string)($session['cod_estab'] ?? ($acceso['cod_estab'] ?? '000005481'));
+    $codEstabAsignado = hospital_codigo_canonico((string)($acceso['cod_estab'] ?? ''));
+    if (hospital_establecimiento($codEstabAsignado) === null) {
+        $codEstabAsignado = '';
+    }
     $rol = HospitalHuaralDB::rolUsuario($dni);
     $esAdmin = is_admin_session(['dni' => $dni]);
+    $esRed = $esAdmin && strtoupper(trim($codEstab)) === 'ALL';
     return [
         'token' => (string)($session['token'] ?? ''),
         'dni' => $dni,
@@ -231,11 +236,16 @@ function session_profile_payload(PDO $pdo, array $session): array
         'rol_etiqueta' => HospitalHuaralDB::rolEtiqueta($rol),
         'nivelid' => $esAdmin ? 1 : 2,
         'cod_estab' => $codEstab,
-        'estab_nombre' => hospital_nombre_establecimiento($codEstab),
+        'cod_estab_asignado' => $codEstabAsignado,
+        'estab_nombre' => $esRed
+            ? 'TODA LA RED HUARAL-CHANCAY (53 IPRESS)'
+            : hospital_nombre_establecimiento($codEstab),
+        'alcance_red' => $esRed,
         'verified2FA' => false,
         'platform' => (string)($session['platform'] ?? 'Web Desktop'),
         'isAdmin' => $esAdmin,
         'esSuperAdmin' => hospital_es_super_admin($dni),
+        'protegido' => (int)($acceso['protegido'] ?? 0) === 1 || hospital_es_super_admin($dni),
         'isJefa' => es_jefa_session(['dni' => $dni]),
         'puedeVerRed' => puede_ver_red(['dni' => $dni]),
         'puedeCambiarEstablecimiento' => puede_ver_red(['dni' => $dni]),
@@ -401,21 +411,49 @@ function puede_resetear_obstetra(array $session): bool
 }
 
 /**
- * Variantes indexables del establecimiento activo de la sesión.
+ * Par de códigos EXACTO usado para filtrar COD_ESTAB:
+ *   9 dígitos con ceros a la izquierda y su variante sin ceros.
+ * Para el alcance de red del administrador devuelve [] (sin filtro).
  *
  * @return array<int, string>
  */
 function codigos_establecimiento_sesion(array $session): array
 {
-    $codigo = (string)($session['cod_estab'] ?? '');
-    $pdo = null;
-    try {
-        $pdo = HospitalHuaralDB::getConnection();
-    } catch (Throwable $e) {
-        $pdo = null;
+    $codigo = trim((string)($session['cod_estab'] ?? ''));
+    if ($codigo === '' || strtoupper($codigo) === 'ALL') {
+        return [];
     }
-    $variantes = hospital_codigos_busqueda_establecimiento($codigo, $pdo);
-    return $variantes ?: ($codigo !== '' ? [$codigo] : ['000005481']);
+    $canonico = hospital_codigo_canonico($codigo);
+    if (hospital_establecimiento($canonico) === null) {
+        $canonico = $codigo;
+    }
+    $codEstab9 = str_pad(trim($canonico), 9, '0', STR_PAD_LEFT);
+    $codEstabSinCeros = ltrim($codEstab9, '0');
+    if ($codEstabSinCeros === '') {
+        $codEstabSinCeros = '0';
+    }
+    return array_values(array_unique([$codEstab9, $codEstabSinCeros]));
+}
+
+/**
+ * Establecimiento donde se REGISTRA una captación. Si el administrador está
+ * en alcance "ALL", se usa la IPRESS asignada a su cuenta en app_usuarios.
+ */
+function establecimiento_registro_sesion(array $session): string
+{
+    $codigo = trim((string)($session['cod_estab'] ?? ''));
+    if (strtoupper($codigo) !== 'ALL') {
+        $canonico = hospital_codigo_canonico($codigo);
+        if (hospital_establecimiento($canonico) !== null) {
+            return str_pad($canonico, 9, '0', STR_PAD_LEFT);
+        }
+    }
+    $acceso = HospitalHuaralDB::accesoUsuario((string)($session['dni'] ?? '')) ?: [];
+    $asignado = hospital_codigo_canonico((string)($acceso['cod_estab'] ?? ''));
+    if (hospital_establecimiento($asignado) !== null) {
+        return str_pad($asignado, 9, '0', STR_PAD_LEFT);
+    }
+    return '000005481';
 }
 
 /**
@@ -436,11 +474,20 @@ function variantes_codpsal_dni(string $dni): array
 }
 
 /**
- * Solo el Administrador de Estadística puede solicitar alcance de red.
+ * Alcance de red: SOLO administradores. Se reconoce "ALL" (selector de la
+ * cabecera) y, por compatibilidad, "red". La sesión del administrador manda:
+ * si eligió una IPRESS concreta, no puede ampliar el alcance por parámetro.
  */
-function es_alcance_red(array $session, string $alcance): bool
+function es_alcance_red(array $session, string $alcance = ''): bool
 {
-    return is_admin_session($session) && strtolower(trim($alcance)) === 'red';
+    if (!is_admin_session($session)) {
+        return false;
+    }
+    if (strtoupper(trim((string)($session['cod_estab'] ?? ''))) === 'ALL') {
+        return true;
+    }
+    $alcance = strtolower(trim($alcance));
+    return $alcance === 'all' || $alcance === 'red';
 }
 
 /**
@@ -837,19 +884,34 @@ if ($action === 'login') {
     }
     HospitalHuaralDB::olvidarAcceso($dni);
 
-    $codEstab = hospital_codigo_canonico((string)($user['cod_estab'] ?? ''));
-    if (hospital_establecimiento($codEstab) === null) {
-        $codEstab = HospitalHuaralDB::obtenerEstablecimientoObstetra($dni);
+    $rol = HospitalHuaralDB::rolUsuario($dni);
+    $esAdmin = hospital_es_rol_admin_superior($rol);
+    $esJefa = $rol === 'JEFA_OBSTETRAS';
+    $codEstabAsignadoLogin = hospital_codigo_canonico((string)($user['cod_estab'] ?? ''));
+    if (hospital_establecimiento($codEstabAsignadoLogin) === null) {
+        $codEstabAsignadoLogin = '';
     }
-    if (hospital_establecimiento($codEstab) === null) {
-        $codEstab = '000005481';
-    }
-    if ($codEstab !== (string)($user['cod_estab'] ?? '')) {
-        try {
-            $pdo->prepare('UPDATE app_usuarios SET cod_estab = :estab WHERE dni = :dni LIMIT 1')
-                ->execute([':estab' => $codEstab, ':dni' => $dni]);
-        } catch (Throwable $e) {
-            // Se conserva el establecimiento de la sesión.
+
+    if ($esAdmin) {
+        // El administrador inicia SIEMPRE en alcance de red completa. El
+        // selector de la cabecera podrá fijar luego una IPRESS concreta.
+        $codEstab = 'ALL';
+    } else {
+        $codEstab = hospital_codigo_canonico((string)($user['cod_estab'] ?? ''));
+        if (hospital_establecimiento($codEstab) === null) {
+            $codEstab = HospitalHuaralDB::obtenerEstablecimientoObstetra($dni);
+        }
+        if (hospital_establecimiento($codEstab) === null) {
+            $codEstab = '000005481';
+        }
+        $codEstab = str_pad($codEstab, 9, '0', STR_PAD_LEFT);
+        if ($codEstab !== (string)($user['cod_estab'] ?? '')) {
+            try {
+                $pdo->prepare('UPDATE app_usuarios SET cod_estab = :estab WHERE dni = :dni LIMIT 1')
+                    ->execute([':estab' => $codEstab, ':dni' => $dni]);
+            } catch (Throwable $e) {
+                // Se conserva el establecimiento de la sesión.
+            }
         }
     }
 
@@ -867,9 +929,6 @@ if ($action === 'login') {
     if ($nombreCompleto === '') {
         $nombreCompleto = 'OBSTETRA ' . $dni;
     }
-    $rol = HospitalHuaralDB::rolUsuario($dni);
-    $esAdmin = hospital_es_rol_admin_superior($rol);
-    $esJefa = $rol === 'JEFA_OBSTETRAS';
 
     // LOGIN DIRECTO DE UN SOLO PASO: credenciales válidas => sesión persistente
     // de 7 días. No se crean desafíos 2FA ni se solicita código TOTP/OTP.
@@ -896,11 +955,16 @@ if ($action === 'login') {
             'rol_etiqueta' => HospitalHuaralDB::rolEtiqueta($rol),
             'nivelid' => $esAdmin ? 1 : 2,
             'cod_estab' => $codEstab,
-            'estab_nombre' => hospital_nombre_establecimiento($codEstab),
+            'cod_estab_asignado' => $codEstabAsignadoLogin,
+            'estab_nombre' => $codEstab === 'ALL'
+                ? 'TODA LA RED HUARAL-CHANCAY (53 IPRESS)'
+                : hospital_nombre_establecimiento($codEstab),
+            'alcance_red' => $codEstab === 'ALL',
             'verified2FA' => false,
             'platform' => $platform,
             'isAdmin' => $esAdmin,
             'esSuperAdmin' => hospital_es_super_admin($dni),
+            'protegido' => hospital_es_super_admin($dni) || (int)($user['protegido'] ?? 0) === 1,
             'isJefa' => $esJefa,
             'puedeVerRed' => $esAdmin,
             'puedeCambiarEstablecimiento' => $esAdmin,
@@ -1116,15 +1180,23 @@ if ($action === 'change_establecimiento') {
             'code' => 'ADMIN_REQUIRED',
         ]);
     }
-    $codEstab = hospital_codigo_canonico((string)($body['cod_estab'] ?? ''));
-    if (hospital_establecimiento($codEstab) === null) {
-        json_error('El establecimiento seleccionado no pertenece a la Red Huaral-Chancay.', 400);
+    $solicitado = trim((string)($body['cod_estab'] ?? ''));
+    if (strtoupper($solicitado) === 'ALL') {
+        $codEstab = 'ALL';
+        $nombreEstab = 'TODA LA RED HUARAL-CHANCAY (53 IPRESS)';
+    } else {
+        $codEstab = hospital_codigo_canonico($solicitado);
+        if (hospital_establecimiento($codEstab) === null) {
+            json_error('El establecimiento seleccionado no pertenece a la Red Huaral-Chancay.', 400);
+        }
+        $codEstab = str_pad($codEstab, 9, '0', STR_PAD_LEFT);
+        $nombreEstab = hospital_nombre_establecimiento($codEstab);
     }
     HospitalHuaralDB::cambiarEstablecimientoSesion((string)$session['token'], $codEstab, (string)$session['dni']);
     HospitalHuaralDB::registrarAuditoria(
         $session['dni'],
         'CAMBIO_ESTABLECIMIENTO',
-        'El Administrador de Estadística cambió el establecimiento activo a ' . hospital_nombre_establecimiento($codEstab) . '.',
+        'El Administrador de Estadística cambió el alcance activo a ' . $nombreEstab . '.',
         $codEstab,
         $session['platform']
     );
@@ -1134,7 +1206,8 @@ if ($action === 'change_establecimiento') {
         'session' => [
             'dni' => $session['dni'],
             'cod_estab' => $codEstab,
-            'estab_nombre' => hospital_nombre_establecimiento($codEstab),
+            'estab_nombre' => $nombreEstab,
+            'alcance_red' => $codEstab === 'ALL',
         ],
     ]);
 }
@@ -1338,23 +1411,34 @@ if ($action === 'actualizar_mi_perfil') {
         $sets[] = 'clave_hash = :pass';
         $params[':pass'] = HospitalHuaralDB::hashPassword($nuevaClave);
     }
-    $codEstabSesion = hospital_codigo_canonico((string)($actual['cod_estab'] ?? $session['cod_estab']));
+    // El formulario de perfil edita la IPRESS de la CUENTA, no el alcance de la
+    // sesión. Un administrador que está viendo "ALL" debe permanecer en red
+    // completa aunque guarde sus datos personales.
+    $alcanceRedSesion = is_admin_session($session)
+        && strtoupper(trim((string)($session['cod_estab'] ?? ''))) === 'ALL';
+    $codEstabSesion = $alcanceRedSesion
+        ? 'ALL'
+        : hospital_codigo_canonico((string)($actual['cod_estab'] ?? $session['cod_estab']));
     if ($codEstabFinal !== '') {
         $sets[] = 'cod_estab = :estab';
         $params[':estab'] = $codEstabFinal;
-        $codEstabSesion = $codEstabFinal;
+        if (!$alcanceRedSesion) {
+            $codEstabSesion = $codEstabFinal;
+        }
     }
     $pdo->prepare('UPDATE app_usuarios SET ' . implode(', ', $sets) . ' WHERE dni = :dni LIMIT 1')->execute($params);
     HospitalHuaralDB::olvidarAcceso($dni);
 
     if ($codEstabFinal !== '') {
         HospitalHuaralDB::establecerEstablecimientoObstetra($dni, $codEstabFinal);
-        $pdo->prepare('UPDATE app_sesiones SET cod_estab = :estab WHERE token_hash = :hash AND dni = :dni')
-            ->execute([
-                ':estab' => $codEstabFinal,
-                ':hash' => hash('sha256', (string)$session['token']),
-                ':dni' => $dni,
-            ]);
+        if (!$alcanceRedSesion) {
+            $pdo->prepare('UPDATE app_sesiones SET cod_estab = :estab WHERE token_hash = :hash AND dni = :dni')
+                ->execute([
+                    ':estab' => $codEstabFinal,
+                    ':hash' => hash('sha256', (string)$session['token']),
+                    ':dni' => $dni,
+                ]);
+        }
     }
 
     HospitalHuaralDB::registrarAuditoria(
@@ -1365,7 +1449,9 @@ if ($action === 'actualizar_mi_perfil') {
         (string)$session['platform']
     );
     $session['cod_estab'] = $codEstabSesion;
-    $session['estab_nombre'] = hospital_nombre_establecimiento($codEstabSesion);
+    $session['estab_nombre'] = $alcanceRedSesion
+        ? 'TODA LA RED HUARAL-CHANCAY (53 IPRESS)'
+        : hospital_nombre_establecimiento($codEstabSesion);
     json_out([
         'success' => true,
         'message' => 'Datos personales y de seguridad actualizados.',
@@ -1850,27 +1936,31 @@ if ($action === 'overview') {
     $rolSesion = HospitalHuaralDB::rolUsuario((string)$session['dni']);
     $esJefaSesion = $rolSesion === 'JEFA_OBSTETRAS';
     $esObstetraSesion = !$verRed && !$esJefaSesion;
-    $alcanceSesion = strtolower(trim((string)($_GET['alcance'] ?? ($verRed ? 'red' : 'establecimiento'))));
-    $modoRed = es_alcance_red($session, $alcanceSesion);
+    $esAdminSesion = is_admin_session($session);
+    // El alcance SIEMPRE lo determina la sesión: el administrador inicia en
+    // "ALL" (red completa) y el selector de cabecera fija una IPRESS concreta.
+    $modoRed = $esAdminSesion && strtoupper(trim((string)($session['cod_estab'] ?? ''))) === 'ALL';
     $obstetraFiltro = preg_replace('/[^0-9A-Za-z]/', '', (string)($_GET['obstetra'] ?? '')) ?? '';
     if ($obstetraFiltro === 'TODOS') {
         $obstetraFiltro = '';
     }
 
-    // RBAC estricto: Estadística puede ver toda la red; Jefatura ve únicamente
-    // las captaciones de su establecimiento; la obstetra solo sus registros.
+    // RBAC estricto: Estadística puede ver toda la red o la IPRESS elegida;
+    // Jefatura ve únicamente su establecimiento; la obstetra solo sus registros
+    // en la pestaña Pacientes.
     $wherePacientes = [];
     $scopeParamsPacientes = [];
     if (!$modoRed) {
         $codigosEstabSesion = codigos_establecimiento_sesion($session);
-        $wherePacientes[] = 'p.cod_estab IN (' . implode(',', array_fill(0, count($codigosEstabSesion), '?')) . ')';
-        $scopeParamsPacientes = array_merge($scopeParamsPacientes, $codigosEstabSesion);
+        if ($codigosEstabSesion) {
+            $wherePacientes[] = 'p.cod_estab IN (' . implode(',', array_fill(0, count($codigosEstabSesion), '?')) . ')';
+            $scopeParamsPacientes = array_merge($scopeParamsPacientes, $codigosEstabSesion);
+        }
     }
     // Aislamiento estricto de la pestaña Pacientes:
     //  - OBSTETRA: SIEMPRE solo sus captaciones y su establecimiento.
     //  - JEFA: todo su establecimiento, con filtro opcional por obstetra.
-    //  - ADMIN/SUPER_ADMIN: toda la red (o el establecimiento si lo eligen).
-    $ambitoOverview = strtolower(trim((string)($_GET['ambito'] ?? '')));
+    //  - ADMIN/SUPER_ADMIN: toda la red (ALL) o la IPRESS seleccionada.
     $soloMisOverview = $esObstetraSesion;
     if ($soloMisOverview) {
         $wherePacientes[] = 'p.codpsal_obstetra = ?';
@@ -1986,15 +2076,39 @@ if ($action === 'overview') {
     unset($prodRow);
 
     $auditoria = is_admin_session($session) ? HospitalHuaralDB::ultimaAuditoria(30) : [];
+    // Los KPI se calculan con COUNT sobre TODO el padrón del alcance, nunca
+    // sobre la lista visual limitada a 500 filas.
+    $totalesPacientes = [
+        'total' => 0,
+        'insatisfechas' => 0,
+        'con_metodo' => 0,
+        'seguimiento' => 0,
+        'atenciones_99208' => 0,
+    ];
+    try {
+        $stmtTotales = $pdo->prepare("
+            SELECT COUNT(*) AS total,
+                   SUM(CASE WHEN p.estado_paciente = 'INSATISFECHA_SIN_METODO' THEN 1 ELSE 0 END) AS insatisfechas,
+                   SUM(CASE WHEN p.estado_paciente = 'CAPTADA_CON_METODO' THEN 1 ELSE 0 END) AS con_metodo,
+                   SUM(CASE WHEN p.estado_paciente = 'SEGUIMIENTO_DOMICILIARIO' THEN 1 ELSE 0 END) AS seguimiento,
+                   SUM(CASE WHEN p.atencion_99208 = 1 THEN 1 ELSE 0 END) AS atenciones_99208
+            FROM pacientes_sin_metodo p
+            {$scopePacientes}
+        ");
+        $stmtTotales->execute($scopeParamsPacientes);
+        $totalesPacientes = array_merge($totalesPacientes, $stmtTotales->fetch() ?: []);
+    } catch (Throwable $e) {
+        error_log('[PlanificaHIS] overview totales: ' . $e->getMessage());
+    }
     $stats = [
-        'totalCaptadas' => count($pacientes),
-        'insatisfechasSinMetodo' => count(array_filter($pacientes, static fn ($p) => $p['estado_paciente'] === 'INSATISFECHA_SIN_METODO')),
-        'captadasConMetodo' => count(array_filter($pacientes, static fn ($p) => $p['estado_paciente'] === 'CAPTADA_CON_METODO')),
-        'seguimientoDomiciliario' => count(array_filter($pacientes, static fn ($p) => $p['estado_paciente'] === 'SEGUIMIENTO_DOMICILIARIO')),
+        'totalCaptadas' => (int)($totalesPacientes['total'] ?? 0),
+        'insatisfechasSinMetodo' => (int)($totalesPacientes['insatisfechas'] ?? 0),
+        'captadasConMetodo' => (int)($totalesPacientes['con_metodo'] ?? 0),
+        'seguimientoDomiciliario' => (int)($totalesPacientes['seguimiento'] ?? 0),
         'citasAmpollaHoyManana' => (int)($alertas['hoy'] ?? 0) + (int)($alertas['manana'] ?? 0),
         'alertasVencidas' => (int)($alertas['vencidas'] ?? 0),
         'alertasHisPorCaptar' => (int)($alertas['total'] ?? 0),
-        'atenciones99208' => count(array_filter($pacientes, static fn ($p) => $p['atencion_99208'] === true)),
+        'atenciones99208' => (int)($totalesPacientes['atenciones_99208'] ?? 0),
     ];
     $metricsRow = [];
     if (is_admin_session($session)) {
@@ -2014,7 +2128,10 @@ if ($action === 'overview') {
         'session' => [
             'dni' => $session['dni'],
             'cod_estab' => $session['cod_estab'],
-            'estab_nombre' => $session['estab_nombre'],
+            'estab_nombre' => $modoRed
+                ? 'TODA LA RED HUARAL-CHANCAY (53 IPRESS)'
+                : $session['estab_nombre'],
+            'alcance_red' => $modoRed,
             'platform' => $platform,
             'verified2FA' => two_factor_required(),
             'isAdmin' => is_admin_session($session),
@@ -2299,24 +2416,24 @@ function alertas_programaticas_datos(PDO $pdo, array $session, ?array $catalogo 
     $anioMax = (int)date('Y') + 1;
 
     $rolAlertas = HospitalHuaralDB::rolUsuario((string)($session['dni'] ?? ''));
-    $esObstetraAlertas = !puede_ver_red($session) && $rolAlertas !== 'JEFA_OBSTETRAS';
-    $alcanceAlertas = strtolower(trim((string)($_GET['alcance'] ?? (is_admin_session($session) ? 'red' : 'establecimiento'))));
-    $modoRedAlertas = es_alcance_red($session, $alcanceAlertas);
-    $obstetraAlertas = preg_replace('/[^0-9A-Za-z]/', '', (string)($_GET['obstetra'] ?? '')) ?? '';
+    $esAdminAlertas = is_admin_session($session);
+    $esJefaAlertas = $rolAlertas === 'JEFA_OBSTETRAS';
+    $esObstetraAlertas = !$esAdminAlertas && !$esJefaAlertas;
+    // Programación y alertas se filtran SIEMPRE por el establecimiento de la
+    // sesión. Ni la obstetra ni la jefatura aplican CODPSAL: ven toda la
+    // programación de su IPRESS. El administrador ve la red (ALL) o la IPRESS
+    // seleccionada en la cabecera.
+    $modoRedAlertas = $esAdminAlertas
+        && strtoupper(trim((string)($session['cod_estab'] ?? ''))) === 'ALL';
+    $obstetraAlertas = $esAdminAlertas
+        ? (preg_replace('/[^0-9A-Za-z]/', '', (string)($_GET['obstetra'] ?? '')) ?? '')
+        : '';
     if ($obstetraAlertas === 'TODOS') {
         $obstetraAlertas = '';
     }
-    // Aislamiento estricto de alertas: la obstetra SIEMPRE ve solo sus
-    // captaciones y su establecimiento; la Jefatura ve su establecimiento con
-    // filtro opcional por obstetra; los administradores conservan alcance total.
-    $ambitoAlertas = strtolower(trim((string)($_GET['ambito'] ?? '')));
-    $soloMisAlertas = $esObstetraAlertas;
     $condObstetraAlertas = '';
     $paramsObstetraAlertas = [];
-    if ($soloMisAlertas) {
-        $condObstetraAlertas = ' AND h.CODPSAL IN (' . implode(',', array_fill(0, count(variantes_codpsal_dni((string)($session['dni'] ?? ''))), '?')) . ') ';
-        $paramsObstetraAlertas = variantes_codpsal_dni((string)($session['dni'] ?? ''));
-    } elseif ($obstetraAlertas !== '') {
+    if ($obstetraAlertas !== '') {
         $variantesObstetraAlertas = variantes_codpsal_dni($obstetraAlertas);
         $condObstetraAlertas = ' AND h.CODPSAL IN (' . implode(',', array_fill(0, count($variantesObstetraAlertas), '?')) . ') ';
         $paramsObstetraAlertas = $variantesObstetraAlertas;
@@ -2326,21 +2443,20 @@ function alertas_programaticas_datos(PDO $pdo, array $session, ?array $catalogo 
     $scopeParams = [];
     if (!$modoRedAlertas) {
         $codigosEstabAlertas = codigos_establecimiento_sesion($session);
-        $scopeAlertas[] = 'h.COD_ESTAB IN (' . implode(',', array_fill(0, count($codigosEstabAlertas), '?')) . ')';
-        $scopeParams = array_merge($scopeParams, $codigosEstabAlertas);
-        // El filtro por obstetra se aplica SIEMPRE aparte con
-        // $condObstetraAlertas para no duplicar placeholders ni parámetros.
+        if ($codigosEstabAlertas) {
+            $scopeAlertas[] = 'h.COD_ESTAB IN (' . implode(',', array_fill(0, count($codigosEstabAlertas), '?')) . ')';
+            $scopeParams = array_merge($scopeParams, $codigosEstabAlertas);
+        }
     }
     $scope = $scopeAlertas ? (' AND ' . implode(' AND ', $scopeAlertas) . ' ') : '';
 
     $codigosConsulta = array_values($variantes);
     $cacheKey = hash('sha256', implode('|', [
-        'alertas-v3',
+        'alertas-v4',
         (string)($session['dni'] ?? ''),
         (string)($session['cod_estab'] ?? ''),
         (string)$rolAlertas,
         $modoRedAlertas ? 'red' : 'est',
-        $soloMisAlertas ? 'mis_captaciones' : 'establecimiento',
         $obstetraAlertas,
         implode(',', $codigosConsulta),
         (string)$limiteLista,
@@ -2512,10 +2628,12 @@ function alertas_programaticas_datos(PDO $pdo, array $session, ?array $catalogo 
                 INNER JOIN his_dl_dt dt ON dt.ID = h.ID
                 WHERE (h.DNI, h.ANO, h.MES, h.DIA) IN (" . implode(',', $tuplasAlerta) . ")
                   AND dt.DX IN ({$placeholdersAlertas})
+                  {$scope}
+                  {$condObstetraAlertas}
             ";
             try {
                 $stmtFilasAlerta = $pdo->prepare($sqlFilasAlerta);
-                $stmtFilasAlerta->execute(array_merge($paramsTuplasAlerta, $codigosConsulta));
+                $stmtFilasAlerta->execute(array_merge($paramsTuplasAlerta, $codigosConsulta, $scopeParams, $paramsObstetraAlertas));
                 foreach ($stmtFilasAlerta->fetchAll() as $filaAlerta) {
                     $filasAlertas[] = $filaAlerta;
                 }
@@ -3472,11 +3590,15 @@ if ($action === 'lookup_dni') {
     $dni = $validacionDocumento['documento'];
     $tipoDoc = $validacionDocumento['tipo'];
 
-    $codEstab = hospital_codigo_canonico((string)($_GET['cod_estab'] ?? $session['cod_estab']));
-    if (hospital_establecimiento($codEstab) === null) {
-        $codEstab = $session['cod_estab'];
+    $codEstab = establecimiento_registro_sesion($session);
+    $codEstabSolicitado = strtoupper(trim((string)($_GET['cod_estab'] ?? '')));
+    if (is_admin_session($session) && $codEstabSolicitado !== '' && $codEstabSolicitado !== 'ALL') {
+        $canonicoSolicitado = hospital_codigo_canonico($codEstabSolicitado);
+        if (hospital_establecimiento($canonicoSolicitado) !== null) {
+            $codEstab = str_pad($canonicoSolicitado, 9, '0', STR_PAD_LEFT);
+        }
     }
-    $est = hospital_establecimiento($codEstab);
+    $est = hospital_establecimiento($codEstab) ?: [];
 
     // 7.1 Historia general (la más reciente)
     $hisRecord = null;
@@ -3618,19 +3740,25 @@ if ($action === 'lookup_dni') {
     $stmtCap = $pdo->prepare('SELECT * FROM pacientes_sin_metodo WHERE dni = :dni LIMIT 1');
     $stmtCap->execute([':dni' => $dni]);
     $existing = $stmtCap->fetch() ?: null;
+    $captacionMismoEstablecimiento = false;
+    $nombreEstabCaptacion = '';
     if ($existing) {
+        $captacionMismoEstablecimiento = hospital_codigo_canonico((string)($existing['cod_estab'] ?? '')) === $codEstab;
+        $nombreEstabCaptacion = hospital_nombre_establecimiento((string)($existing['cod_estab'] ?? ''));
         $existing['celular'] = HospitalHuaralDB::decryptPII((string)$existing['celular']);
         $existing['correo'] = HospitalHuaralDB::decryptPII((string)$existing['correo']);
         $existing['direccion'] = HospitalHuaralDB::decryptPII((string)$existing['direccion']);
         $tipoDocExistente = tipo_documento_normalizado((string)($existing['tipo_doc'] ?? $tipoDoc)) ?: $tipoDoc;
         $existing['tipo_doc'] = $tipoDocExistente;
         $existing['tipo_doc_etiqueta'] = etiqueta_tipo_documento($tipoDocExistente);
-        $existing['estab_nombre'] = hospital_nombre_establecimiento((string)($existing['cod_estab'] ?? ''));
+        $existing['estab_nombre'] = $nombreEstabCaptacion;
         $existing['estado_etiqueta'] = str_replace('_', ' ', (string)($existing['estado_paciente'] ?? ''));
+        $existing['mismo_establecimiento'] = $captacionMismoEstablecimiento;
         unset($existing['encrypted_raw']);
     }
     $registroPrevio = $existing ? [
         'ya_registrada' => true,
+        'mismo_establecimiento' => $captacionMismoEstablecimiento,
         'cod_estab' => (string)($existing['cod_estab'] ?? ''),
         'establecimiento' => (string)($existing['estab_nombre'] ?? hospital_nombre_establecimiento((string)($existing['cod_estab'] ?? ''))),
         'fecha_registro' => (string)($existing['fecha_registro'] ?? ''),
@@ -3639,6 +3767,7 @@ if ($action === 'lookup_dni') {
         'obstetra_dni' => (string)($existing['codpsal_obstetra'] ?? ''),
     ] : [
         'ya_registrada' => false,
+        'mismo_establecimiento' => false,
         'cod_estab' => '',
         'establecimiento' => '',
         'fecha_registro' => '',
@@ -3720,9 +3849,37 @@ if ($action === 'lookup_dni') {
             'tipo_doc_etiqueta' => etiqueta_tipo_documento($tipoDocHis),
         ];
     }
+    $hisMismoEstablecimiento = $hisRecord
+        ? hospital_codigo_canonico((string)($hisRecord['COD_ESTAB'] ?? '')) === $codEstab
+        : false;
+    $pacienteEncontradaRed = (bool)$hisRecord || $registroPrevio['ya_registrada'];
+    $pacienteEnMismoEstablecimiento = $hisMismoEstablecimiento || $captacionMismoEstablecimiento;
+    $pacienteEnOtroEstablecimiento = $pacienteEncontradaRed && !$pacienteEnMismoEstablecimiento;
+    $estabUbicacionCodigo = '';
+    $estabUbicacionNombre = '';
+    if ($hisMismoEstablecimiento || $captacionMismoEstablecimiento) {
+        $estabUbicacionCodigo = $codEstab;
+        $estabUbicacionNombre = $nombreEstab;
+    } elseif ($hisRecord) {
+        $estabUbicacionCodigo = (string)($hisRecord['COD_ESTAB'] ?? '');
+        $estabUbicacionNombre = resolver_nombre_establecimiento($pdo, $estabUbicacionCodigo);
+    } elseif ($existing) {
+        $estabUbicacionCodigo = (string)($existing['cod_estab'] ?? '');
+        $estabUbicacionNombre = $nombreEstabCaptacion;
+    }
+    if (!$pacienteEncontradaRed) {
+        $mensajeUbicacionPaciente = 'La paciente no registra atenciones previas en la Red Huaral-Chancay.';
+    } elseif ($pacienteEnMismoEstablecimiento) {
+        $mensajeUbicacionPaciente = 'La paciente SÍ registra atenciones en ESTE establecimiento (' . $nombreEstab . ').';
+    } else {
+        $mensajeUbicacionPaciente = 'La paciente registra atenciones en OTRO establecimiento de la Red: '
+            . ($estabUbicacionNombre !== '' ? $estabUbicacionNombre : 'establecimiento no identificado') . '.';
+    }
+
     $mensajeRegistroPrevio = $registroPrevio['ya_registrada']
         ? sprintf(
-            'La paciente YA ESTÁ REGISTRADA en la app: %s, fecha %s, estado %s.',
+            'La paciente YA ESTÁ REGISTRADA en la app en %s: %s, fecha %s, estado %s.',
+            $registroPrevio['mismo_establecimiento'] ? 'ESTE establecimiento' : 'OTRO establecimiento',
             $registroPrevio['establecimiento'] !== '' ? $registroPrevio['establecimiento'] : 'establecimiento no registrado',
             $registroPrevio['fecha_registro'] !== '' ? $registroPrevio['fecha_registro'] : 'sin fecha',
             $registroPrevio['estado_etiqueta'] !== '' ? $registroPrevio['estado_etiqueta'] : 'sin estado'
@@ -3755,9 +3912,17 @@ if ($action === 'lookup_dni') {
         'pacienteYaRegistrada' => $registroPrevio['ya_registrada'],
         'registroPrevio' => $registroPrevio,
         'mensajeRegistroPrevio' => $mensajeRegistroPrevio,
-        'foundInEstablecimiento' => $hisRecord
-            ? (hospital_codigo_canonico((string)$hisRecord['COD_ESTAB']) === $codEstab)
-            : false,
+        'ubicacionPaciente' => [
+            'encontrada' => $pacienteEncontradaRed,
+            'mismo_establecimiento' => $pacienteEnMismoEstablecimiento,
+            'otro_establecimiento' => $pacienteEnOtroEstablecimiento,
+            'cod_estab' => $estabUbicacionCodigo,
+            'establecimiento' => $estabUbicacionNombre,
+            'mensaje' => $mensajeUbicacionPaciente,
+        ],
+        'mensajeUbicacionPaciente' => $mensajeUbicacionPaciente,
+        'foundInEstablecimiento' => $hisMismoEstablecimiento,
+        'foundInOtherEstablishment' => $pacienteEnOtroEstablecimiento,
         'hasActiveMethodInHis' => $hasActiveMethod,
         'hisRecord' => $hisRecord,
         'hisDetails' => $hisDetails,
@@ -3899,19 +4064,35 @@ if ($action === 'reporte_programacion') {
         }
     }
 
-    $reporteCtx = resolver_alcance_reporte(
-        $session,
-        (string)($_GET['obstetra'] ?? ''),
-        $alcance
-    );
-    $modoRedReporte = $reporteCtx['alcance_red'];
-    $obstetraReporte = $reporteCtx['dni_obstetra'];
+    $esAdminReporte = is_admin_session($session);
+    $rolReporte = rol_sesion($session);
+    $esObstetraReporte = $rolReporte === 'OBSTETRA';
+    $esJefaReporte = $rolReporte === 'JEFA_OBSTETRAS';
+    $modoRedReporte = $esAdminReporte
+        && strtoupper(trim((string)($session['cod_estab'] ?? ''))) === 'ALL';
+    // Programación: obstetra y jefatura ven TODA la programación de su
+    // establecimiento, sin filtro CODPSAL. Solo el administrador puede añadir
+    // un filtro opcional por obstetra.
+    $obstetraReporte = $esAdminReporte
+        ? (preg_replace('/[^0-9A-Za-z]/', '', (string)($_GET['obstetra'] ?? '')) ?? '')
+        : '';
+    if ($obstetraReporte === 'TODOS') {
+        $obstetraReporte = '';
+    }
     $alcance = $modoRedReporte ? 'red' : 'establecimiento';
-    $ambitoReporte = $reporteCtx['solo_mis'] ? 'mis_captaciones' : 'establecimiento';
+    $ambitoReporte = $modoRedReporte ? 'red' : 'establecimiento';
+    $reporteCtx = [
+        'rol' => $rolReporte,
+        'es_obstetra' => $esObstetraReporte,
+        'es_jefa' => $esJefaReporte,
+        'alcance_red' => $modoRedReporte,
+        'dni_obstetra' => $obstetraReporte,
+        'codigos_estab' => $modoRedReporte ? [] : codigos_establecimiento_sesion($session),
+    ];
 
     // El establecimiento se aplica SIEMPRE en la consulta principal. Nunca se
     // mezclan establecimientos para Jefatura/Obstetra; solo los administradores
-    // superiores pueden solicitar alcance de red.
+    // con sesión "ALL" pueden consultar la red completa.
     $condicionEstabH = '';
     $paramsEstab = [];
     if (!$modoRedReporte && $reporteCtx['codigos_estab']) {
@@ -4098,10 +4279,12 @@ if ($action === 'reporte_programacion') {
                 INNER JOIN his_dl_dt dt ON dt.ID = h.ID
                 WHERE (h.DNI, h.ANO, h.MES, h.DIA) IN (" . implode(',', $tuplasReporte) . ")
                   AND dt.DX IN ({$placeholdersReporte})
+                  {$condicionEstabH}
+                  {$condicionObstetra}
             ";
             try {
                 $stmtFilasReporte = $pdo->prepare($sqlFilasReporte);
-                $stmtFilasReporte->execute(array_merge($paramsTuplasReporte, $codigosConsulta));
+                $stmtFilasReporte->execute(array_merge($paramsTuplasReporte, $codigosConsulta, $paramsEstab, $paramsObstetra));
                 foreach ($stmtFilasReporte->fetchAll() as $filaReporte) {
                     $filasBase[] = $filaReporte;
                 }
@@ -4305,8 +4488,6 @@ if ($action === 'reporte_programacion') {
         if ($obstetraNombreReporte === '') {
             $obstetraNombreReporte = 'OBSTETRA ' . $obstetraReporte;
         }
-    } elseif ($reporteCtx['es_obstetra']) {
-        $obstetraNombreReporte = HospitalHuaralDB::nombrePersona((string)$session['dni'], $pdo);
     } elseif ($modoRedReporte) {
         $obstetraNombreReporte = 'TODAS LAS OBSTETRAS DE LA RED';
     } else {
@@ -4429,7 +4610,8 @@ if ($action === 'reporte_padron') {
         return $cmp !== 0 ? $cmp : strcmp((string)$a['paciente_nombre'], (string)$b['paciente_nombre']);
     });
     $perfil = session_profile_payload($pdo, $session);
-    $modoRedPadron = es_alcance_red($session, (string)($_GET['alcance'] ?? (is_admin_session($session) ? 'red' : 'establecimiento')));
+    $modoRedPadron = is_admin_session($session)
+        && strtoupper(trim((string)($session['cod_estab'] ?? ''))) === 'ALL';
     $obstetraPadron = preg_replace('/[^0-9A-Za-z]/', '', (string)($_GET['obstetra'] ?? '')) ?? '';
     if ($obstetraPadron === 'TODOS') {
         $obstetraPadron = '';
@@ -4503,13 +4685,12 @@ function reporte_rango_fechas(array $input): array
  *
  * @return array<int, string>
  */
-function reporte_codigos_establecimiento(array $session, string $alcance): array
+function reporte_codigos_establecimiento(array $session, string $alcance = ''): array
 {
-    if ($alcance === 'red' && puede_ver_red($session)) {
+    if (is_admin_session($session) && strtoupper(trim((string)($session['cod_estab'] ?? ''))) === 'ALL') {
         return [];
     }
-    $variantes = hospital_codigos_busqueda_establecimiento((string)($session['cod_estab'] ?? ''));
-    return $variantes ?: [(string)($session['cod_estab'] ?? '000005481')];
+    return codigos_establecimiento_sesion($session);
 }
 
 /**
@@ -4638,33 +4819,17 @@ function reporte_campo_datos(PDO $pdo, array $session, array $input, int $page =
 {
     [$desde, $hasta] = reporte_rango_fechas($input);
     $hastaExclusivo = (new DateTimeImmutable($hasta))->modify('+1 day')->format('Y-m-d');
-    $codEstabSolicitadoCampo = preg_replace('/[^0-9A-Za-z]/', '', (string)($input['cod_estab'] ?? '')) ?? '';
-    if (in_array(strtoupper($codEstabSolicitadoCampo), ['TODOS', 'RED'], true)) {
-        $codEstabSolicitadoCampo = '';
-    }
-    $alcanceRecibidoCampo = strtolower(trim((string)($input['alcance'] ?? '')));
-    if ($alcanceRecibidoCampo === '') {
-        // Un ADMIN_ESTADISTICA que envía cod_estab específico pide ese
-        // establecimiento; sin cod_estab se conserva el alcance de red.
-        $alcanceRecibidoCampo = ($codEstabSolicitadoCampo !== '' || !is_admin_session($session)) ? 'establecimiento' : 'red';
-    }
+    $esAdminCampo = is_admin_session($session);
+    $modoRedCampo = $esAdminCampo
+        && strtoupper(trim((string)($session['cod_estab'] ?? ''))) === 'ALL';
     $reporteCtxCampo = resolver_alcance_reporte(
         $session,
         (string)($input['obstetra'] ?? ''),
-        $alcanceRecibidoCampo
+        $modoRedCampo ? 'red' : 'establecimiento'
     );
     $soloMisCaptacionesCampo = $reporteCtxCampo['es_obstetra'];
-    $modoRedCampo = $reporteCtxCampo['alcance_red'];
     $alcance = $modoRedCampo ? 'red' : 'establecimiento';
-    if ($modoRedCampo) {
-        $codigosEstab = [];
-    } elseif (is_admin_session($session) && $codEstabSolicitadoCampo !== '') {
-        // Estadística puede consultar cualquier IPRESS específica de la Red.
-        $variantesSolicitadasCampo = hospital_codigos_busqueda_establecimiento($codEstabSolicitadoCampo);
-        $codigosEstab = $variantesSolicitadasCampo ?: [$codEstabSolicitadoCampo];
-    } else {
-        $codigosEstab = $reporteCtxCampo['codigos_estab'];
-    }
+    $codigosEstab = $modoRedCampo ? [] : codigos_establecimiento_sesion($session);
     $obstetra = $reporteCtxCampo['dni_obstetra'];
 
     $where = ['p.fecha_registro >= :desde', 'p.fecha_registro < :hasta_exclusivo'];
@@ -4928,30 +5093,17 @@ function reporte_metodos_datos(PDO $pdo, array $session, array $input, int $page
 {
     [$desde, $hasta] = reporte_rango_fechas($input);
     $hastaExclusivo = (new DateTimeImmutable($hasta))->modify('+1 day')->format('Y-m-d');
-    $codEstabSolicitadoMetodos = preg_replace('/[^0-9A-Za-z]/', '', (string)($input['cod_estab'] ?? '')) ?? '';
-    if (in_array(strtoupper($codEstabSolicitadoMetodos), ['TODOS', 'RED'], true)) {
-        $codEstabSolicitadoMetodos = '';
-    }
-    $alcanceRecibidoMetodos = strtolower(trim((string)($input['alcance'] ?? '')));
-    if ($alcanceRecibidoMetodos === '') {
-        $alcanceRecibidoMetodos = ($codEstabSolicitadoMetodos !== '' || !is_admin_session($session)) ? 'establecimiento' : 'red';
-    }
+    $esAdminMetodos = is_admin_session($session);
+    $modoRedMetodos = $esAdminMetodos
+        && strtoupper(trim((string)($session['cod_estab'] ?? ''))) === 'ALL';
     $reporteCtxMetodos = resolver_alcance_reporte(
         $session,
         (string)($input['obstetra'] ?? ''),
-        $alcanceRecibidoMetodos
+        $modoRedMetodos ? 'red' : 'establecimiento'
     );
     $soloMisCaptacionesMetodos = $reporteCtxMetodos['es_obstetra'];
-    $modoRedMetodos = $reporteCtxMetodos['alcance_red'];
     $alcance = $modoRedMetodos ? 'red' : 'establecimiento';
-    if ($modoRedMetodos) {
-        $codigosEstab = [];
-    } elseif (is_admin_session($session) && $codEstabSolicitadoMetodos !== '') {
-        $variantesSolicitadasMetodos = hospital_codigos_busqueda_establecimiento($codEstabSolicitadoMetodos);
-        $codigosEstab = $variantesSolicitadasMetodos ?: [$codEstabSolicitadoMetodos];
-    } else {
-        $codigosEstab = $reporteCtxMetodos['codigos_estab'];
-    }
+    $codigosEstab = $modoRedMetodos ? [] : codigos_establecimiento_sesion($session);
     $obstetraMetodos = $reporteCtxMetodos['dni_obstetra'];
     $catalogo = catalogo_metodos_planificacion($pdo);
 
@@ -5669,7 +5821,10 @@ if ($action === 'save_paciente') {
     $estadoInsert = $estadoExplicito ? $estadoSolicitado : null;
     $estadoUpdate = $estadoExplicito ? $estadoSolicitado : $estadoDefault;
     $estadoPresente = $estadoExplicito ? 1 : 0;
-    $codEstab = $session['cod_estab'];
+    // La captación SIEMPRE se registra en una IPRESS real. Si un administrador
+    // está viendo la red completa ("ALL"), se usa la IPRESS asignada a su
+    // cuenta; nunca se escribe "ALL" en pacientes_sin_metodo.
+    $codEstab = establecimiento_registro_sesion($session);
     $atencion99208Solicitada = !empty($body['atencion_99208']) ? 1 : 0;
 
     if (strlen($dni) < 6 || strlen($dni) > 15) {
@@ -6075,11 +6230,22 @@ if ($action === 'equipo_jefatura') {
     if (!es_jefa_session($session) && !is_admin_session($session)) {
         json_error('Solo la Jefatura de Obstetras puede consultar el equipo de su establecimiento.', 403);
     }
-    $codEstabEquipo = is_admin_session($session)
-        ? hospital_codigo_canonico((string)($_GET['cod_estab'] ?? $session['cod_estab']))
-        : hospital_codigo_canonico((string)$session['cod_estab']);
-    if (hospital_establecimiento($codEstabEquipo) === null) {
-        $codEstabEquipo = hospital_codigo_canonico((string)$session['cod_estab']);
+    $codEstabEquipo = '';
+    if (is_admin_session($session)) {
+        $solicitadoEquipo = hospital_codigo_canonico((string)($_GET['cod_estab'] ?? ''));
+        if (hospital_establecimiento($solicitadoEquipo) !== null) {
+            $codEstabEquipo = $solicitadoEquipo;
+        }
+    } elseif (strtoupper(trim((string)($session['cod_estab'] ?? ''))) !== 'ALL') {
+        $canonicoEquipo = hospital_codigo_canonico((string)$session['cod_estab']);
+        if (hospital_establecimiento($canonicoEquipo) !== null) {
+            $codEstabEquipo = $canonicoEquipo;
+        }
+    }
+    if ($codEstabEquipo === '') {
+        // Nunca consultar con cod_estab = 'ALL': se usa la IPRESS asignada a la
+        // cuenta cuando el administrador está en alcance de red completa.
+        $codEstabEquipo = establecimiento_registro_sesion($session);
     }
     $variantesEquipo = hospital_codigos_busqueda_establecimiento($codEstabEquipo);
     if (!$variantesEquipo) {

@@ -91,6 +91,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
     const API = './api.php';
     const TOKEN_KEY = 'planificahis.php.token.v1';
     const SESSION_KEY = 'planificahis.php.session.v1';
+    const MIRROR_DNI_KEY = 'planificahis.php.session.dni.v1';
     const QUEUE_KEY = 'planificahis.php.offline.queue.v1';
     const DEVICE_KEY = 'planificahis.php.offline.device-key.v1';
     const IOS_DISMISS_KEY = 'planificahis.php.ios-install-dismissed.v1';
@@ -231,7 +232,9 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
     }
 
     let state = {
-      token: localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY) || '',
+      // sessionStorage es la fuente autoritativa por pestaña. El espejo en
+      // localStorage solo se usa en boot() si su DNI coincide con la sesión.
+      token: (function () { try { return sessionStorage.getItem(TOKEN_KEY) || ''; } catch (e) { return ''; } })(),
       session: null,
       authTab: 'LOGIN',
       authStep: 'CREDENTIALS',
@@ -334,14 +337,25 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
     }
 
     function authHeaders(extra) {
-      const headers = Object.assign({ 'Content-Type': 'application/json' }, extra || {});
-      if (state.token) headers.Authorization = 'Bearer ' + state.token;
+      const headers = Object.assign({ 'Content-Type': 'application/json', 'Accept': 'application/json' }, extra || {});
+      if (state.token) {
+        headers.Authorization = 'Bearer ' + state.token;
+        headers['X-App-Token'] = state.token;
+      }
       return headers;
     }
 
+    function paramsConMarcaTiempo(params) {
+      return Object.assign({}, params || {}, { _ts: String(Date.now()) });
+    }
+
     async function apiGet(action, params) {
-      const query = new URLSearchParams(Object.assign({ action: action }, params || {}));
-      const res = await fetch(API + '?' + query.toString(), { headers: authHeaders(), cache: 'no-store' });
+      const query = new URLSearchParams(Object.assign({ action: action }, paramsConMarcaTiempo(params)));
+      const res = await fetch(API + '?' + query.toString(), {
+        headers: authHeaders(),
+        cache: 'no-store',
+        credentials: 'same-origin'
+      });
       const data = await res.json().catch(function () { return {}; });
       if (res.status === 401) {
         clearSession();
@@ -352,10 +366,13 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
     }
 
     async function apiPost(action, body) {
-      const res = await fetch(API + '?action=' + encodeURIComponent(action), {
+      const query = new URLSearchParams({ action: action, _ts: String(Date.now()) });
+      const res = await fetch(API + '?' + query.toString(), {
         method: 'POST',
         headers: authHeaders(),
-        body: JSON.stringify(body || {})
+        body: JSON.stringify(body || {}),
+        cache: 'no-store',
+        credentials: 'same-origin'
       });
       const data = await res.json().catch(function () { return {}; });
       if (res.status === 401) {
@@ -370,21 +387,108 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       return data;
     }
 
-    function clearSession() {
-      state.token = '';
+    /**
+     * Limpia TODO el estado en memoria de la sesión. Se ejecuta al iniciar y
+     * cerrar sesión y al cambiar de usuario, para que ninguna pestaña pueda
+     * reutilizar pacientes, reportes o credenciales de otra persona.
+     */
+    function resetSessionData() {
       state.session = null;
+      state.authTab = 'LOGIN';
       state.authStep = 'CREDENTIALS';
       state.challengeId = '';
+      state.demoCode = '';
+      state.pendingUser = null;
+      state.activeTab = 'CAPTAR';
+      state.pacientes = [];
+      state.agendaAmpollas = [];
+      state.produccionObstetras = [];
+      state.auditLogs = [];
+      state.catalogoMetodos = [];
+      state.alertas = {
+        manana: 0, hoy: 0, vencidas: 0, total: 0,
+        listas: { manana: [], hoy: [], vencidas: [] }
+      };
+      state.agendaGrupo = 'TODAS';
+      state.distritos = DISTRITOS;
+      state.stats = {
+        insatisfechasSinMetodo: 0, citasAmpollaHoyManana: 0, atenciones99208: 0,
+        totalCaptadas: 0, captadasConMetodo: 0
+      };
+      state.securityMetrics = {
+        sqliBlockedCount: 0, xssBlockedCount: 0, totpVerifiedCount: 0,
+        encryptedRecordsCount: 0, failedLoginsBlocked: 0, auditLogCount: 0
+      };
       state.hisLookup = null;
       state.formDraft = null;
       state.formVisible = false;
       state.nombresDesbloqueados = false;
       state.estadoExplicito = null;
+      state.editandoPaciente = null;
+      state.feedback = null;
+      state.distritoSelect = 'HUARAL';
+      state.distritoOtros = '';
+      state.chainVerification = null;
+      state.wafResult = null;
+      state.syncExport = null;
+      state.syncMode = 'directo';
+      state.loadingSync = false;
+      state.offlinePending = 0;
+      state.syncingOffline = false;
+      state.changingEstab = false;
+      state.reporteVista = 'CAMPO';
+      state.campoFiltros = Object.assign(filtrosReportePorDefecto(), { alcance: 'establecimiento', ambito: 'establecimiento' });
       state.campoData = null;
+      state.campoLoading = false;
+      state.campoError = '';
+      state.metodosFiltros = Object.assign(filtrosReportePorDefecto(), { alcance: 'establecimiento', ambito: 'establecimiento' });
       state.metodosData = null;
+      state.metodosLoading = false;
+      state.metodosError = '';
+      state.productividadFiltros = Object.assign(filtrosReportePorDefecto(), { alcance: 'establecimiento' });
+      state.productividadData = null;
+      state.productividadLoading = false;
+      state.productividadError = '';
+      state.padronData = null;
+      state.padronLoading = false;
+      state.padronError = '';
+      state.padronGrupo = 'todas';
+      state.padronAlcance = 'establecimiento';
+      state.padronObstetra = 'TODOS';
+      state.accesosData = null;
+      state.accesosLoading = false;
+      state.accesosError = '';
+      state.accesosFiltros = { q: '', rol: 'TODOS', cod_estab: 'TODOS', activo: 'TODOS' };
+      state.accesoForm = { dni: '', nombre_completo: '', nombres: '', apellido_paterno: '', apellido_materno: '', rol: 'OBSTETRA', cod_estab: '', pin: '', email: '', celular: '', activo: 1 };
+      state.personasSugeridas = [];
+      state.showAccesoModal = false;
+      state.adminTab = 'DIRECTORIO';
+      state.movimientosData = null;
+      state.movimientosLoading = false;
+      state.movimientosError = '';
+      state.movimientosFiltros = { q: '', accion: 'TODAS', cod_estab: 'TODOS', fecha_desde: '', fecha_hasta: '' };
+      state.equipoData = null;
+      state.equipoLoading = false;
+      state.resetDni = '';
+      state.guardandoMetodo = false;
+      state.reporteFecha = localIsoDate(0);
+      state.reporteModo = 'exacto';
+      state.reporteAlcance = 'establecimiento';
+      state.reporteAmbito = 'establecimiento';
+      state.reporteObstetra = '';
+      state.reporteMetodo = 'TODOS';
+      state.reporteProgramacion = null;
+      state.reporteLoading = false;
+      state.reporteError = '';
+    }
+
+    function clearSession() {
+      state.token = '';
+      resetSessionData();
       try {
         localStorage.removeItem(TOKEN_KEY);
         localStorage.removeItem(SESSION_KEY);
+        localStorage.removeItem(MIRROR_DNI_KEY);
         sessionStorage.removeItem(TOKEN_KEY);
         sessionStorage.removeItem(SESSION_KEY);
       } catch (e) {}
@@ -392,12 +496,98 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
 
     function persistSession() {
       try {
-        if (state.token) localStorage.setItem(TOKEN_KEY, state.token);
-        if (state.session) localStorage.setItem(SESSION_KEY, JSON.stringify(state.session));
-        // Se limpian las claves antiguas para evitar sesiones duplicadas.
-        sessionStorage.removeItem(TOKEN_KEY);
-        sessionStorage.removeItem(SESSION_KEY);
+        if (!state.token || !state.session) return;
+        const dni = String(state.session.dni || '').trim();
+        if (!dni) return;
+        // El espejo local SOLO se escribe si el token pertenece a la sesión
+        // renderizada. Nunca se mezcla la identidad de dos usuarios.
+        if (String(state.session.token || '') !== state.token) state.session.token = state.token;
+        const payload = JSON.stringify(state.session);
+        sessionStorage.setItem(TOKEN_KEY, state.token);
+        sessionStorage.setItem(SESSION_KEY, payload);
+        localStorage.setItem(TOKEN_KEY, state.token);
+        localStorage.setItem(SESSION_KEY, payload);
+        localStorage.setItem(MIRROR_DNI_KEY, dni);
       } catch (e) {}
+    }
+
+    /**
+     * Recupera la sesión de la pestaña. sessionStorage manda; el espejo en
+     * localStorage se acepta únicamente si su DNI y token coinciden.
+     */
+    function leerSesionPersistida() {
+      try {
+        const tokenPestana = sessionStorage.getItem(TOKEN_KEY) || '';
+        const rawPestana = sessionStorage.getItem(SESSION_KEY) || '';
+        if (tokenPestana && rawPestana) {
+          const sesionPestana = JSON.parse(rawPestana);
+          if (sesionPestana && sesionPestana.dni && String(sesionPestana.token || '') === tokenPestana) {
+            return sesionPestana;
+          }
+        }
+      } catch (e) {}
+      try {
+        const tokenEspejo = localStorage.getItem(TOKEN_KEY) || '';
+        const rawEspejo = localStorage.getItem(SESSION_KEY) || '';
+        const dniEspejo = localStorage.getItem(MIRROR_DNI_KEY) || '';
+        if (!tokenEspejo || !rawEspejo || !dniEspejo) return null;
+        const sesionEspejo = JSON.parse(rawEspejo);
+        if (
+          sesionEspejo &&
+          String(sesionEspejo.dni || '') === dniEspejo &&
+          String(sesionEspejo.token || '') === tokenEspejo
+        ) {
+          return sesionEspejo;
+        }
+      } catch (e) {}
+      return null;
+    }
+
+    /**
+     * Descarta todo dato operativo al cambiar de establecimiento: la nueva
+     * IPRESS no puede mostrar pacientes, alertas ni reportes del alcance anterior.
+     */
+    function limpiarDatosAlcance() {
+      state.pacientes = [];
+      state.agendaAmpollas = [];
+      state.produccionObstetras = [];
+      state.auditLogs = [];
+      state.catalogoMetodos = [];
+      state.alertas = {
+        manana: 0, hoy: 0, vencidas: 0, total: 0,
+        listas: { manana: [], hoy: [], vencidas: [] }
+      };
+      state.stats = {
+        insatisfechasSinMetodo: 0, citasAmpollaHoyManana: 0, atenciones99208: 0,
+        totalCaptadas: 0, captadasConMetodo: 0
+      };
+      state.hisLookup = null;
+      state.formDraft = null;
+      state.formVisible = false;
+      state.nombresDesbloqueados = false;
+      state.estadoExplicito = null;
+      state.editandoPaciente = null;
+      state.campoData = null;
+      state.metodosData = null;
+      state.productividadData = null;
+      state.padronData = null;
+      state.reporteProgramacion = null;
+      state.reporteError = '';
+      state.accesosData = null;
+      state.movimientosData = null;
+      state.equipoData = null;
+    }
+
+    function sincronizarAlcanceFiltros() {
+      const red = !!(state.session && String(state.session.cod_estab) === 'ALL');
+      state.reporteAlcance = red ? 'red' : 'establecimiento';
+      state.reporteAmbito = 'establecimiento';
+      state.campoFiltros.alcance = red ? 'red' : 'establecimiento';
+      state.campoFiltros.ambito = 'establecimiento';
+      state.metodosFiltros.alcance = red ? 'red' : 'establecimiento';
+      state.metodosFiltros.ambito = 'establecimiento';
+      state.productividadFiltros.alcance = red ? 'red' : 'establecimiento';
+      state.padronAlcance = red ? 'red' : 'establecimiento';
     }
 
     function establishName(codigo) {
@@ -656,7 +846,8 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
             <div class="min-w-0 flex-1">
               <div class="text-xs font-bold text-slate-900 truncate">${esc(s.nombreCompleto || 'Hospital SJB Huaral')}</div>
               ${s.isAdmin ? `<select aria-label="Establecimiento activo" onchange="cambiarEstablecimiento(this.value)" ${state.changingEstab ? 'disabled' : ''} class="mt-0.5 w-full max-w-[250px] min-h-[30px] px-2 py-0.5 rounded-lg border border-sky-200 bg-sky-50 text-[10px] text-sky-950 font-medium truncate">
-                ${optionsEstablecimientos(s.cod_estab || '000005481')}
+                <option value="ALL" ${s.cod_estab === 'ALL' ? 'selected' : ''}>🌐 TODOS LOS ESTABLECIMIENTOS (RED COMPLETA)</option>
+                ${optionsEstablecimientos(s.cod_estab === 'ALL' ? '' : (s.cod_estab || ''))}
               </select>` : `<div class="mt-0.5 w-full max-w-[250px] min-h-[30px] px-2 py-1 rounded-lg border border-slate-200 bg-slate-50 text-[10px] text-slate-700 font-medium truncate" title="Establecimiento fijo asignado a su cuenta">🏥 ${esc(s.estab_nombre || establishName(s.cod_estab))}</div>`}
 
             </div>
@@ -841,6 +1032,11 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
             ${prog && prog.tieneMetodoRegistrado
               ? '<div class="font-bold">Método registrado en la Red: ' + esc(prog.nombreMetodo) + ' (' + esc(prog.codigoMetodo) + ')</div><p>' + esc((lookup.hisRecord && (lookup.hisRecord.Apellido_p + ' ' + lookup.hisRecord.Apellido_m + ', ' + (lookup.hisRecord.Dnombres || lookup.hisRecord.Pnombre))) || '') + '.</p>'
               : '<div class="font-bold">' + (lookup.foundInHis ? 'Paciente en base del hospital pero SIN método vigente' : 'Paciente nueva sin método registrado') + '</div><p>Complete sus datos abajo para registrarla en seguimiento.</p>'}
+          </div>` : ''}
+
+          ${lookup && lookup.ubicacionPaciente ? `<div class="p-3 rounded-xl border ${lookup.ubicacionPaciente.otro_establecimiento ? 'bg-amber-50 border-amber-300 text-amber-950' : (lookup.ubicacionPaciente.mismo_establecimiento ? 'bg-emerald-50 border-emerald-300 text-emerald-950' : 'bg-slate-50 border-slate-300 text-slate-700')} text-[11px] space-y-0.5">
+            <div class="font-extrabold">${lookup.ubicacionPaciente.otro_establecimiento ? '🔄 Paciente registrada en OTRO establecimiento' : (lookup.ubicacionPaciente.mismo_establecimiento ? '✅ Paciente registrada en ESTE establecimiento' : 'ℹ️ Paciente sin atenciones previas en la Red')}</div>
+            <p class="leading-relaxed">${esc(lookup.mensajeUbicacionPaciente || lookup.ubicacionPaciente.mensaje || '')}</p>
           </div>` : ''}
 
           ${lookup && lookup.registroPrevio && lookup.registroPrevio.ya_registrada ? `<div class="p-3.5 rounded-xl border-2 border-sky-400 bg-sky-50 text-xs text-sky-950 space-y-1">
@@ -1212,10 +1408,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
               <option value="vencidas" ${state.reporteModo === 'vencidas' ? 'selected' : ''}>Vencidas</option>
               <option value="todos" ${state.reporteModo === 'todos' ? 'selected' : ''}>Todos</option>
             </select></div>
-            ${state.session && state.session.isAdmin ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">Alcance</label><select id="rep-alcance" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-[10px] bg-white">
-              <option value="establecimiento" ${state.reporteAlcance === 'establecimiento' ? 'selected' : ''}>Mi establecimiento</option>
-              <option value="red" ${state.reporteAlcance === 'red' ? 'selected' : ''}>Toda la Red</option>
-            </select></div>` : ''}
+            ${state.session && state.session.isAdmin ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">Alcance (selector de cabecera)</label><div class="w-full min-h-[42px] px-2 py-2 rounded-xl border border-sky-200 bg-sky-50 text-[10px] text-sky-950 font-semibold">${esc(state.session.estab_nombre || 'Toda la Red')}</div></div>` : ''}
           </div>
           ${state.session && !state.session.isAdmin && state.session.isJefa ? `<div class="space-y-1"><label class="block text-[10px] font-bold text-slate-600 mb-1">Obstetra de mi establecimiento</label><select id="rep-obstetra" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-[10px] bg-white">${opcionesObstetrasReporte(state.reporteObstetra, 'Todas las obstetras de mi establecimiento')}</select>${reporteEstablecimientoFijoHtml()}</div>` : ''}
           ${state.session && state.session.isAdmin ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">Obstetra (opcional, DNI o vacío = todas)</label><input id="rep-obstetra" type="text" inputmode="numeric" maxlength="11" value="${esc(state.reporteObstetra)}" placeholder="DNI de la obstetra" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs font-mono" /></div>` : ''}
@@ -1614,6 +1807,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       const esJefa = Boolean(s.isJefa);
       const esSuperAdmin = Boolean(s.esSuperAdmin || s.rol === 'SUPER_ADMIN');
       const puedeReset = Boolean(s.puedeResetearObstetra);
+      const estabCuenta = s.cod_estab_asignado || (s.cod_estab && s.cod_estab !== 'ALL' ? s.cod_estab : '');
       return `<div class="p-4 rounded-2xl bg-white border ${esSuperAdmin ? 'border-2 border-amber-400' : 'border border-slate-200'} space-y-3">
         <div class="flex items-center gap-3"><div class="w-12 h-12 shrink-0">${HOSPITAL_LOGO_HTML}</div><div class="min-w-0"><div class="text-sm font-bold text-slate-900">${esc(s.nombreCompleto)} ${esSuperAdmin ? '<span class="ml-1 px-2 py-0.5 rounded-lg bg-gradient-to-r from-amber-400 via-yellow-300 to-sky-500 text-slate-950 text-[9px] font-black border border-amber-500 align-middle">★ SUPER ADMIN</span>' : ''}</div><div class="text-xs text-slate-500 font-mono">DNI / CODPSAL: ${esc(s.dni)}</div><div class="text-xs text-sky-700">${esc(s.estab_nombre || establishName(s.cod_estab))}</div><div class="text-[10px] font-bold text-slate-600 mt-0.5">Rol: ${esc(s.rol_etiqueta || s.rol || 'OBSTETRA')}</div></div></div>
         <div class="pt-3 border-t border-slate-100 flex items-center justify-between text-xs"><span class="text-slate-600">Instalación en celular</span><button type="button" onclick="installPwa()" class="min-h-[38px] px-3 rounded-xl bg-slate-900 text-white text-xs font-semibold">Instalar App</button></div>
@@ -1643,7 +1837,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
             <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Celular</label><input id="per-cel" type="tel" inputmode="numeric" value="${esc(s.celular || '')}" placeholder="987654321" class="w-full min-h-[42px] px-3 rounded-xl border border-slate-300 text-xs font-mono" /></div>
           </div>
           <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Correo electrónico</label><input id="per-email" type="email" value="${esc(s.email || '')}" placeholder="obstetra@hospitalhuaral.gob.pe" class="w-full min-h-[42px] px-3 rounded-xl border border-slate-300 text-xs" /></div>
-          <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Establecimiento (53 IPRESS)</label><select id="per-estab" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white">${optionsEstablecimientos(s.cod_estab || '000005481')}</select></div>
+          <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Establecimiento (53 IPRESS)</label><select id="per-estab" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white">${estabCuenta ? '' : '<option value="" selected>— Seleccione establecimiento —</option>'}${optionsEstablecimientos(estabCuenta)}</select></div>
           <div class="grid grid-cols-2 gap-2">
             <div><label class="block text-[10px] font-bold text-slate-600 mb-1">PIN recuperación (4 dígitos)</label><input id="per-pin" type="password" inputmode="numeric" maxlength="4" placeholder="Solo si desea cambiarlo" class="w-full min-h-[42px] px-3 rounded-xl border border-slate-300 text-xs font-mono" /></div>
             <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Nueva contraseña</label><input id="per-pass" type="password" minlength="8" placeholder="Mínimo 8 caracteres" class="w-full min-h-[42px] px-3 rounded-xl border border-slate-300 text-xs" /></div>
@@ -1961,10 +2155,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
                 ? `<div class="space-y-1"><label class="block text-[10px] font-bold text-slate-600 mb-1">Obstetra de mi establecimiento</label><select onchange="actualizarFiltroCampo('obstetra', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white">${opcionesObstetrasReporte(f.obstetra, 'Todas las obstetras de mi establecimiento')}</select>${reporteEstablecimientoFijoHtml()}</div>`
                 : `<div class="col-span-2">${reporteObstetraFijaHtml('Reporte limitado a sus propias captaciones y a su establecimiento.')}</div>`}
           </div>
-          ${state.session && state.session.isAdmin ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">Alcance</label><select onchange="actualizarFiltroCampo('alcance', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-[10px] bg-white">
-            <option value="establecimiento" ${f.alcance === 'establecimiento' ? 'selected' : ''}>Mi establecimiento activo</option>
-            <option value="red" ${f.alcance === 'red' ? 'selected' : ''}>Toda la Red (53 IPRESS)</option>
-          </select></div>` : ''}
+          ${state.session && state.session.isAdmin ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">Alcance (selector de cabecera)</label><div class="w-full min-h-[42px] px-2 py-2 rounded-xl border border-sky-200 bg-sky-50 text-[10px] text-sky-950 font-semibold">${esc(state.session.estab_nombre || 'Toda la Red')}</div></div>` : ''}
           <input type="search" value="${esc(f.q)}" oninput="buscarCampoDebounce(this.value)" placeholder="Buscar por DNI o nombres de la paciente..." class="w-full min-h-[44px] px-3 rounded-xl border border-slate-300 text-xs" />
           <button type="button" onclick="cargarReporteCampo(true)" ${state.campoLoading ? 'disabled' : ''} class="w-full min-h-[46px] rounded-xl bg-sky-700 hover:bg-sky-800 text-white text-xs font-bold disabled:opacity-60">${state.campoLoading ? 'Consultando reporte...' : 'Aplicar filtros y actualizar'}</button>
           ${state.campoError ? '<div class="p-3 rounded-xl bg-red-50 border border-red-200 text-[11px] text-red-800">' + esc(state.campoError) + '</div>' : ''}
@@ -3071,10 +3262,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
             <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Desde</label><input id="prod-desde" type="date" value="${esc(f.fecha_desde)}" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs font-mono" /></div>
             <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Hasta</label><input id="prod-hasta" type="date" value="${esc(f.fecha_hasta)}" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs font-mono" /></div>
           </div>
-          ${state.session && state.session.isAdmin ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">Alcance</label><select id="prod-alcance" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-[10px] bg-white">
-            <option value="establecimiento" ${f.alcance === 'establecimiento' ? 'selected' : ''}>Mi establecimiento activo</option>
-            <option value="red" ${f.alcance === 'red' ? 'selected' : ''}>Toda la Red (53 IPRESS)</option>
-          </select></div>` : ''}
+          ${state.session && state.session.isAdmin ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">Alcance (selector de cabecera)</label><div class="w-full min-h-[42px] px-2 py-2 rounded-xl border border-sky-200 bg-sky-50 text-[10px] text-sky-950 font-semibold">${esc(state.session.estab_nombre || 'Toda la Red')}</div></div>` : ''}
           <div class="grid grid-cols-2 gap-2">
             <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Mes / Año rápido</label><input type="month" onchange="aplicarMesProductividad(this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs font-mono" /></div>
             ${state.session && state.session.isAdmin
@@ -3128,10 +3316,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
           <div class="grid grid-cols-4 gap-1.5">
             ${grupos.map(function (g) { return '<button type="button" onclick="setPadronGrupo(\'' + g.id + '\')" class="min-h-[40px] rounded-xl text-[9px] font-bold ' + (state.padronGrupo === g.id ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-700') + '">' + esc(g.label) + '</button>'; }).join('')}
           </div>
-          ${state.session && state.session.isAdmin ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">Alcance</label><select onchange="setPadronAlcance(this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-[10px] bg-white">
-            <option value="establecimiento" ${state.padronAlcance === 'establecimiento' ? 'selected' : ''}>Mi establecimiento activo</option>
-            <option value="red" ${state.padronAlcance === 'red' ? 'selected' : ''}>Toda la Red (53 IPRESS)</option>
-          </select></div>` : ''}
+          ${state.session && state.session.isAdmin ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">Alcance (selector de cabecera)</label><div class="w-full min-h-[42px] px-2 py-2 rounded-xl border border-sky-200 bg-sky-50 text-[10px] text-sky-950 font-semibold">${esc(state.session.estab_nombre || 'Toda la Red')}</div></div>` : ''}
           ${state.session && state.session.isAdmin
             ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">DNI obstetra (opcional)</label><input type="text" inputmode="numeric" value="${esc(state.padronObstetra !== 'TODOS' ? state.padronObstetra : '')}" placeholder="Todas las obstetras" onchange="setPadronObstetra(this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs font-mono" /></div>`
             : state.session && state.session.isJefa
@@ -3443,8 +3628,12 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
 
     async function descargarReporteExcel(action, parametros, nombreArchivo) {
       try {
-        const query = new URLSearchParams(Object.assign({ action: action }, parametros || {}));
-        const res = await fetch(API + '?' + query.toString(), { headers: authHeaders(), cache: 'no-store' });
+        const query = new URLSearchParams(Object.assign({ action: action }, paramsConMarcaTiempo(parametros)));
+        const res = await fetch(API + '?' + query.toString(), {
+          headers: authHeaders(),
+          cache: 'no-store',
+          credentials: 'same-origin'
+        });
         if (res.status === 401) {
           clearSession();
           render();
@@ -3523,15 +3712,16 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
     }
 
     async function enterApp(session) {
+      if (!session || !session.token || !session.dni) {
+        throw new Error('El servidor no emitió una sesión válida. Intente nuevamente.');
+      }
+      resetSessionData();
       state.token = session.token;
-      state.session = session;
-      persistSession();
-      state.authStep = 'CREDENTIALS';
+      state.session = Object.assign({}, session);
       state.activeTab = 'CAPTAR';
-      state.pendingUser = null;
-      state.demoCode = '';
-      state.challengeId = '';
-      state.feedback = null;
+      state.authStep = 'CREDENTIALS';
+      sincronizarAlcanceFiltros();
+      persistSession();
       await loadOverview();
       startOfflineSync();
       render();
@@ -3614,7 +3804,14 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         if (data.stats) state.stats = Object.assign(state.stats, data.stats);
         if (data.securityMetrics) state.securityMetrics = data.securityMetrics;
         if (data.session) {
-          state.session = Object.assign(state.session || {}, data.session);
+          const dniApi = String(data.session.dni || '');
+          const dniActual = String((state.session && state.session.dni) || '');
+          if (dniActual && dniApi && dniActual !== dniApi) {
+            clearSession();
+            throw new Error('La identidad de la sesión cambió. Inicie sesión nuevamente.');
+          }
+          state.session = Object.assign({}, state.session || {}, data.session, { token: state.token });
+          sincronizarAlcanceFiltros();
           persistSession();
         }
         state.offlinePending = readQueueRaw().length;
@@ -3627,20 +3824,17 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       if (!state.token || !codEstab || (state.session && codEstab === state.session.cod_estab)) return;
       invalidarCacheAlertas();
       state.changingEstab = true;
+      state.feedback = null;
+      render();
       try {
         const data = await apiPost('change_establecimiento', { cod_estab: codEstab });
-        state.session = Object.assign(state.session || {}, { cod_estab: data.session.cod_estab, estab_nombre: data.session.estab_nombre });
+        state.session = Object.assign({}, state.session || {}, data.session, { token: state.token });
+        sincronizarAlcanceFiltros();
+        limpiarDatosAlcance();
         persistSession();
-        state.hisLookup = null;
-        state.formDraft = null;
-        state.formVisible = false;
-        state.nombresDesbloqueados = false;
-      state.estadoExplicito = null;
-        state.reporteProgramacion = null;
-        state.campoData = null;
-        state.metodosData = null;
-        state.feedback = { type: 'success', text: 'Establecimiento activo: ' + data.session.estab_nombre + '. Las búsquedas de DNI revisan toda la Red y registran en su establecimiento activo.' };
         await loadOverview();
+        state.feedback = { type: 'success', text: 'Establecimiento activo: ' + ((data.session && data.session.estab_nombre) || state.session.estab_nombre) + '. Las búsquedas de DNI revisan toda la Red y registran en el establecimiento de su cuenta.' };
+        if (state.activeTab === 'REPORTES') setVistaReporte(state.reporteVista);
       } catch (error) {
         state.feedback = { type: 'error', text: error.message };
       } finally {
@@ -3654,9 +3848,6 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         apiPost('logout', {}).catch(function () {});
       }
       clearSession();
-      state.pacientes = [];
-      state.auditLogs = [];
-      state.feedback = null;
       render();
     }
 
@@ -4280,36 +4471,61 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       });
     }
 
-    // Restaurar sesión persistente (7 días) desde localStorage o cookie HttpOnly.
+    // Aislamiento multi-pestaña: si otra pestaña cierra sesión o inicia con otro
+    // DNI, esta pestaña descarta su estado y vuelve al login inmediatamente.
+    window.addEventListener('storage', function (event) {
+      if (event.key !== null && event.key !== TOKEN_KEY && event.key !== SESSION_KEY && event.key !== MIRROR_DNI_KEY) return;
+      if (!state.token || !state.session) return;
+      let tokenNuevo = '';
+      let dniNuevo = '';
+      try {
+        tokenNuevo = localStorage.getItem(TOKEN_KEY) || '';
+        dniNuevo = localStorage.getItem(MIRROR_DNI_KEY) || '';
+      } catch (e) {
+        tokenNuevo = '';
+        dniNuevo = '';
+      }
+      const dniActual = String(state.session.dni || '');
+      if (!tokenNuevo || !dniNuevo || (dniActual && dniNuevo !== dniActual)) {
+        clearSession();
+        window.location.reload();
+      }
+    });
+
+    // Restaurar sesión persistente (7 días): sessionStorage por pestaña y,
+    // solo si el DNI coincide, el espejo verificado de localStorage.
     (async function boot() {
       if (isIos() && !isStandalone()) state.iosBanner = true;
       state.offlinePending = readQueueRaw().length;
-      let sesionGuardada = null;
-      try {
-        const raw = localStorage.getItem(SESSION_KEY) || sessionStorage.getItem(SESSION_KEY) || '';
-        if (raw) sesionGuardada = JSON.parse(raw);
-      } catch (e) {
-        sesionGuardada = null;
-      }
-      if (sesionGuardada && sesionGuardada.token) {
+      const sesionGuardada = leerSesionPersistida();
+      if (sesionGuardada && sesionGuardada.token && sesionGuardada.dni) {
         state.token = sesionGuardada.token;
         state.session = sesionGuardada;
+        sincronizarAlcanceFiltros();
       }
-      try {
-        // Valida el Bearer de localStorage o la cookie HttpOnly y renueva la
-        // sesión 7 días (sliding expiration) sin pedir login.
-        const data = await apiGet('session_restore');
-        if (data && data.session && data.session.token) {
-          state.token = data.session.token;
-          state.session = data.session;
-          persistSession();
-          await loadOverview();
-          startOfflineSync();
+      if (state.token) {
+        try {
+          // Valida el token de ESTA pestaña y renueva la sesión sin pedir login.
+          const data = await apiGet('session_restore');
+          if (data && data.session && data.session.token) {
+            const dniApi = String(data.session.dni || '');
+            const dniLocal = String((state.session && state.session.dni) || '');
+            if (dniLocal && dniApi && dniLocal !== dniApi) {
+              clearSession();
+            } else {
+              state.token = data.session.token;
+              state.session = data.session;
+              sincronizarAlcanceFiltros();
+              persistSession();
+              await loadOverview();
+              startOfflineSync();
+            }
+          }
+        } catch (e) {
+          // Sin sesión válida se muestra el login. Si el fallo es de red y la
+          // sesión local sigue presente, se conserva para operar offline.
+          if (!state.token || !state.session) clearSession();
         }
-      } catch (e) {
-        // Sin sesión válida se muestra el login. Si el fallo es de red y la
-        // sesión local sigue presente, se conserva para operar offline.
-        if (!state.token || !state.session) clearSession();
       }
       render();
       updatePendingIndicators();

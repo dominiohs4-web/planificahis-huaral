@@ -351,7 +351,7 @@ final class HospitalHuaralDB
         // (semáforo en /tmp) salvo que DB_AUTO_MIGRATE=1.
         $autoMigrate = getenv('DB_AUTO_MIGRATE') === '1';
         $schemaLock = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR)
-            . DIRECTORY_SEPARATOR . 'planificahis_schema_v7_'
+            . DIRECTORY_SEPARATOR . 'planificahis_schema_v8_'
             . substr(hash('sha256', $host . '|' . $dbname), 0, 12) . '.lock';
         if ($autoMigrate || !is_file($schemaLock)) {
             try {
@@ -452,6 +452,7 @@ final class HospitalHuaralDB
               `rol` varchar(30) NOT NULL DEFAULT 'OBSTETRA',
               `cod_estab` varchar(9) NOT NULL DEFAULT '000005481',
               `puede_ver_red` tinyint(1) NOT NULL DEFAULT 0,
+              `protegido` tinyint(1) NOT NULL DEFAULT 0,
               `activo` tinyint(1) NOT NULL DEFAULT 1,
               `creado_por` varchar(40) NOT NULL DEFAULT '',
               `ultimo_login` timestamp NULL DEFAULT NULL,
@@ -473,22 +474,18 @@ final class HospitalHuaralDB
                 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'app_usuarios_accesos'
             ");
             if ((int)$stmtLegacy->fetchColumn() > 0) {
+                // INSERT IGNORE evita el error de columna ambigua que produce
+                // `ON DUPLICATE KEY UPDATE nombre_completo = ...` en MariaDB
+                // cuando origen y destino comparten nombres de columna. Los
+                // usuarios ya existentes en app_usuarios nunca se sobreescriben.
                 $pdo->exec("
-                    INSERT INTO `app_usuarios`
+                    INSERT IGNORE INTO `app_usuarios`
                         (`dni`, `nombre_completo`, `rol`, `cod_estab`, `activo`,
                          `pin_recuperacion`, `celular`, `email`, `puede_ver_red`, `creado_por`)
                     SELECT `dni`, `nombre_completo`, `rol`, `cod_estab`, `activo`,
                            LEFT(`pin_hash`, 64), `celular`, `email`,
                            IF(`rol` = 'ADMIN_ESTADISTICA', 1, 0), 'MIGRACION'
                     FROM `app_usuarios_accesos`
-                    ON DUPLICATE KEY UPDATE
-                        nombre_completo = IF(VALUES(nombre_completo) <> '', VALUES(nombre_completo), nombre_completo),
-                        rol = IF(rol IN ('', 'OBSTETRA'), VALUES(rol), rol),
-                        cod_estab = IF(VALUES(cod_estab) <> '', VALUES(cod_estab), cod_estab),
-                        pin_recuperacion = IF(VALUES(pin_recuperacion) <> '', VALUES(pin_recuperacion), pin_recuperacion),
-                        celular = IF(VALUES(celular) <> '', VALUES(celular), celular),
-                        email = IF(VALUES(email) <> '', VALUES(email), email),
-                        puede_ver_red = GREATEST(puede_ver_red, VALUES(puede_ver_red))
                 ");
             }
             $pdo->exec('DROP TABLE IF EXISTS `app_usuarios_accesos`');
@@ -513,6 +510,13 @@ final class HospitalHuaralDB
                     ':red' => hospital_es_rol_admin_superior($metaPre['rol']) ? 1 : 0,
                 ]);
             }
+            // La Cuenta Maestra es inmutable: siempre SUPER_ADMIN, activa y
+            // marcada como protegida, incluso si una migración previa la alteró.
+            $pdo->prepare("
+                UPDATE `app_usuarios`
+                SET `rol` = 'SUPER_ADMIN', `protegido` = 1, `activo` = 1, `puede_ver_red` = 1
+                WHERE `dni` = :dni
+            ")->execute([':dni' => SUPER_ADMIN_DNI]);
         } catch (Throwable $e) {
             // Si la tabla no admite el upsert se conserva el acceso por DNI.
         }
@@ -547,6 +551,7 @@ final class HospitalHuaralDB
             "ALTER TABLE `auditoria_seguridad_app` ADD COLUMN IF NOT EXISTS `actor_estab` varchar(9) NOT NULL DEFAULT '' AFTER `actor_dni`",
             "ALTER TABLE `auditoria_seguridad_app` ADD COLUMN IF NOT EXISTS `plataforma` varchar(30) NOT NULL DEFAULT 'Web Desktop' AFTER `ip`",
             "ALTER TABLE `auditoria_seguridad_app` ADD COLUMN IF NOT EXISTS `prev_hash` char(64) NOT NULL DEFAULT '' AFTER `plataforma`",
+            "ALTER TABLE `app_usuarios` ADD COLUMN IF NOT EXISTS `protegido` tinyint(1) NOT NULL DEFAULT 0 AFTER `puede_ver_red`",
             "ALTER TABLE `pacientes_sin_metodo` MODIFY COLUMN `celular` varchar(512) CHARACTER SET utf8 COLLATE utf8_general_ci NULL DEFAULT NULL",
             "ALTER TABLE `pacientes_sin_metodo` MODIFY COLUMN `correo` varchar(512) CHARACTER SET utf8 COLLATE utf8_general_ci NULL DEFAULT NULL",
             "ALTER TABLE `pacientes_sin_metodo` MODIFY COLUMN `direccion` varchar(512) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL",
@@ -1031,24 +1036,39 @@ final class HospitalHuaralDB
     }
 
     // ========================================================================
-    // SESIONES FIRMADAS HMAC-SHA256 + COOKIE PERSISTENTE + SLIDING EXPIRATION
+    // SESIONES OPACAS 64 HEX + HASH SHA-256 + TOKEN POR PETICIÓN
     // ========================================================================
+    /**
+     * Normaliza el establecimiento de una sesión: "ALL" para el alcance de red
+     * del administrador o el código IPRESS canónico de 9 dígitos.
+     */
+    public static function normalizarEstablecimientoSesion(?string $codEstab): string
+    {
+        $codEstab = trim((string)$codEstab);
+        if (strtoupper($codEstab) === 'ALL') {
+            return 'ALL';
+        }
+        if ($codEstab === '') {
+            return '000005481';
+        }
+        $canonico = hospital_codigo_canonico($codEstab);
+        if (hospital_establecimiento($canonico) === null) {
+            $canonico = $codEstab;
+        }
+        return str_pad(trim($canonico), 9, '0', STR_PAD_LEFT);
+    }
+
+    /**
+     * Emite un token opaco de 64 caracteres hexadecimales. En la base solo se
+     * persiste su hash SHA-256: una filtración de app_sesiones no permite
+     * reutilizar tokens válidos.
+     */
     public static function createSessionToken(string $dni, string $codEstab, string $platform, int $ttlSeconds = self::SESSION_TTL): string
     {
         $now = time();
         $ttlSeconds = $ttlSeconds > 0 ? $ttlSeconds : self::SESSION_TTL;
-        $payload = [
-            'v' => 1,
-            'dni' => $dni,
-            'estab' => $codEstab,
-            'iat' => $now,
-            'exp' => $now + $ttlSeconds,
-            'nonce' => bin2hex(random_bytes(16)),
-            'platform' => $platform,
-        ];
-        $encoded = self::base64UrlEncode(json_encode($payload, JSON_UNESCAPED_SLASHES) ?: '');
-        $signature = hash_hmac('sha256', 'ph1.' . $encoded, self::sessionSecret());
-        $token = 'ph1.' . $encoded . '.' . $signature;
+        $token = bin2hex(random_bytes(32));
+        $codEstab = self::normalizarEstablecimientoSesion($codEstab);
 
         $pdo = self::getConnection();
         $stmt = $pdo->prepare("
@@ -1108,8 +1128,16 @@ final class HospitalHuaralDB
             || (isset($_SERVER['HTTPS']) && strtolower((string)$_SERVER['HTTPS']) !== 'off');
     }
 
+    /**
+     * Extrae el token SOLO de los canales explícitos permitidos:
+     * Authorization: Bearer, X-App-Token o el parámetro `token` (necesario
+     * para descargas Excel que no pueden enviar cabeceras personalizadas).
+     * Nunca usa cookies ni app_config.
+     */
     public static function tokenFromRequest(): string
     {
+        $candidatos = [];
+
         $auth = $_SERVER['HTTP_AUTHORIZATION'] ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION'] ?? '';
         if (!is_string($auth) || trim($auth) === '') {
             $headers = function_exists('apache_request_headers')
@@ -1122,30 +1150,42 @@ final class HospitalHuaralDB
                 }
             }
         }
-        if (preg_match('/^Bearer\s+(ph1\.[A-Za-z0-9\-_\.]+)$/', trim((string)$auth), $m)) {
-            return $m[1];
+        if (is_string($auth) && preg_match('/^Bearer\s+([a-f0-9]{64})$/i', trim($auth), $m)) {
+            $candidatos[] = strtolower($m[1]);
         }
-        $cookie = $_COOKIE[self::SESSION_COOKIE] ?? '';
-        return is_string($cookie) && preg_match('/^ph1\.[A-Za-z0-9\-_\.]+$/', $cookie) ? $cookie : '';
-    }
 
-    private static function base64UrlEncode(string $data): string
-    {
-        return rtrim(strtr(base64_encode($data), '+/', '-_'), '=');
-    }
-
-    private static function base64UrlDecode(string $data): string
-    {
-        $pad = strlen($data) % 4;
-        if ($pad) {
-            $data .= str_repeat('=', 4 - $pad);
+        $appToken = $_SERVER['HTTP_X_APP_TOKEN'] ?? '';
+        if (!is_string($appToken) || trim($appToken) === '') {
+            $headers = $headers ?? (function_exists('apache_request_headers')
+                ? apache_request_headers()
+                : (function_exists('getallheaders') ? getallheaders() : []));
+            foreach ($headers as $name => $value) {
+                if (strcasecmp((string)$name, 'X-App-Token') === 0) {
+                    $appToken = (string)$value;
+                    break;
+                }
+            }
         }
-        return base64_decode(strtr($data, '-_', '+/'), true) ?: '';
+        if (is_string($appToken) && preg_match('/^[a-f0-9]{64}$/i', trim($appToken))) {
+            $candidatos[] = strtolower(trim($appToken));
+        }
+
+        $queryToken = $_GET['token'] ?? '';
+        if (is_string($queryToken) && preg_match('/^[a-f0-9]{64}$/i', trim($queryToken))) {
+            $candidatos[] = strtolower(trim($queryToken));
+        }
+
+        return $candidatos[0] ?? '';
     }
 
     /**
-     * Valida el Bearer Token y devuelve la sesión. NUNCA devuelve una sesión demo
-     * cuando falta el token: todo endpoint clínico debe fallar con 401.
+     * Valida el token por petición con el JOIN exacto app_sesiones → app_usuarios.
+     * NUNCA devuelve una sesión demo cuando falta el token.
+     *
+     * Regla de establecimiento:
+     *  - OBSTETRA / JEFA_OBSTETRAS: siempre u.cod_estab (ignora parámetros).
+     *  - ADMIN_ESTADISTICA / SUPER_ADMIN: "ALL" o el establecimiento elegido
+     *    en su sesión; si no hay uno válido, u.cod_estab.
      *
      * @return array<string, mixed>|null
      */
@@ -1155,29 +1195,20 @@ final class HospitalHuaralDB
         if ($token === '') {
             return null;
         }
-        $parts = explode('.', $token);
-        if (count($parts) !== 3) {
-            return null;
-        }
-        [, $encoded, $signature] = $parts;
-        $expected = hash_hmac('sha256', 'ph1.' . $encoded, self::sessionSecret());
-        if (!hash_equals($expected, $signature)) {
-            return null;
-        }
-        $payload = json_decode(self::base64UrlDecode($encoded), true);
-        if (!is_array($payload) || ($payload['v'] ?? 0) !== 1) {
-            return null;
-        }
         $now = time();
         $pdo = self::getConnection();
         $hash = hash('sha256', $token);
         $stmt = $pdo->prepare("
-            SELECT dni, cod_estab, plataforma, expires_at, last_activity
-            FROM app_sesiones
-            WHERE token_hash = :hash AND revoked = 0
+            SELECT s.token_hash, s.dni, s.cod_estab, s.plataforma, s.expires_at,
+                   s.last_activity, s.revoked,
+                   u.cod_estab AS usuario_cod_estab, u.rol, u.activo,
+                   u.protegido, u.puede_ver_red
+            FROM app_sesiones s
+            INNER JOIN app_usuarios u ON u.dni = s.dni
+            WHERE s.token_hash = :th AND s.revoked = 0
             LIMIT 1
         ");
-        $stmt->execute([':hash' => $hash]);
+        $stmt->execute([':th' => $hash]);
         $row = $stmt->fetch();
         if (!$row) {
             return null;
@@ -1185,34 +1216,75 @@ final class HospitalHuaralDB
         // Expiración absoluta de 7 días. NO hay revocación por inactividad
         // corta: basta con que la sesión siga vigente y no esté revocada.
         if ((int)$row['expires_at'] < $now) {
-            $pdo->prepare('UPDATE app_sesiones SET revoked = 1 WHERE token_hash = :hash')
-                ->execute([':hash' => $hash]);
+            $pdo->prepare('UPDATE app_sesiones SET revoked = 1 WHERE token_hash = :th')
+                ->execute([':th' => $hash]);
             self::clearSessionCookie();
             return null;
         }
 
+        $dni = (string)$row['dni'];
+        $esSuperAdmin = hospital_es_super_admin($dni);
+        if ((int)($row['activo'] ?? 1) !== 1 && !$esSuperAdmin) {
+            $pdo->prepare('UPDATE app_sesiones SET revoked = 1 WHERE token_hash = :th')
+                ->execute([':th' => $hash]);
+            self::clearSessionCookie();
+            if (!headers_sent()) {
+                http_response_code(401);
+            }
+            return null;
+        }
+
+        $rol = strtoupper(trim((string)($row['rol'] ?? 'OBSTETRA')));
+        $esAdmin = hospital_es_rol_admin_superior($rol) || $esSuperAdmin;
+        $estabUsuario = self::normalizarEstablecimientoSesion((string)($row['usuario_cod_estab'] ?? '000005481'));
+        $estabSesion = strtoupper(trim((string)($row['cod_estab'] ?? '')));
+        if (!$esAdmin) {
+            // La obstetra y la jefa NUNCA pueden elegir otro establecimiento.
+            $codEstab = $estabUsuario;
+        } elseif ($estabSesion === 'ALL') {
+            $codEstab = 'ALL';
+        } elseif ($estabSesion !== '') {
+            $codEstab = self::normalizarEstablecimientoSesion($estabSesion);
+            if (hospital_establecimiento($codEstab) === null) {
+                $codEstab = $estabUsuario;
+            }
+        } else {
+            $codEstab = $estabUsuario;
+        }
+
+        $codEstabGuardado = (string)($row['cod_estab'] ?? '');
+        if ($codEstab !== $codEstabGuardado) {
+            $pdo->prepare('UPDATE app_sesiones SET cod_estab = :estab WHERE token_hash = :th')
+                ->execute([':estab' => $codEstab, ':th' => $hash]);
+        }
+
         // Sliding expiration: se renueva la sesión como máximo una vez cada
-        // 300 segundos. Evita un UPDATE hacia TiDB Cloud en cada GET de la PWA
-        // (15 obstetras × decenas de peticiones/minuto).
+        // 300 segundos. Evita un UPDATE hacia TiDB Cloud en cada GET de la PWA.
         $nuevoExpira = $now + self::SESSION_TTL;
         $ultimaActividad = (int)($row['last_activity'] ?? 0);
         if (($now - $ultimaActividad) > 300) {
-            $pdo->prepare('UPDATE app_sesiones SET last_activity = :now, expires_at = :expires WHERE token_hash = :hash')
-                ->execute([':now' => $now, ':expires' => $nuevoExpira, ':hash' => $hash]);
+            $pdo->prepare('UPDATE app_sesiones SET last_activity = :now, expires_at = :expires WHERE token_hash = :th')
+                ->execute([':now' => $now, ':expires' => $nuevoExpira, ':th' => $hash]);
             $ultimaActividad = $now;
         } else {
-            // Se conserva la expiración ya calculada por el último UPDATE.
             $nuevoExpira = max($nuevoExpira, (int)$row['expires_at']);
         }
         self::sendSessionCookie($token, self::SESSION_TTL);
 
-        $platform = $requiredPlatform ?: ($row['plataforma'] ?? 'Web Desktop');
+        $platform = $requiredPlatform ?: ((string)($row['plataforma'] ?? '') ?: 'Web Desktop');
         return [
             'token' => $token,
-            'dni' => (string)$row['dni'],
-            'cod_estab' => (string)$row['cod_estab'],
-            'estab_nombre' => hospital_nombre_establecimiento((string)$row['cod_estab']),
+            'dni' => $dni,
+            'cod_estab' => $codEstab,
+            'estab_nombre' => $codEstab === 'ALL'
+                ? 'TODA LA RED HUARAL-CHANCAY'
+                : hospital_nombre_establecimiento($codEstab),
             'platform' => $platform,
+            'rol' => $rol,
+            'activo' => (int)($row['activo'] ?? 1),
+            'protegido' => (int)($row['protegido'] ?? 0),
+            'puede_ver_red' => (int)($row['puede_ver_red'] ?? 0),
+            'es_admin' => $esAdmin,
             'expires_at' => $nuevoExpira,
             'last_activity' => $ultimaActividad,
         ];
@@ -1221,21 +1293,25 @@ final class HospitalHuaralDB
     public static function revokeSession(string $token): void
     {
         $pdo = self::getConnection();
-        $pdo->prepare('UPDATE app_sesiones SET revoked = 1 WHERE token_hash = :hash')
-            ->execute([':hash' => hash('sha256', $token)]);
+        $pdo->prepare('UPDATE app_sesiones SET revoked = 1 WHERE token_hash = :th')
+            ->execute([':th' => hash('sha256', $token)]);
         self::clearSessionCookie();
     }
 
+    /**
+     * Cambia SOLO el establecimiento de la sesión actual. "ALL" es válido y
+     * representa el alcance de red completa para administradores. La cuenta
+     * (app_usuarios.cod_estab) no se modifica.
+     */
     public static function cambiarEstablecimientoSesion(string $token, string $codEstab, string $dni): void
     {
-        $canonico = hospital_codigo_canonico($codEstab);
+        $codEstab = self::normalizarEstablecimientoSesion($codEstab);
+        if ($codEstab !== 'ALL' && hospital_establecimiento($codEstab) === null) {
+            return;
+        }
         $pdo = self::getConnection();
-        $pdo->prepare('UPDATE app_sesiones SET cod_estab = :estab WHERE token_hash = :hash AND dni = :dni')
-            ->execute([':estab' => $canonico, ':hash' => hash('sha256', $token), ':dni' => $dni]);
-        $pdo->prepare("
-            INSERT INTO app_obstetra_establecimiento (dni, cod_estab) VALUES (:dni, :estab)
-            ON DUPLICATE KEY UPDATE cod_estab = VALUES(cod_estab)
-        ")->execute([':dni' => $dni, ':estab' => $canonico]);
+        $pdo->prepare('UPDATE app_sesiones SET cod_estab = :estab WHERE token_hash = :th')
+            ->execute([':estab' => $codEstab, ':th' => hash('sha256', $token)]);
     }
 
     public static function establecerEstablecimientoObstetra(string $dni, string $codEstab): string
