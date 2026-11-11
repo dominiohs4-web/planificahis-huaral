@@ -115,8 +115,8 @@ if (!$isCli) {
 }
 
 /**
- * Conexión PDO endurecida. La nube usa TLS obligatorio cuando el puerto es 4000
- * o el host pertenece a TiDB Cloud; la base local del hospital no usa TLS.
+ * Conexión PDO endurecida. La nube usa TLS cuando CLOUD_DB_SSL/DB_SSL valen 1;
+ * la base local del hospital no usa TLS.
  */
 function sync_pdo(array $cfg, bool $isCloud): PDO
 {
@@ -135,13 +135,9 @@ function sync_pdo(array $cfg, bool $isCloud): PDO
         PDO::ATTR_TIMEOUT => 20,
     ];
 
-    $host = (string)$cfg['host'];
-    $port = (string)$cfg['port'];
     $useSsl = $isCloud && (
         getenv('CLOUD_DB_SSL') === '1'
         || getenv('DB_SSL') === '1'
-        || $port === '4000'
-        || str_contains($host, 'tidbcloud.com')
     );
     if ($useSsl) {
         if (defined('PDO::MYSQL_ATTR_SSL_VERIFY_SERVER_CERT')) {
@@ -156,12 +152,13 @@ function sync_pdo(array $cfg, bool $isCloud): PDO
     return new PDO($dsn, $cfg['user'], $cfg['pass'], $options);
 }
 
+// Infraestructura dedicada en DigitalOcean (MySQL 8.0).
 $cloudCfg = [
-    'host' => getenv('CLOUD_DB_HOST') ?: (getenv('DB_HOST') ?: '127.0.0.1'),
-    'port' => getenv('CLOUD_DB_PORT') ?: (getenv('DB_PORT') ?: '3306'),
-    'dbname' => getenv('CLOUD_DB_NAME') ?: (getenv('DB_NAME') ?: 'app'),
-    'user' => getenv('CLOUD_DB_USER') ?: (getenv('DB_USER') ?: 'root'),
-    'pass' => getenv('CLOUD_DB_PASS') !== false ? (string)getenv('CLOUD_DB_PASS') : (getenv('DB_PASS') ?: ''),
+    'host' => '206.189.225.149',
+    'port' => '3306',
+    'dbname' => 'app',
+    'user' => 'admin_planifica',
+    'pass' => '75100725L@uis',
 ];
 $localCfg = [
     'host' => getenv('LOCAL_DB_HOST') ?: '127.0.0.1',

@@ -565,20 +565,21 @@ final class HospitalHuaralDB
                 self::$connectionVerified = true;
                 return self::$pdo;
             } catch (Throwable $e) {
-                // TiDB Serverless cierra sockets inactivos: se descarta la
-                // conexión muerta y se abre una nueva en el mismo request.
+                // El servidor remoto puede cerrar sockets inactivos: se
+                // descarta la conexión muerta y se abre una nueva en el mismo
+                // request.
                 error_log('[PlanificaHIS] Conexión MySQL reciclada: ' . $e->getMessage());
                 self::$pdo = null;
                 self::$connectionVerified = false;
             }
         }
 
-        $host = (string)(getenv('DB_HOST') ?: '127.0.0.1');
-        $port = (string)(getenv('DB_PORT') ?: '3306');
-        $dbname = (string)(getenv('DB_NAME') ?: 'app');
-        $user = (string)(getenv('DB_USER') ?: 'root');
-        $pass = getenv('DB_PASS') !== false ? (string)getenv('DB_PASS') : '';
-        $esTiDBCloud = ($port === '4000' || str_contains($host, 'tidbcloud.com'));
+        // Infraestructura dedicada en DigitalOcean (MySQL 8.0).
+        $host = '206.189.225.149';
+        $port = '3306';
+        $dbname = 'app';
+        $user = 'admin_planifica';
+        $pass = '75100725L@uis';
 
         $dsn = "mysql:host={$host};port={$port};dbname={$dbname};charset=utf8mb4";
         $options = [
@@ -587,20 +588,20 @@ final class HospitalHuaralDB
             // BLOQUEO REAL DE SQLi: el driver no interpola parámetros.
             PDO::ATTR_EMULATE_PREPARES => false,
             PDO::ATTR_STRINGIFY_FETCHES => false,
-            // En TiDB Cloud Serverless las conexiones persistentes terminan en
-            // "MySQL server has gone away" (SQLSTATE HY000 / 2006). Se usa una
-            // conexión no persistente y se valida con SELECT 1 antes de usarla.
-            PDO::ATTR_PERSISTENT => !$esTiDBCloud,
-            PDO::ATTR_TIMEOUT => 15,
-            // El modo SQL se fija al abrir la conexión; así no se paga un
-            // round-trip adicional por request.
-            PDO::MYSQL_ATTR_INIT_COMMAND => "SET SESSION sql_mode = 'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION,ALLOW_INVALID_DATES'",
+            // Conexión persistente para reducir el handshake TCP/TLS entre
+            // Render y el Droplet. getConnection() valida el socket con
+            // SELECT 1 y lo recicla si el servidor cerró la conexión.
+            PDO::ATTR_PERSISTENT => true,
+            // Corta la conexión a los 5 s para evitar que la API se quede
+            // colgada ante un micro-corte del Droplet.
+            PDO::ATTR_TIMEOUT => 5,
+            // Charset y collation binaria: consistencia con las tablas.
+            PDO::MYSQL_ATTR_INIT_COMMAND => "SET NAMES utf8mb4 COLLATE utf8mb4_bin",
         ];
 
-        // TiDB Cloud exige TLS en el puerto 4000. La verificación de cadena se
-        // desactiva porque TiDB Cloud usa certificados gestionados; si existe
-        // DB_SSL_CA legible se usa como CA explícita.
-        if (getenv('DB_SSL') === '1' || $esTiDBCloud) {
+        // El Droplet puede exponer MySQL con TLS. Se activa con DB_SSL=1; si
+        // existe DB_SSL_CA legible se usa como CA explícita.
+        if (getenv('DB_SSL') === '1') {
             if (defined('PDO::MYSQL_ATTR_SSL_VERIFY_SERVER_CERT')) {
                 $options[PDO::MYSQL_ATTR_SSL_VERIFY_SERVER_CERT] = false;
             }
@@ -629,8 +630,8 @@ final class HospitalHuaralDB
         }
         self::$connectionVerified = true;
 
-        // En TiDB Cloud cada ALTER ... ADD COLUMN IF NOT EXISTS repetido en
-        // cada request HTTP añade latencia. El esquema se crea una sola vez
+        // Contra un servidor remoto, cada ALTER ... ADD COLUMN IF NOT EXISTS
+        // repetido en cada request HTTP añade latencia. El esquema se crea una sola vez
         // (semáforo en /tmp) salvo que DB_AUTO_MIGRATE=1.
         $autoMigrate = getenv('DB_AUTO_MIGRATE') === '1';
         $schemaLock = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR)
@@ -854,8 +855,8 @@ final class HospitalHuaralDB
             'idx_reporte_estado_fecha' => "CREATE INDEX `idx_reporte_estado_fecha` ON `pacientes_sin_metodo` (`estado_paciente`, `fecha_registro`)",
             'idx_reporte_sector' => "CREATE INDEX `idx_reporte_sector` ON `pacientes_sin_metodo` (`sector`)",
             // Índices compuestos SARGables de los reportes clínicos. En una
-            // instalación nueva se crean aquí; en TiDB Cloud de 5 GB conviene
-            // aplicarlos con optimizar_indices_5gb.sql en ventana de mantenimiento.
+            // instalación nueva se crean aquí; en la base histórica de 5 GB
+            // conviene aplicarlos con optimizar_indices_5gb.sql en ventana de mantenimiento.
             'idx_his_dl_ano_mes_dia' => "CREATE INDEX `idx_his_dl_ano_mes_dia` ON `his_dl` (`ANO`, `MES`, `DIA`)",
             'idx_his_dl_estab_ano_mes_dia' => "CREATE INDEX `idx_his_dl_estab_ano_mes_dia` ON `his_dl` (`COD_ESTAB`, `ANO`, `MES`, `DIA`)",
             'idx_his_dl_codpsal_ano_mes_dia' => "CREATE INDEX `idx_his_dl_codpsal_ano_mes_dia` ON `his_dl` (`CODPSAL`, `ANO`, `MES`, `DIA`)",
@@ -1559,7 +1560,7 @@ final class HospitalHuaralDB
         }
 
         // Sliding expiration: se renueva la sesión como máximo una vez cada
-        // 300 segundos. Evita un UPDATE hacia TiDB Cloud en cada GET de la PWA.
+        // 300 segundos. Evita un UPDATE remoto en cada GET de la PWA.
         $nuevoExpira = $now + self::SESSION_TTL;
         $ultimaActividad = (int)($row['last_activity'] ?? 0);
         if (($now - $ultimaActividad) > 300) {
