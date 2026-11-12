@@ -191,6 +191,86 @@ if (!function_exists('hospital_establecimientos')) {
     }
 
     /**
+     * Códigos indexables equivalentes de una IPRESS, generados 100% en PHP a
+     * partir del catálogo oficial (equivalente a `app_catalogo_establecimientos`).
+     *
+     * Devuelve, sin funciones SQL sobre la columna:
+     *   - COD_ESTAB de 9 dígitos  (ej. 000005583)
+     *   - COD_IPRESS / alterno    (ej. 000005583 / 000005485)
+     *   - versión de 8 dígitos    (ej. 00005583)
+     *   - versión sin ceros       (ej. 5583, (string)(int)$codEstab)
+     *
+     * Se usa SIEMPRE dentro de `h.COD_ESTAB IN (...)` para conservar los
+     * índices B-Tree del HIS y evitar `LPAD(TRIM(h.COD_ESTAB), 9, '0')`.
+     *
+     * @return array<int, string>
+     */
+    function hospital_codigos_equivalentes_catalogo(?string $codigo): array
+    {
+        $codigo = trim((string)$codigo);
+        if ($codigo === '') {
+            return [];
+        }
+        $centinela = strtoupper($codigo);
+        if (in_array($centinela, ['ALL', 'TODOS', 'RED'], true)) {
+            return [];
+        }
+
+        $est = hospital_establecimiento($codigo);
+        if ($est === null) {
+            // Acepta códigos cortos (ej. "5583") para llamadas antiguas.
+            $digitosBuscados = preg_replace('/\D/', '', $codigo) ?? '';
+            $cortoBuscado = ltrim($digitosBuscados, '0');
+            foreach (hospital_establecimientos() as $candidate) {
+                $cortos = [
+                    ltrim((string)$candidate['COD_ESTAB'], '0'),
+                    ltrim((string)$candidate['COD_IPRESS'], '0'),
+                ];
+                if (isset($candidate['COD_IPRESS_ALT'])) {
+                    $cortos[] = ltrim((string)$candidate['COD_IPRESS_ALT'], '0');
+                }
+                if ($cortoBuscado !== '' && in_array($cortoBuscado, $cortos, true)) {
+                    $est = $candidate;
+                    break;
+                }
+            }
+        }
+
+        $resultado = [];
+        $agregar = static function (?string $valor) use (&$resultado): void {
+            $valor = trim((string)$valor);
+            if ($valor === '') {
+                return;
+            }
+            $resultado[$valor] = $valor;
+            $digitos = preg_replace('/\D/', '', $valor) ?? '';
+            if ($digitos !== '') {
+                $sinCeros = ltrim($digitos, '0');
+                if ($sinCeros === '') {
+                    $sinCeros = '0';
+                }
+                foreach ([
+                    str_pad($sinCeros, 9, '0', STR_PAD_LEFT),
+                    str_pad($sinCeros, 8, '0', STR_PAD_LEFT),
+                    $sinCeros,
+                ] as $variante) {
+                    if ($variante !== '') {
+                        $resultado[$variante] = $variante;
+                    }
+                }
+            }
+        };
+
+        $agregar($codigo);
+        if ($est !== null) {
+            $agregar($est['COD_ESTAB'] ?? null);
+            $agregar($est['COD_IPRESS'] ?? null);
+            $agregar($est['COD_IPRESS_ALT'] ?? null);
+        }
+        return array_values($resultado);
+    }
+
+    /**
      * Busca variantes históricas reales del establecimiento en las tablas del
      * hospital. Solo se ejecuta si hay PDO y siempre con consultas limitadas y
      * almacenadas en caché por request.
@@ -353,30 +433,9 @@ if (!function_exists('hospital_establecimientos')) {
             }
         }
 
-        $completos = [];
-        $cortos = [];
-        $agregar = static function (?string $valor) use (&$completos, &$cortos): void {
-            $valor = trim((string)$valor);
-            if ($valor === '') {
-                return;
-            }
-            $completos[] = $valor;
-            $sinCeros = ltrim($valor, '0');
-            if ($sinCeros !== '' && $sinCeros !== $valor) {
-                $cortos[] = $sinCeros;
-            }
-        };
-
-        if ($est !== null) {
-            $agregar($est['COD_ESTAB'] ?? null);
-            $agregar($est['COD_IPRESS'] ?? null);
-            $agregar($est['COD_IPRESS_ALT'] ?? null);
-        }
-        $agregar($codigo);
-
-        // Primero los códigos completos (los que usa el índice) y después las
-        // variantes sin ceros a la izquierda. array_unique conserva el orden.
-        $variantes = array_values(array_unique(array_merge($completos, $cortos)));
+        // Base 100% PHP desde el catálogo oficial: 9 dígitos, 8 dígitos,
+        // IPRESS, alterno y sin ceros. Es la lista que viaja en el IN indexado.
+        $variantes = hospital_codigos_equivalentes_catalogo($codigo);
 
         if (!$pdo instanceof PDO && class_exists('HospitalHuaralDB')) {
             try {

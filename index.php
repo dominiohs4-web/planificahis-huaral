@@ -248,8 +248,8 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       auditLogs: [],
       catalogoMetodos: [],
       alertas: {
-        manana: 0, hoy: 0, vencidas: 0, total: 0,
-        listas: { manana: [], hoy: [], vencidas: [] }
+        manana: 0, hoy: 0, proximos_7: 0, total: 0,
+        listas: { manana: [], hoy: [], proximos_7: [] }
       },
       agendaGrupo: 'TODAS',
       distritos: DISTRITOS,
@@ -422,8 +422,8 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       state.auditLogs = [];
       state.catalogoMetodos = [];
       state.alertas = {
-        manana: 0, hoy: 0, vencidas: 0, total: 0,
-        listas: { manana: [], hoy: [], vencidas: [] }
+        manana: 0, hoy: 0, proximos_7: 0, total: 0,
+        listas: { manana: [], hoy: [], proximos_7: [] }
       };
       state.agendaGrupo = 'TODAS';
       state.distritos = DISTRITOS;
@@ -570,8 +570,8 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       state.auditLogs = [];
       state.catalogoMetodos = [];
       state.alertas = {
-        manana: 0, hoy: 0, vencidas: 0, total: 0,
-        listas: { manana: [], hoy: [], vencidas: [] }
+        manana: 0, hoy: 0, proximos_7: 0, total: 0,
+        listas: { manana: [], hoy: [], proximos_7: [] }
       };
       state.stats = {
         insatisfechasSinMetodo: 0, citasAmpollaHoyManana: 0, atenciones99208: 0,
@@ -905,7 +905,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       const total = Number(a.total || 0);
       const manana = Number(a.manana || 0);
       const hoy = Number(a.hoy || 0);
-      const vencidas = Number(a.vencidas || 0);
+      const proximos7 = Number(a.proximos_7 || 0);
       if (total <= 0) {
         return `<div class="rounded-2xl border border-emerald-200 bg-emerald-50 p-3 flex items-center justify-between gap-2">
           <div class="text-[11px] font-semibold text-emerald-950">🔔 Alertas de Seguimiento Programático</div>
@@ -916,14 +916,14 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         <div class="flex items-start justify-between gap-2">
           <div>
             <div class="text-xs font-extrabold text-amber-950">🔔 Alertas de Seguimiento Programático</div>
-            <div class="text-[10px] text-amber-900">Pacientes que requieren llamada de seguimiento al abrir la aplicación.</div>
+            <div class="text-[10px] text-amber-900">Pacientes programadas para hoy y los próximos 7 días. No incluye vencidas.</div>
           </div>
           <span class="px-2 py-1 rounded-lg bg-amber-700 text-white text-[10px] font-extrabold shrink-0">${total}</span>
         </div>
         <div class="grid grid-cols-3 gap-1.5 text-center">
           <div class="p-2 rounded-xl bg-white border border-sky-200"><div class="text-[9px] font-bold text-sky-700">MAÑANA (+1)</div><div class="text-lg font-extrabold font-mono text-sky-900">${manana}</div></div>
           <div class="p-2 rounded-xl bg-white border border-amber-300"><div class="text-[9px] font-bold text-amber-800">HOY</div><div class="text-lg font-extrabold font-mono text-amber-900">${hoy}</div></div>
-          <div class="p-2 rounded-xl bg-white border border-red-300"><div class="text-[9px] font-bold text-red-700">VENCIDAS</div><div class="text-lg font-extrabold font-mono text-red-900">${vencidas}</div></div>
+          <div class="p-2 rounded-xl bg-white border border-emerald-300"><div class="text-[9px] font-bold text-emerald-700">PRÓX. 7 DÍAS</div><div class="text-lg font-extrabold font-mono text-emerald-900">${proximos7}</div><div class="text-[7px] font-semibold text-emerald-600">+2 a +7</div></div>
         </div>
         <div class="grid grid-cols-2 gap-2">
           <button type="button" onclick="verAlertaManana()" class="min-h-[42px] rounded-xl bg-sky-700 hover:bg-sky-800 text-white text-[10px] font-bold leading-tight px-2">Ver Pacientes a Llamar Mañana</button>
@@ -1240,7 +1240,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
     const REPORTE_ESTADOS = {
       TOCA_EN_FECHA: { label: 'TOCA EN FECHA', chip: 'bg-amber-100 text-amber-900 border-amber-300', card: 'border-l-4 border-l-amber-500 bg-amber-50/60' },
       PROXIMO_7_DIAS: { label: 'PRÓXIMOS 7 DÍAS', chip: 'bg-sky-100 text-sky-900 border-sky-300', card: 'border-l-4 border-l-sky-500 bg-sky-50/60' },
-      VENCIDO_ABANDONO: { label: 'VENCIDA / ABANDONO', chip: 'bg-red-100 text-red-900 border-red-300', card: 'border-l-4 border-l-red-600 bg-red-50/60' },
+      VENCIDO_ABANDONO: { label: 'CONTROL PENDIENTE', chip: 'bg-amber-100 text-amber-900 border-amber-300', card: 'border-l-4 border-l-amber-500 bg-amber-50/60' },
       AL_DIA: { label: 'AL DÍA', chip: 'bg-emerald-100 text-emerald-900 border-emerald-300', card: 'border-l-4 border-l-emerald-500 bg-emerald-50/60' }
     };
 
@@ -1284,14 +1284,12 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       const n = Number(dias);
       if (!Number.isFinite(n)) return 'Sin fecha';
       if (n === 0) return 'Toca hoy';
-      return n > 0 ? 'Faltan ' + n + ' días' : 'Vencida hace ' + Math.abs(n) + ' días';
+      return n > 0 ? 'Faltan ' + n + ' días' : 'Control pendiente hace ' + Math.abs(n) + ' días';
     }
 
     function descripcionRangoReporte(r) {
       const fecha = r.fecha_objetivo_ddmmyyyy || formatIsoToDdMmYyyy(r.fecha_objetivo);
       if (r.rango_modo === 'ventana_7d') return 'Del ' + fecha + ' a los próximos 7 días';
-      if (r.rango_modo === 'vencidas') return 'Vencidas al ' + fecha;
-      if (r.rango_modo === 'todos') return 'Día + 7 días + vencidas recientes al ' + fecha;
       return 'Exactamente el ' + fecha;
     }
 
@@ -1407,11 +1405,10 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         <div class="p-4 rounded-2xl bg-white border border-slate-200 space-y-3">
           <h3 class="text-sm font-bold text-slate-900">Filtros de programación</h3>
           <p class="text-[10px] text-slate-500 leading-relaxed">Los accesos rápidos <b>“Le toca Mañana +1”</b> y <b>“Hoy”</b> calculan automáticamente las pacientes que cumplen su próximo control en esa fecha, usando los 14 métodos oficiales del HIS.</p>
-          <div class="grid grid-cols-4 gap-1.5">
+          <div class="grid grid-cols-3 gap-1.5">
             <button type="button" onclick="aplicarRapidoReporte('manana')" class="min-h-[40px] rounded-xl text-[9px] font-bold leading-tight ${state.reporteModo === 'exacto' && state.reporteFecha === manana ? 'bg-sky-700 text-white' : 'bg-slate-100 text-slate-700'}">Le toca<br/>Mañana +1</button>
             <button type="button" onclick="aplicarRapidoReporte('hoy')" class="min-h-[40px] rounded-xl text-[9px] font-bold leading-tight ${state.reporteModo === 'exacto' && state.reporteFecha === hoy ? 'bg-sky-700 text-white' : 'bg-slate-100 text-slate-700'}">Hoy</button>
             <button type="button" onclick="aplicarRapidoReporte('7d')" class="min-h-[40px] rounded-xl text-[9px] font-bold leading-tight ${state.reporteModo === 'ventana_7d' ? 'bg-sky-700 text-white' : 'bg-slate-100 text-slate-700'}">Próximos<br/>7 días</button>
-            <button type="button" onclick="aplicarRapidoReporte('vencidas')" class="min-h-[40px] rounded-xl text-[9px] font-bold leading-tight ${state.reporteModo === 'vencidas' ? 'bg-red-700 text-white' : 'bg-slate-100 text-slate-700'}">Vencidas</button>
           </div>
           <div class="grid grid-cols-2 gap-2">
             <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Fecha en que le toca su control / aplicación</label><input id="rep-fecha" type="date" value="${esc(state.reporteFecha)}" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs font-mono" /></div>
@@ -1421,8 +1418,6 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
             <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Rango</label><select id="rep-rango" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-[10px] bg-white">
               <option value="exacto" ${state.reporteModo === 'exacto' ? 'selected' : ''}>Fecha exacta</option>
               <option value="ventana_7d" ${state.reporteModo === 'ventana_7d' ? 'selected' : ''}>Próximos 7 días</option>
-              <option value="vencidas" ${state.reporteModo === 'vencidas' ? 'selected' : ''}>Vencidas</option>
-              <option value="todos" ${state.reporteModo === 'todos' ? 'selected' : ''}>Todos</option>
             </select></div>
             ${state.session && state.session.isAdmin ? `<div><label class="block text-[10px] font-bold text-slate-600 mb-1">Alcance (selector de cabecera)</label><div class="w-full min-h-[42px] px-2 py-2 rounded-xl border border-sky-200 bg-sky-50 text-[10px] text-sky-950 font-semibold">${esc(state.session.estab_nombre || 'Toda la Red')}</div></div>` : ''}
           </div>
@@ -1452,16 +1447,16 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
             <span class="px-2.5 py-1 rounded-xl bg-sky-700 text-white text-xs font-extrabold shrink-0">${Number(resumen.total || 0)}</span>
           </div>
           <div class="grid grid-cols-4 gap-1.5 text-center">
-            <div class="p-2 rounded-xl bg-red-50 border border-red-200"><div class="text-[8px] font-bold text-red-800">Vencidas</div><div class="text-base font-extrabold font-mono text-red-700">${Number(resumen.vencido_abandono || 0)}</div></div>
             <div class="p-2 rounded-xl bg-amber-50 border border-amber-200"><div class="text-[8px] font-bold text-amber-800">Toca fecha</div><div class="text-base font-extrabold font-mono text-amber-700">${Number(resumen.toca_en_fecha || 0)}</div></div>
-            <div class="p-2 rounded-xl bg-sky-50 border border-sky-200"><div class="text-[8px] font-bold text-sky-800">Próx. 7d</div><div class="text-base font-extrabold font-mono text-sky-700">${Number(resumen.proximo_7_dias || 0)}</div></div>
+            <div class="p-2 rounded-xl bg-sky-50 border border-sky-200"><div class="text-[8px] font-bold text-sky-800">Mañana (+1)</div><div class="text-base font-extrabold font-mono text-sky-700">${Number(resumen.manana || 0)}</div></div>
+            <div class="p-2 rounded-xl bg-cyan-50 border border-cyan-200"><div class="text-[8px] font-bold text-cyan-800">Próx. 7d (+2 a +7)</div><div class="text-base font-extrabold font-mono text-cyan-700">${Number(resumen.proximo_7_dias || 0)}</div></div>
             <div class="p-2 rounded-xl bg-emerald-50 border border-emerald-200"><div class="text-[8px] font-bold text-emerald-800">Al día</div><div class="text-base font-extrabold font-mono text-emerald-700">${Number(resumen.al_dia || 0)}</div></div>
           </div>
           <div class="space-y-2">
             ${visibles.length ? visibles.map(renderReporteCard).join('') : '<div class="p-4 rounded-xl bg-slate-50 border border-slate-200 text-center text-xs text-slate-500">No hay pacientes programadas para los filtros seleccionados.</div>'}
           </div>
           ${filas.length > visibles.length ? '<div class="text-[10px] text-center text-slate-500">Mostrando ' + visibles.length + ' de ' + filas.length + '. El Excel y el PDF oficial incluyen todas las filas.</div>' : ''}
-        </div>` : '<div class="p-4 rounded-2xl bg-slate-100 border border-slate-200 text-center text-xs text-slate-600">Seleccione los filtros y presione “Buscar Programación”. También puede usar los accesos rápidos: Mañana +1, Hoy, 7 días o Vencidas.</div>'}`;
+        </div>` : '<div class="p-4 rounded-2xl bg-slate-100 border border-slate-200 text-center text-xs text-slate-600">Seleccione los filtros y presione “Buscar Programación”. También puede usar los accesos rápidos: Mañana +1, Hoy o Próximos 7 días.</div>'}`;
     }
 
     function renderAlertaCard(fila, grupo) {
@@ -1469,9 +1464,9 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       const colores = {
         manana: 'border-l-4 border-l-sky-500 bg-sky-50/70',
         hoy: 'border-l-4 border-l-amber-500 bg-amber-50/70',
-        vencidas: 'border-l-4 border-l-red-600 bg-red-50/70'
+        proximos_7: 'border-l-4 border-l-emerald-500 bg-emerald-50/70'
       };
-      const etiquetas = { manana: 'MAÑANA (+1)', hoy: 'HOY', vencidas: 'VENCIDA' };
+      const etiquetas = { manana: 'MAÑANA (+1)', hoy: 'HOY', proximos_7: 'PRÓX. 7 DÍAS' };
       return `<div class="p-3 rounded-xl border border-slate-200 ${colores[grupo] || ''} text-xs space-y-1.5">
         <div class="flex items-start justify-between gap-2">
           <div class="font-bold text-slate-900 leading-tight">${esc(fila.paciente_nombre || 'PACIENTE SIN NOMBRE')}</div>
@@ -1497,14 +1492,14 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       const gruposDisponibles = [
         { id: 'manana', label: 'Mañana (+1)', total: Number(a.manana || 0) },
         { id: 'hoy', label: 'Hoy', total: Number(a.hoy || 0) },
-        { id: 'vencidas', label: 'Vencidas', total: Number(a.vencidas || 0) }
+        { id: 'proximos_7', label: 'Próx. 7 días (+2 a +7)', total: Number(a.proximos_7 || 0) }
       ];
       const grupos = state.agendaGrupo === 'TODAS' ? gruposDisponibles : gruposDisponibles.filter(function (g) { return g.id === state.agendaGrupo; });
       return `<div class="p-4 rounded-2xl bg-white border border-slate-200 space-y-3">
         <div class="flex items-start justify-between gap-2">
           <div>
             <h3 class="text-sm font-bold text-slate-900">🔔 Agenda de Seguimiento Programático</h3>
-            <p class="text-[10px] text-slate-500 leading-relaxed">Pacientes a llamar mañana, hoy y vencidas, calculadas con los 14 métodos oficiales del HIS.</p>
+            <p class="text-[10px] text-slate-500 leading-relaxed">Pacientes a llamar mañana, hoy y dentro de los próximos 7 días, calculadas con los 14 métodos oficiales del HIS.</p>
           </div>
           <span class="px-2.5 py-1 rounded-xl bg-amber-700 text-white text-xs font-extrabold shrink-0">${Number(a.total || 0)}</span>
         </div>
@@ -1530,9 +1525,6 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       } else if (tipo === '7d') {
         state.reporteFecha = localIsoDate(0);
         state.reporteModo = 'ventana_7d';
-      } else if (tipo === 'vencidas') {
-        state.reporteFecha = localIsoDate(0);
-        state.reporteModo = 'vencidas';
       } else {
         state.reporteFecha = localIsoDate(0);
         state.reporteModo = 'exacto';
@@ -1711,7 +1703,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         '</style></head><body><div class="wrap">' +
         '<div class="head"><h1>HOSPITAL SAN JUAN BAUTISTA HUARAL</h1><p>Red de Salud Huaral-Chancay · Planificación Familiar</p>' +
         '<p><b>Programación del ' + esc(fecha) + '</b></p><p>' + esc(descripcionRangoReporte(r)) + '</p><p>' + esc(alcance) + '</p>' +
-        '<div class="chips"><div class="chip">Total<b>' + Number(resumen.total || 0) + '</b></div><div class="chip">Vencidas<b>' + Number(resumen.vencido_abandono || 0) + '</b></div><div class="chip">Próx. 7d<b>' + Number(resumen.proximo_7_dias || 0) + '</b></div></div></div>' +
+        '<div class="chips"><div class="chip">Total<b>' + Number(resumen.total || 0) + '</b></div><div class="chip">Toca fecha<b>' + Number(resumen.toca_en_fecha || 0) + '</b></div><div class="chip">Próx. 7d<b>' + Number(resumen.proximo_7_dias || 0) + '</b></div></div></div>' +
         (tarjetas || '<div class="empty">No hay pacientes programadas para los filtros seleccionados.</div>') +
         '<div class="end">Vista autónoma para celular · Generada ' + esc(new Date().toLocaleString('es-PE')) + '</div>' +
         '</div></body></html>';
@@ -1741,8 +1733,8 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       }
       lineas.push('');
       lineas.push('Total: ' + Number(resumen.total || filas.length) +
-        ' · Vencidas: ' + Number(resumen.vencido_abandono || 0) +
         ' · Toca hoy: ' + Number(resumen.toca_en_fecha || 0) +
+        ' · Mañana: ' + Number(resumen.manana || 0) +
         ' · Próx. 7d: ' + Number(resumen.proximo_7_dias || 0));
       return lineas.join('\n');
     }
@@ -2076,7 +2068,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       const mapa = {
         VIGENTE: 'bg-emerald-100 text-emerald-900 border-emerald-300',
         PROXIMA: 'bg-amber-100 text-amber-900 border-amber-300',
-        VENCIDA: 'bg-red-100 text-red-900 border-red-300',
+        VENCIDA: 'bg-amber-100 text-amber-900 border-amber-300',
         SIN_METODO: 'bg-slate-200 text-slate-800 border-slate-400'
       };
       return mapa[estado] || 'bg-slate-100 text-slate-700 border-slate-300';
@@ -2228,7 +2220,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       return `
         <div class="p-4 rounded-2xl bg-white border border-slate-200 space-y-3">
           <h3 class="text-sm font-bold text-slate-900">2. Indicadores y Seguimiento por Método</h3>
-          <p class="text-[11px] text-slate-500">Configure los días de ciclo del manual y controle los vencimientos por método anticonceptivo.</p>
+          <p class="text-[11px] text-slate-500">Configure los días de ciclo del manual y controle las pacientes que les toca dentro de los próximos 7 días.</p>
           <div class="grid grid-cols-2 gap-2">
             <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Desde</label><input type="date" value="${esc(f.fecha_desde)}" onchange="actualizarFiltroMetodos('fecha_desde', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs font-mono" /></div>
             <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Hasta</label><input type="date" value="${esc(f.fecha_hasta)}" onchange="actualizarFiltroMetodos('fecha_hasta', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs font-mono" /></div>
@@ -2241,8 +2233,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
             <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Estado de vencimiento</label><select onchange="actualizarFiltroMetodos('estado_vencimiento', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white">
               <option value="TODOS" ${f.estado_vencimiento === 'TODOS' ? 'selected' : ''}>Todos</option>
               <option value="VIGENTE" ${f.estado_vencimiento === 'VIGENTE' ? 'selected' : ''}>Vigente / al día</option>
-              <option value="PROXIMA" ${f.estado_vencimiento === 'PROXIMA' ? 'selected' : ''}>Próxima a vencer ≤ 7 días</option>
-              <option value="VENCIDA" ${f.estado_vencimiento === 'VENCIDA' ? 'selected' : ''}>Vencida</option>
+              <option value="PROXIMA" ${f.estado_vencimiento === 'PROXIMA' ? 'selected' : ''}>Le toca dentro de 7 días</option>
               <option value="SIN_METODO" ${f.estado_vencimiento === 'SIN_METODO' ? 'selected' : ''}>Sin método</option>
             </select></div>
             <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Sector</label><select onchange="actualizarFiltroMetodos('sector', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white"><option value="TODOS">Todos</option>${sectores.map(function (s) { return '<option value="' + esc(s) + '"' + (f.sector === s ? ' selected' : '') + '>' + esc(s) + '</option>'; }).join('')}</select></div>
@@ -2256,10 +2247,9 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
           ${state.metodosError ? '<div class="p-3 rounded-xl bg-red-50 border border-red-200 text-[11px] text-red-800">' + esc(state.metodosError) + '</div>' : ''}
         </div>
 
-        <div class="grid grid-cols-2 gap-2">
+        <div class="grid grid-cols-3 gap-2">
           <div class="p-3 rounded-2xl bg-emerald-50 border border-emerald-200"><div class="text-[10px] font-bold text-emerald-700 uppercase">Vigentes</div><div class="text-2xl font-extrabold text-emerald-950">${Number(resumen.vigente || 0)}</div></div>
-          <div class="p-3 rounded-2xl bg-amber-50 border border-amber-200"><div class="text-[10px] font-bold text-amber-700 uppercase">Próximas ≤ 7 días</div><div class="text-2xl font-extrabold text-amber-950">${Number(resumen.proxima || 0)}</div></div>
-          <div class="p-3 rounded-2xl bg-red-50 border border-red-200"><div class="text-[10px] font-bold text-red-700 uppercase">Vencidas</div><div class="text-2xl font-extrabold text-red-950">${Number(resumen.vencida || 0)}</div></div>
+          <div class="p-3 rounded-2xl bg-amber-50 border border-amber-200"><div class="text-[10px] font-bold text-amber-700 uppercase">Próximos 7 días</div><div class="text-2xl font-extrabold text-amber-950">${Number(resumen.proximos_7_dias || resumen.proxima || 0)}</div></div>
           <div class="p-3 rounded-2xl bg-slate-100 border border-slate-300"><div class="text-[10px] font-bold text-slate-700 uppercase">Sin método</div><div class="text-2xl font-extrabold text-slate-900">${Number(resumen.sin_metodo || 0)}</div></div>
         </div>
 
@@ -2290,8 +2280,8 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
           </div>
           <div class="overflow-x-auto -mx-1">
             <table class="w-full text-[10px] border-collapse min-w-[980px]">
-              <thead><tr class="bg-slate-100 text-slate-700"><th class="p-2 text-left">Paciente</th><th class="p-2 text-left">Sector</th><th class="p-2 text-left">Método actual</th><th class="p-2 text-center">Ciclo</th><th class="p-2 text-left">Última atención</th><th class="p-2 text-left">Próxima atención</th><th class="p-2 text-center">Indicador</th><th class="p-2 text-left">Obstetra / Establecimiento</th></tr></thead>
-              <tbody>${filas.map(function (p) { return '<tr class="border-b border-slate-100 align-top"><td class="p-2"><div class="font-bold">' + esc(p.paciente_nombre) + '</div><div class="font-mono text-slate-500">' + esc(p.dni) + ' · ' + Number(p.edad || 0) + ' años</div><div class="font-mono text-slate-500">' + esc(p.celular || '—') + '</div></td><td class="p-2">' + esc(p.sector || '—') + '</td><td class="p-2">' + esc(p.nombre_metodo || 'Sin método') + '<div class="font-mono text-slate-500">' + esc(p.codigo_metodo || '—') + '</div></td><td class="p-2 text-center font-bold">' + Number(p.dias_ciclo || 0) + ' d</td><td class="p-2 font-mono">' + esc(fechaDdMmYyyy(p.fecha_ultima_atencion) || '—') + '</td><td class="p-2 font-mono"><div>' + esc(fechaDdMmYyyy(p.fecha_proxima_cita) || '—') + '</div><div class="text-[9px] text-slate-500">' + (p.dias_restantes === null ? '' : (Number(p.dias_restantes) < 0 ? 'Vencida hace ' + Math.abs(Number(p.dias_restantes)) + ' d' : 'Faltan ' + Number(p.dias_restantes) + ' d')) + '</div></td><td class="p-2 text-center"><span class="inline-block px-2 py-1 rounded-lg border text-[9px] font-bold ' + estadoIndicadorBadge(p.estado_indicador) + '">' + esc(p.estado_indicador_etiqueta) + '</span></td><td class="p-2">' + esc(p.nombre_obstetra) + '<div class="text-slate-500">' + esc(p.estab_nombre) + '</div></td></tr>'; }).join('') || '<tr><td colspan="8" class="p-4 text-center text-slate-500">No hay pacientes para los filtros seleccionados.</td></tr>'}</tbody>
+              <thead><tr class="bg-slate-100 text-slate-700"><th class="p-2 text-left">Paciente</th><th class="p-2 text-left">Sector</th><th class="p-2 text-left">Método actual</th><th class="p-2 text-center">Ciclo</th><th class="p-2 text-left">Última atención</th><th class="p-2 text-left">Próxima atención / Próximos 7 días</th><th class="p-2 text-center">Estado del control</th><th class="p-2 text-left">Obstetra / Establecimiento</th></tr></thead>
+              <tbody>${filas.map(function (p) { return '<tr class="border-b border-slate-100 align-top"><td class="p-2"><div class="font-bold">' + esc(p.paciente_nombre) + '</div><div class="font-mono text-slate-500">' + esc(p.dni) + ' · ' + Number(p.edad || 0) + ' años</div><div class="font-mono text-slate-500">' + esc(p.celular || '—') + '</div></td><td class="p-2">' + esc(p.sector || '—') + '</td><td class="p-2">' + esc(p.nombre_metodo || 'Sin método') + '<div class="font-mono text-slate-500">' + esc(p.codigo_metodo || '—') + '</div></td><td class="p-2 text-center font-bold">' + Number(p.dias_ciclo || 0) + ' d</td><td class="p-2 font-mono">' + esc(fechaDdMmYyyy(p.fecha_ultima_atencion) || '—') + '</td><td class="p-2 font-mono"><div>' + esc(fechaDdMmYyyy(p.fecha_proxima_cita) || '—') + '</div><div class="text-[9px] text-slate-500">' + (p.dias_restantes === null ? '' : (Number(p.dias_restantes) < 0 ? 'Control pendiente hace ' + Math.abs(Number(p.dias_restantes)) + ' d' : 'Faltan ' + Number(p.dias_restantes) + ' d')) + '</div></td><td class="p-2 text-center"><span class="inline-block px-2 py-1 rounded-lg border text-[9px] font-bold ' + estadoIndicadorBadge(p.estado_indicador) + '">' + esc(p.estado_indicador_etiqueta) + '</span></td><td class="p-2">' + esc(p.nombre_obstetra) + '<div class="text-slate-500">' + esc(p.estab_nombre) + '</div></td></tr>'; }).join('') || '<tr><td colspan="8" class="p-4 text-center text-slate-500">No hay pacientes para los filtros seleccionados.</td></tr>'}</tbody>
             </table>
           </div>
           <div class="flex items-center justify-between pt-1">
@@ -2898,7 +2888,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         { label: 'Días de ciclo', align: 'center', width: 40 },
         { label: 'Fecha última atención', align: 'center', width: 70 },
         { label: 'Fecha programada siguiente atención', align: 'center', width: 82 },
-        { label: 'Estado del indicador', width: 80 },
+        { label: 'Estado del control', width: 80 },
         { label: 'DNI Obstetra', align: 'center', text: true, width: 60 },
         { label: 'Obstetra', width: 110 },
         { label: 'Código Establecimiento', align: 'center', text: true, width: 60 },
@@ -2993,7 +2983,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
     }
 
     function filaReportePadron(f, i, grupo) {
-      const mapaGrupo = { manana: 'MAÑANA (+1)', hoy: 'HOY', vencidas: 'VENCIDA' };
+      const mapaGrupo = { manana: 'MAÑANA (+1)', hoy: 'HOY', proximos_7: 'PRÓXIMOS 7 DÍAS' };
       return [
         i + 1,
         f.prioridad_llamada || '',
@@ -3044,7 +3034,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
     function datosOficialesAlerta() {
       const a = state.alertas || {};
       const filas = [];
-      ['manana', 'hoy', 'vencidas'].forEach(function (grupo) {
+      ['manana', 'hoy', 'proximos_7'].forEach(function (grupo) {
         ((a.listas && a.listas[grupo]) || []).forEach(function (f) {
           filas.push(filaReportePadron(f, filas.length, grupo));
         });
@@ -3053,7 +3043,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       const hoy = localIsoDate(0);
       const meta = metaOficial(
         'ALERTA DE SEGUIMIENTO PROGRAMÁTICO',
-        'Pacientes que tocan mañana (+1), hoy y vencidas para llamada telefónica',
+        'Pacientes que tocan mañana (+1), hoy y dentro de los próximos 7 días',
         'Corte al ' + fechaDdMmYyyy(hoy)
       );
       return {
@@ -3063,8 +3053,8 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         resumen: [
           'Mañana (+1): ' + Number(a.manana || 0) + ' pacientes',
           'Hoy: ' + Number(a.hoy || 0) + ' pacientes',
-          'Vencidas: ' + Number(a.vencidas || 0) + ' pacientes',
-          'Total de alertas: ' + Number(a.total || 0) + ' pacientes'
+          'Próximos 7 días: ' + Number(a.proximos_7 || 0) + ' pacientes',
+          'Total de alertas activas: ' + Number(a.total || 0) + ' pacientes'
         ],
         archivo: 'alerta_seguimiento_programatico_' + hoy + '.xls'
       };
@@ -3083,7 +3073,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
             cod_estab: codEstabConsulta(),
             obstetra: 'TODOS'
           });
-          const listas = { manana: [], hoy: [], vencidas: [] };
+          const listas = { manana: [], hoy: [], proximos_7: [] };
           (padron.filas || []).forEach(function (fila) {
             const grupo = fila.grupo_alerta || 'hoy';
             if (listas[grupo]) listas[grupo].push(fila);
@@ -3091,7 +3081,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
           state.alertas = {
             manana: Number((padron.resumen && padron.resumen.manana) || listas.manana.length),
             hoy: Number((padron.resumen && padron.resumen.hoy) || listas.hoy.length),
-            vencidas: Number((padron.resumen && padron.resumen.vencidas) || listas.vencidas.length),
+            proximos_7: Number((padron.resumen && padron.resumen.proximos_7) || listas.proximos_7.length),
             total: Number((padron.resumen && padron.resumen.total) || (padron.filas || []).length),
             listas: listas
           };
@@ -3197,9 +3187,9 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
           filas: (r.filas || []).map(filaReporteProgramacion),
           resumen: [
             'Total de pacientes programadas: ' + Number((r.resumen && r.resumen.total) || 0),
-            'Vencidas / abandono: ' + Number((r.resumen && r.resumen.vencido_abandono) || 0),
             'Toca en la fecha: ' + Number((r.resumen && r.resumen.toca_en_fecha) || 0),
-            'Próximos 7 días: ' + Number((r.resumen && r.resumen.proximo_7_dias) || 0),
+            'Mañana (+1): ' + Number((r.resumen && r.resumen.manana) || 0),
+            'Pacientes que les toca dentro de 7 días (Próximos 7 días): ' + Number((r.resumen && r.resumen.proximo_7_dias) || 0),
             'Al día: ' + Number((r.resumen && r.resumen.al_dia) || 0),
             'Método filtrado: ' + etiquetaFiltroMetodo(r)
           ],
@@ -3224,7 +3214,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
           resumen: [
             'Mañana (+1): ' + Number((d.resumen && d.resumen.manana) || 0),
             'Hoy: ' + Number((d.resumen && d.resumen.hoy) || 0),
-            'Vencidas: ' + Number((d.resumen && d.resumen.vencidas) || 0),
+            'Pacientes que les toca dentro de 7 días (Próximos 7 días): ' + Number((d.resumen && d.resumen.proximos_7) || 0),
             'Total de pacientes por llamar: ' + Number((d.resumen && d.resumen.total) || 0)
           ],
           archivo: 'reporte_04_padron_llamadas_' + (d.fecha_corte || localIsoDate(0)) + '.xls'
@@ -3267,8 +3257,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
           resumen: [
             'Total de pacientes: ' + Number((base.resumen && base.resumen.total) || 0),
             'Vigentes: ' + Number((base.resumen && base.resumen.vigente) || 0),
-            'Próximas: ' + Number((base.resumen && base.resumen.proxima) || 0),
-            'Vencidas: ' + Number((base.resumen && base.resumen.vencida) || 0),
+            'Pacientes que les toca dentro de 7 días (Próximos 7 días): ' + Number((base.resumen && (base.resumen.proximos_7_dias || base.resumen.proxima)) || 0),
             'Sin método: ' + Number((base.resumen && base.resumen.sin_metodo) || 0)
           ],
           archivo: 'reporte_05_metodos_' + (f.fecha_desde || localIsoDate(0)) + '.xls'
@@ -3334,15 +3323,15 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
 
     function renderReportePadron() {
       const d = state.padronData;
-      const resumen = (d && d.resumen) || { manana: 0, hoy: 0, vencidas: 0, total: 0 };
+      const resumen = (d && d.resumen) || { manana: 0, hoy: 0, proximos_7: 0, total: 0 };
       const filas = (d && d.filas) || [];
       const grupos = [
         { id: 'todas', label: 'Todas' },
         { id: 'manana', label: 'Mañana (+1)' },
         { id: 'hoy', label: 'Hoy' },
-        { id: 'vencidas', label: 'Vencidas' }
+        { id: 'proximos_7', label: 'Próx. 7 días (+2 a +7)' }
       ];
-      const mapaGrupo = { manana: 'manana', hoy: 'hoy', vencidas: 'vencidas' };
+      const mapaGrupo = { manana: 'manana', hoy: 'hoy', proximos_7: 'proximos_7' };
       return `
         ${membreteOficialHtml({
           titulo: 'REPORTE 04 · PADRÓN DE PACIENTES POR LLAMAR',
@@ -3369,7 +3358,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         <div class="grid grid-cols-4 gap-1.5">
           <div class="p-2 rounded-xl bg-sky-50 border border-sky-200 text-center"><div class="text-[8px] font-bold text-sky-700">Mañana</div><div class="text-lg font-extrabold font-mono text-sky-900">${Number(resumen.manana || 0)}</div></div>
           <div class="p-2 rounded-xl bg-amber-50 border border-amber-200 text-center"><div class="text-[8px] font-bold text-amber-700">Hoy</div><div class="text-lg font-extrabold font-mono text-amber-900">${Number(resumen.hoy || 0)}</div></div>
-          <div class="p-2 rounded-xl bg-red-50 border border-red-200 text-center"><div class="text-[8px] font-bold text-red-700">Vencidas</div><div class="text-lg font-extrabold font-mono text-red-900">${Number(resumen.vencidas || 0)}</div></div>
+          <div class="p-2 rounded-xl bg-emerald-50 border border-emerald-200 text-center"><div class="text-[8px] font-bold text-emerald-700">Próx. 7 días (+2 a +7)</div><div class="text-lg font-extrabold font-mono text-emerald-900">${Number(resumen.proximos_7 || 0)}</div></div>
           <div class="p-2 rounded-xl bg-slate-100 border border-slate-300 text-center"><div class="text-[8px] font-bold text-slate-700">Total</div><div class="text-lg font-extrabold font-mono text-slate-900">${Number(resumen.total || 0)}</div></div>
         </div>
         <div class="p-4 rounded-2xl bg-white border border-slate-200 space-y-2">

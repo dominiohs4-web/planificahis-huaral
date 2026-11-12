@@ -264,6 +264,17 @@ function obtenerCodigosEstablecimientoEquivalentes(PDO $pdo, string $codEstab): 
     /** @var array<string, string> $nombres */
     $nombres = [];
 
+    // Base determinista desde el catálogo oficial en PHP (equivalente a
+    // app_catalogo_establecimientos): 9 dígitos, 8 dígitos, IPRESS, alterno y
+    // sin ceros. Garantiza que los 53 establecimientos funcionen incluso si
+    // las tablas históricas no están disponibles.
+    foreach (hospital_codigos_equivalentes_catalogo($normalizado) as $varianteCatalogo) {
+        $varianteCatalogo = trim((string)$varianteCatalogo);
+        if ($varianteCatalogo !== '') {
+            $resultado[$varianteCatalogo] = $varianteCatalogo;
+        }
+    }
+
     $agregar = static function ($valor) use (&$resultado): void {
         $valor = trim((string)$valor);
         if ($valor === '' || strtoupper($valor) === 'ALL' || strtoupper($valor) === 'TODOS') {

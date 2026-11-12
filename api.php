@@ -2209,11 +2209,11 @@ if ($action === 'overview') {
         ];
     }
 
-    // Agenda operativa construida desde las alertas programáticas oficiales:
-    // incluye únicamente pacientes que tocan HOY, MAÑANA o están VENCIDAS.
+    // Agenda operativa construida desde la fuente única de programación:
+    // únicamente pacientes que tocan HOY, MAÑANA o dentro de los PRÓXIMOS 7 DÍAS.
     $alertas = alertas_programaticas_datos($pdo, $session, $catalogo);
     $agenda = [];
-    foreach (['hoy', 'manana', 'vencidas'] as $grupoAlerta) {
+    foreach (['hoy', 'manana', 'proximos_7'] as $grupoAlerta) {
         foreach (($alertas['listas'][$grupoAlerta] ?? []) as $filaAlerta) {
             $agenda[] = [
                 'id_his' => 0,
@@ -2230,9 +2230,9 @@ if ($action === 'overview') {
                 'fecha_proxima_cita' => (string)($filaAlerta['fecha_proximo_metodo_iso'] ?? ''),
                 'ciclo_dias' => (int)($filaAlerta['dias_ciclo'] ?? 0),
                 'dias_restantes' => (int)($filaAlerta['dias_restantes'] ?? 0),
-                'estado_cita' => (int)($filaAlerta['dias_restantes'] ?? 0) < 0
-                    ? 'VENCIDA_ABANDONO'
-                    : ((int)($filaAlerta['dias_restantes'] ?? 0) === 0 ? 'TOCA_HOY' : 'TOCA_MANANA'),
+                'estado_cita' => (int)($filaAlerta['dias_restantes'] ?? 0) === 0
+                    ? 'TOCA_HOY'
+                    : ((int)($filaAlerta['dias_restantes'] ?? 0) === 1 ? 'TOCA_MANANA' : 'PROXIMO_7_DIAS'),
                 'celular' => (string)($filaAlerta['celular'] ?? ''),
                 'direccion' => (string)($filaAlerta['direccion'] ?? ''),
                 'distrito' => (string)($filaAlerta['distrito'] ?? ''),
@@ -2303,7 +2303,7 @@ if ($action === 'overview') {
         'captadasConMetodo' => (int)($totalesPacientes['con_metodo'] ?? 0),
         'seguimientoDomiciliario' => (int)($totalesPacientes['seguimiento'] ?? 0),
         'citasAmpollaHoyManana' => (int)($alertas['hoy'] ?? 0) + (int)($alertas['manana'] ?? 0),
-        'alertasVencidas' => (int)($alertas['vencidas'] ?? 0),
+        'alertasProximos7Dias' => (int)($alertas['proximos_7'] ?? 0),
         'alertasHisPorCaptar' => (int)($alertas['total'] ?? 0),
         'atenciones99208' => (int)($totalesPacientes['atenciones_99208'] ?? 0),
     ];
@@ -2569,9 +2569,244 @@ function alertas_cache_invalidate(): void
 }
 
 /**
+ * FUENTE ÚNICA DE VERDAD DE PROGRAMACIÓN (alertas, agenda, padrón y reportes).
+ *
+ * Calcula, para el rango de fechas de PRÓXIMO CONTROL indicado, un mapa
+ * DNI => paciente con su método principal vigente. Reglas:
+ *
+ *  1) Descubrimiento SARGable: se consulta cada ciclo por separado con la
+ *     ventana exacta de fechas de aplicación (próximo - ciclo). Para una
+ *     ventana de 7 días cada consulta recorre solo 8 días de his_dl, sin
+ *     escanear años de historial ni pacientes vencidas.
+ *  2) El método principal de una atención es el de mayor ciclo; si una
+ *     paciente tiene varios DX en la misma fecha (método + consejería), se
+ *     consolida en UNA sola fila por DNI.
+ *  3) La atención más reciente de la paciente siempre prevalece: si tiene una
+ *     atención posterior que aún no vence, no se reporta una atención antigua.
+ *  4) El establecimiento se filtra con h.COD_ESTAB IN (...) usando las
+ *     variantes indexables del catálogo (9 dígitos, IPRESS y sin ceros).
+ *     NUNCA se aplican LPAD/TRIM/RIGHT sobre columnas de his_dl en WHERE/JOIN.
+ *
+ * @param array<string, array<string, mixed>> $catalogo
+ * @param array<int, string> $codigosFiltro códigos oficiales o variantes HIS
+ * @return array<string, array<string, mixed>>
+ */
+function programacion_candidatos_rango(
+    PDO $pdo,
+    array $session,
+    array $catalogo,
+    string $desdeProximo,
+    string $hastaProximo,
+    array $codigosFiltro = []
+): array {
+    $desdeDt = DateTimeImmutable::createFromFormat('!Y-m-d', trim($desdeProximo));
+    $hastaDt = DateTimeImmutable::createFromFormat('!Y-m-d', trim($hastaProximo));
+    if (!$desdeDt instanceof DateTimeImmutable || !$hastaDt instanceof DateTimeImmutable) {
+        return [];
+    }
+    if ($desdeDt->format('Y-m-d') !== trim($desdeProximo) || $hastaDt->format('Y-m-d') !== trim($hastaProximo)) {
+        return [];
+    }
+    if ($desdeDt > $hastaDt) {
+        [$desdeDt, $hastaDt] = [$hastaDt, $desdeDt];
+    }
+
+    $codigosConsulta = codigos_consulta_metodos($catalogo, $codigosFiltro);
+    if (!$codigosConsulta) {
+        return [];
+    }
+
+    $gruposCiclo = [];
+    $maxCiclo = 0;
+    foreach ($codigosConsulta as $codigo) {
+        $meta = resolver_metodo_catalogo($catalogo, $codigo);
+        if ($meta === null) {
+            continue;
+        }
+        $dias = max(1, (int)($meta['dias_ciclo'] ?? 30));
+        $gruposCiclo[$dias][] = (string)$codigo;
+        $maxCiclo = max($maxCiclo, $dias);
+    }
+    if (!$gruposCiclo) {
+        return [];
+    }
+    ksort($gruposCiclo);
+
+    $esAdmin = is_admin_session($session);
+    $modoRed = $esAdmin && normalizarCodEstab((string)($session['cod_estab'] ?? '')) === 'ALL';
+    $codigosEstab = $modoRed ? [] : codigos_establecimiento_consulta($pdo, $session);
+    $scope = '';
+    $paramsScope = [];
+    if ($codigosEstab) {
+        $scope = ' AND h.COD_ESTAB IN (' . implode(',', array_fill(0, count($codigosEstab), '?')) . ') ';
+        $paramsScope = $codigosEstab;
+    }
+
+    // Índice compuesto correcto según el alcance. Si hay IPRESS, el índice
+    // (COD_ESTAB, ANO, MES, DIA) resuelve todo en milisegundos.
+    if ($codigosEstab && indice_existe($pdo, 'his_dl', 'idx_his_dl_estab_ano_mes_dia')) {
+        $hint = ' FORCE INDEX(idx_his_dl_estab_ano_mes_dia)';
+    } elseif (indice_existe($pdo, 'his_dl', 'idx_his_dl_ano_mes_dia')) {
+        $hint = ' FORCE INDEX(idx_his_dl_ano_mes_dia)';
+    } else {
+        $hint = '';
+    }
+
+    // 1) Descubrimiento de DNIs candidatos. Cada ciclo usa su ventana exacta;
+    // todos los ciclos viajan en UN solo UNION ALL para minimizar round trips
+    // contra la base remota (6 consultas -> 1).
+    $partesCandidatos = [];
+    $paramsCandidatos = [];
+    foreach ($gruposCiclo as $diasCiclo => $listaCodigos) {
+        $desdeAplicacion = $desdeDt->modify('-' . (int)$diasCiclo . ' days')->format('Y-m-d');
+        $hastaAplicacion = $hastaDt->modify('-' . (int)$diasCiclo . ' days')->format('Y-m-d');
+        $paramsRango = [];
+        $condicionRango = sql_condicion_rango_ymd('h', $desdeAplicacion, $hastaAplicacion, $paramsRango);
+        $anioMin = (int)substr($desdeAplicacion, 0, 4);
+        $anioMax = (int)substr($hastaAplicacion, 0, 4);
+        $marcas = implode(',', array_fill(0, count($listaCodigos), '?'));
+        $partesCandidatos[] = "
+            SELECT h.DNI AS dni
+            FROM his_dl h{$hint}
+            STRAIGHT_JOIN his_dl_dt dt ON dt.ID = h.ID
+            WHERE h.ANO BETWEEN ? AND ?
+              AND dt.DX IN ({$marcas})
+              AND {$condicionRango}
+              {$scope}
+        ";
+        $paramsCandidatos = array_merge(
+            $paramsCandidatos,
+            [$anioMin, $anioMax],
+            $listaCodigos,
+            $paramsRango,
+            $paramsScope
+        );
+    }
+    $candidatos = [];
+    if ($partesCandidatos) {
+        $sqlCandidatos = 'SELECT DISTINCT dni FROM (' . implode(' UNION ALL ', $partesCandidatos) . ') candidatos';
+        $stmtCandidatos = $pdo->prepare($sqlCandidatos);
+        $stmtCandidatos->execute($paramsCandidatos);
+        foreach ($stmtCandidatos->fetchAll(PDO::FETCH_COLUMN, 0) as $dniCandidato) {
+            $dniCandidato = trim((string)$dniCandidato);
+            if ($dniCandidato !== '') {
+                $candidatos[$dniCandidato] = true;
+            }
+        }
+    }
+    if (!$candidatos) {
+        return [];
+    }
+
+    // 2) Para esos DNIs se trae su historial reciente de métodos y se elige la
+    // atención más reciente + el método de mayor ciclo de esa misma fecha.
+    $anioMinDetalle = (int)$desdeDt->modify('-' . $maxCiclo . ' days')->format('Y');
+    // La última atención válida se evalúa "a la fecha": nunca usa atenciones
+    // posteriores al día consultado (ni al día de hoy, para no mezclar datos
+    // futuros digitados por error).
+    $hoyDetalle = new DateTimeImmutable('today');
+    $limiteDetalle = $hastaDt < $hoyDetalle ? $hastaDt : $hoyDetalle;
+    $anioMaxDetalle = (int)$limiteDetalle->format('Y');
+    if ($anioMinDetalle > $anioMaxDetalle) {
+        $anioMinDetalle = $anioMaxDetalle;
+    }
+    $limiteYmdDetalle = (int)$limiteDetalle->format('Ymd');
+    $marcasTodos = implode(',', array_fill(0, count($codigosConsulta), '?'));
+    // La segunda pasada se limita SOLO a los DNIs candidatos (no recorre el
+    // historial completo) y usa el índice por DNI + fecha.
+    if (indice_existe($pdo, 'his_dl', 'idx_his_dl_dni_ano_mes_dia')) {
+        $hintDetalle = ' FORCE INDEX(idx_his_dl_dni_ano_mes_dia)';
+    } elseif (indice_existe($pdo, 'his_dl', 'idx_his_dl_dni_fecha')) {
+        $hintDetalle = ' FORCE INDEX(idx_his_dl_dni_fecha)';
+    } else {
+        $hintDetalle = '';
+    }
+    $detalle = [];
+    foreach (array_chunk(array_keys($candidatos), 500) as $loteDnis) {
+        $marcasDni = implode(',', array_fill(0, count($loteDnis), '?'));
+        $sql = "
+            SELECT h.DNI AS dni, h.ID AS id_his, h.COD_ESTAB AS cod_estab,
+                   TRIM(h.Apellido_p) AS apellido_paterno,
+                   TRIM(h.Apellido_m) AS apellido_materno,
+                   TRIM(COALESCE(NULLIF(h.Dnombres, ''), h.Pnombre)) AS nombres,
+                   h.EDAD AS edad, h.HCLFAM AS historia_clinica,
+                   h.FICHAFAM AS ficha_familiar, h.CODPSAL AS obstetra_dni,
+                   h.DIA, h.MES, h.ANO, h.fecha_reg,
+                   dt.DX AS codigo_his, dt.id_dosis AS dosis, dt.fecha_reg AS fecha_dx
+            FROM his_dl h{$hintDetalle}
+            STRAIGHT_JOIN his_dl_dt dt ON dt.ID = h.ID
+            WHERE h.DNI IN ({$marcasDni})
+              AND h.ANO BETWEEN ? AND ?
+              AND (h.ANO * 10000 + h.MES * 100 + h.DIA) <= ?
+              AND dt.DX IN ({$marcasTodos})
+              {$scope}
+            ORDER BY h.DNI ASC, h.ANO DESC, h.MES DESC, h.DIA DESC, h.ID DESC
+        ";
+        $params = array_merge(
+            $loteDnis,
+            [$anioMinDetalle, $anioMaxDetalle, $limiteYmdDetalle],
+            $codigosConsulta,
+            $paramsScope
+        );
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($params);
+        foreach ($stmt->fetchAll() as $row) {
+            $dni = trim((string)($row['dni'] ?? ''));
+            $codigoHis = trim((string)($row['codigo_his'] ?? ''));
+            if ($dni === '' || $codigoHis === '') {
+                continue;
+            }
+            $meta = resolver_metodo_catalogo($catalogo, $codigoHis);
+            if ($meta === null || (int)($meta['dias_ciclo'] ?? 0) <= 0) {
+                continue;
+            }
+            $fecha = fecha_aplicacion_his($row);
+            if ($fecha === '') {
+                continue;
+            }
+            $dias = (int)$meta['dias_ciclo'];
+            $score = $fecha . '|' . str_pad((string)$dias, 4, '0', STR_PAD_LEFT)
+                . '|' . str_pad((string)(int)($row['id_his'] ?? 0), 12, '0', STR_PAD_LEFT);
+            if (isset($detalle[$dni]) && strcmp($score, (string)$detalle[$dni]['_score']) <= 0) {
+                continue;
+            }
+            $detalle[$dni] = [
+                '_score' => $score,
+                'row' => $row,
+                'meta' => $meta,
+                'dias' => $dias,
+                'fecha' => $fecha,
+                'codigo_his' => $codigoHis,
+            ];
+        }
+    }
+
+    $resultado = [];
+    foreach ($detalle as $dni => $sel) {
+        try {
+            $proximo = (new DateTimeImmutable($sel['fecha']))->modify('+' . (int)$sel['dias'] . ' days');
+        } catch (Throwable $e) {
+            continue;
+        }
+        $resultado[(string)$dni] = [
+            'dni' => (string)$dni,
+            'row' => $sel['row'],
+            'meta' => $sel['meta'],
+            'codigo' => (string)($sel['meta']['codigo_dx'] ?? $sel['codigo_his']),
+            'codigo_his' => (string)$sel['codigo_his'],
+            'dias_ciclo' => (int)$sel['dias'],
+            'fecha_aplicacion' => (string)$sel['fecha'],
+            'fecha_proximo' => $proximo->format('Y-m-d'),
+        ];
+    }
+    return $resultado;
+}
+
+/**
  * Alertas proactivas de seguimiento programático: pacientes que les toca HOY,
- * MAÑANA o están VENCIDAS. Se calcula con las 14 variantes oficiales del HIS y
- * ventanas SARGables de fecha de aplicación para no escanear los 5 GB.
+ * MAÑANA o dentro de los PRÓXIMOS 7 DÍAS. Usa la misma fuente única de verdad
+ * que la Programación calculada y el padrón, de modo que HOY siempre coincide
+ * exactamente con “Toca fecha” del reporte (0 desfases).
  *
  * @param array<string, array<string, mixed>>|null $catalogo
  * @return array<string, mixed>
@@ -2579,38 +2814,19 @@ function alertas_cache_invalidate(): void
 function alertas_programaticas_datos(PDO $pdo, array $session, ?array $catalogo = null, int $limiteLista = 1000): array
 {
     $catalogo = $catalogo ?: catalogo_metodos_planificacion($pdo);
-    $variantes = [];
-    $maxCicloAlertas = 365;
-    foreach ($catalogo as $meta) {
-        if ((int)($meta['activo'] ?? 1) !== 1 || (int)($meta['dias_ciclo'] ?? 0) <= 0) {
-            continue;
-        }
-        $maxCicloAlertas = max($maxCicloAlertas, (int)$meta['dias_ciclo']);
-        foreach ((array)($meta['codigos_consulta'] ?? []) as $variante) {
-            $variante = trim((string)$variante);
-            if ($variante !== '') {
-                $variantes[$variante] = $variante;
-            }
-        }
-    }
-
+    $hoy = new DateTimeImmutable('today');
+    $hasta7 = $hoy->modify('+7 days');
     $vacio = [
         'manana' => 0,
         'hoy' => 0,
-        'vencidas' => 0,
+        'proximos_7' => 0,
         'total' => 0,
-        'listas' => ['manana' => [], 'hoy' => [], 'vencidas' => []],
+        'listas' => ['manana' => [], 'hoy' => [], 'proximos_7' => []],
     ];
-    if (!$variantes) {
+    $codigosConsulta = codigos_consulta_metodos($catalogo);
+    if (!$codigosConsulta) {
         return $vacio;
     }
-
-    $hoy = new DateTimeImmutable('today');
-    $manana = $hoy->modify('+1 day');
-    $lookbackVencidas = 365;
-    // Cobertura exacta: ciclo máximo + 365 días de vencidas, redondeado a años.
-    $anioMin = (int)date('Y') - (int)ceil(($maxCicloAlertas + $lookbackVencidas) / 366) - 1;
-    $anioMax = (int)date('Y') + 1;
 
     $rolAlertas = HospitalHuaralDB::rolUsuario((string)($session['dni'] ?? ''));
     $esAdminAlertas = is_admin_session($session);
@@ -2619,23 +2835,10 @@ function alertas_programaticas_datos(PDO $pdo, array $session, ?array $catalogo 
     // administrador ve la red (ALL) o la IPRESS seleccionada en la cabecera.
     $modoRedAlertas = $esAdminAlertas
         && normalizarCodEstab((string)($session['cod_estab'] ?? '')) === 'ALL';
-
-    // Interruptor de seguridad: si el HIS no reconoce ningún formato del
-    // código de establecimiento, se desactiva el filtro para no devolver
-    // alertas vacías. Si reconoce al menos una atención, se filtra por todas
-    // las variantes equivalentes (9/8/sin ceros/corto).
     $codigosEstabAlertas = $modoRedAlertas ? [] : codigos_establecimiento_consulta($pdo, $session);
-    $scopeAlertas = [];
-    $scopeParams = [];
-    if ($codigosEstabAlertas) {
-        $scopeAlertas[] = 'h.COD_ESTAB IN (' . implode(',', array_fill(0, count($codigosEstabAlertas), '?')) . ')';
-        $scopeParams = array_merge($scopeParams, $codigosEstabAlertas);
-    }
-    $scope = $scopeAlertas ? (' AND ' . implode(' AND ', $scopeAlertas) . ' ') : '';
 
-    $codigosConsulta = array_values($variantes);
     $cacheKey = hash('sha256', implode('|', [
-        'alertas-v5',
+        'alertas-v6',
         (string)($session['dni'] ?? ''),
         (string)($session['cod_estab'] ?? ''),
         (string)$rolAlertas,
@@ -2650,229 +2853,66 @@ function alertas_programaticas_datos(PDO $pdo, array $session, ?array $catalogo 
         return $cacheado;
     }
 
-    $columnasAlertasSql = "
-                    h.ID AS id_his, h.DNI AS dni, h.COD_ESTAB AS cod_estab,
-                    h.CODPSAL AS obstetra_dni, h.EDAD AS edad, h.HCLFAM AS historia_clinica,
-                    TRIM(h.Apellido_p) AS apellido_paterno, TRIM(h.Apellido_m) AS apellido_materno,
-                    TRIM(COALESCE(NULLIF(h.Dnombres, ''), h.Pnombre)) AS nombres,
-                    h.DIA, h.MES, h.ANO, h.fecha_reg,
-                    dt.DX AS codigo_his, dt.id_dosis AS dosis, dt.fecha_reg AS fecha_dx";
-
-    // Agrupación por ciclo (máximo 6 grupos: 30/60/90/120/180/365). Una sola
-    // consulta SARGable, sin UNION ALL por IPRESS y sin FORCE INDEX.
-    $gruposCicloAlertas = [];
-    foreach ($codigosConsulta as $codigoAlerta) {
-        $metaAlerta = resolver_metodo_catalogo($catalogo, $codigoAlerta);
-        $diasAlerta = max(1, (int)($metaAlerta['dias_ciclo'] ?? 30));
-        $gruposCicloAlertas[$diasAlerta][] = (string)$codigoAlerta;
-    }
-    ksort($gruposCicloAlertas);
-
-    // Ventana global que cubre HOY, MAÑANA y las VENCIDAS de hasta 365 días para
-    // todos los ciclos. Cualquier paciente relevante tiene su última atención
-    // dentro de esta ventana; así se obtiene el método vigente real sin traer
-    // todo el historial ni ejecutar una segunda pasada por DNI.
-    $minCicloAlertas = min(array_keys($gruposCicloAlertas));
-    $maxCicloAlertas = max(array_keys($gruposCicloAlertas));
-    $desdeGlobalAlertas = $hoy->modify('-' . ($maxCicloAlertas + $lookbackVencidas) . ' days')->format('Y-m-d');
-    $hastaGlobalAlertas = $manana->modify('-' . $minCicloAlertas . ' days')->format('Y-m-d');
-    $anioMinAlertas = (int)substr($desdeGlobalAlertas, 0, 4);
-    $anioMaxAlertas = (int)substr($hastaGlobalAlertas, 0, 4);
-
-    $placeholdersAlertas = implode(',', array_fill(0, count($codigosConsulta), '?'));
-    $paramsRangoGlobalAlertas = [];
-    $condicionRangoGlobalAlertas = sql_condicion_rango_ymd('h', $desdeGlobalAlertas, $hastaGlobalAlertas, $paramsRangoGlobalAlertas);
-
-    // CASE que traduce cada DX a su ciclo para elegir, en una misma fecha, el
-    // método de mayor ciclo (método real) al calcular MAX(CONCAT(fecha|ciclo|DX)).
-    $casoCicloAlertas = 'CASE dt.DX';
-    foreach ($gruposCicloAlertas as $diasCicloAlerta => $listaCodigosAlerta) {
-        foreach ($listaCodigosAlerta as $codigoAlerta) {
-            $casoCicloAlertas .= ' WHEN ' . $pdo->quote((string)$codigoAlerta) . ' THEN ' . (int)$diasCicloAlerta;
-        }
-    }
-    $casoCicloAlertas .= ' ELSE 365 END';
-    $hintAlertas = indice_existe($pdo, 'his_dl', 'idx_his_dl_id_dni_fecha')
-        ? ' FORCE INDEX(idx_his_dl_id_dni_fecha)'
-        : '';
-
-    $sqlUltimaAlerta = "
-        SELECT h.DNI AS dni,
-               MAX(h.ANO * 10000 + h.MES * 100 + h.DIA) AS ymd,
-               SUBSTRING_INDEX(
-                   MAX(CONCAT(
-                       LPAD(h.ANO * 10000 + h.MES * 100 + h.DIA, 8, '0'), '|',
-                       LPAD({$casoCicloAlertas}, 4, '0'), '|',
-                       dt.DX
-                   )),
-                   '|', -1
-               ) AS codigo
-        FROM his_dl h{$hintAlertas}
-        INNER JOIN his_dl_dt dt ON dt.ID = h.ID
-        WHERE h.ANO BETWEEN ? AND ?
-          AND dt.DX IN ({$placeholdersAlertas})
-          AND {$condicionRangoGlobalAlertas}
-          {$scope}
-        GROUP BY h.DNI
-    ";
-    $paramsUltimaAlerta = array_merge(
-        [$anioMinAlertas, $anioMaxAlertas],
-        $codigosConsulta,
-        $paramsRangoGlobalAlertas,
-        $scopeParams
-    );
-
-    $ultimasAlertas = [];
     try {
-        $stmtUltima = $pdo->prepare($sqlUltimaAlerta);
-        $stmtUltima->execute($paramsUltimaAlerta);
-        $ultimasAlertas = $stmtUltima->fetchAll();
+        $candidatos = programacion_candidatos_rango(
+            $pdo,
+            $session,
+            $catalogo,
+            $hoy->format('Y-m-d'),
+            $hasta7->format('Y-m-d')
+        );
     } catch (Throwable $e) {
         error_log('[PlanificaHIS] alertas_programaticas_datos: ' . $e->getMessage());
         return $vacio;
     }
 
-    // Clasificación clínica en PHP: solo se conservan las pacientes cuya ÚLTIMA
-    // atención vence hoy, mañana o está vencida dentro de los últimos 365 días.
-    $relevantesAlertas = [];
-    $totalesAlerta = ['manana' => 0, 'hoy' => 0, 'vencidas' => 0];
-    foreach ($ultimasAlertas as $filaUltima) {
-        $dni = trim((string)($filaUltima['dni'] ?? ''));
-        $codigoHis = trim((string)($filaUltima['codigo'] ?? ''));
-        $ymd = (int)($filaUltima['ymd'] ?? 0);
-        if ($dni === '' || $codigoHis === '' || $ymd <= 0) {
-            continue;
-        }
-        $meta = resolver_metodo_catalogo($catalogo, $codigoHis);
-        if ($meta === null || (int)$meta['dias_ciclo'] <= 0) {
-            continue;
-        }
-        $anio = intdiv($ymd, 10000);
-        $mes = intdiv($ymd - $anio * 10000, 100);
-        $dia = $ymd % 100;
-        if (!checkdate($mes, $dia, $anio)) {
-            continue;
-        }
-        $fecha = sprintf('%04d-%02d-%02d', $anio, $mes, $dia);
+    $totales = ['manana' => 0, 'hoy' => 0, 'proximos_7' => 0];
+    $porGrupo = ['manana' => [], 'hoy' => [], 'proximos_7' => []];
+    foreach ($candidatos as $dni => $sel) {
         try {
-            $proximo = (new DateTimeImmutable($fecha))->modify('+' . (int)$meta['dias_ciclo'] . ' days');
+            $proximo = new DateTimeImmutable((string)$sel['fecha_proximo']);
         } catch (Throwable $e) {
             continue;
         }
         $diasRestantes = (int)$hoy->diff($proximo)->format('%r%a');
-        if ($diasRestantes > 1 || $diasRestantes < -$lookbackVencidas) {
+        if ($diasRestantes < 0 || $diasRestantes > 7) {
             continue;
         }
-        $grupoAlerta = $diasRestantes === 1 ? 'manana' : ($diasRestantes === 0 ? 'hoy' : 'vencidas');
-        $totalesAlerta[$grupoAlerta]++;
-        $relevantesAlertas[$dni] = [
-            'ymd' => $ymd,
-            'codigo' => $codigoHis,
+        $grupo = $diasRestantes === 0 ? 'hoy' : ($diasRestantes === 1 ? 'manana' : 'proximos_7');
+        $totales[$grupo]++;
+        $porGrupo[$grupo][$dni] = [
+            'sel' => $sel,
             'dias' => $diasRestantes,
-            'grupo' => $grupoAlerta,
-        ];
-    }
-    // Solo se construyen tarjetas completas para las más urgentes de cada grupo;
-    // los totales reales ya quedaron contados arriba.
-    $porGrupoAlerta = ['manana' => [], 'hoy' => [], 'vencidas' => []];
-    foreach ($relevantesAlertas as $dniGrupo => $metaGrupo) {
-        $porGrupoAlerta[$metaGrupo['grupo']][$dniGrupo] = $metaGrupo;
-    }
-    $relevantesSeleccionados = [];
-    foreach ($porGrupoAlerta as $listaGrupo) {
-        uasort($listaGrupo, static function (array $a, array $b): int {
-            $cmp = (int)$a['dias'] <=> (int)$b['dias'];
-            return $cmp !== 0 ? $cmp : strcmp((string)$a['codigo'], (string)$b['codigo']);
-        });
-        foreach (array_slice($listaGrupo, 0, max(1, $limiteLista), true) as $dniGrupo => $metaGrupo) {
-            $relevantesSeleccionados[$dniGrupo] = $metaGrupo;
-        }
-    }
-
-    // Se traen las filas completas solo de las pacientes relevantes (DNI+fecha).
-    $filasAlertas = [];
-    if ($relevantesSeleccionados) {
-        foreach (array_chunk(array_keys($relevantesSeleccionados), 500) as $loteDnisAlerta) {
-            $tuplasAlerta = [];
-            $paramsTuplasAlerta = [];
-            foreach ($loteDnisAlerta as $dniLote) {
-                $ymdLote = (int)$relevantesSeleccionados[$dniLote]['ymd'];
-                $tuplasAlerta[] = '(?, ?, ?, ?)';
-                $paramsTuplasAlerta[] = $dniLote;
-                $paramsTuplasAlerta[] = intdiv($ymdLote, 10000);
-                $paramsTuplasAlerta[] = intdiv($ymdLote - intdiv($ymdLote, 10000) * 10000, 100);
-                $paramsTuplasAlerta[] = $ymdLote % 100;
-            }
-            $sqlFilasAlerta = "
-                SELECT {$columnasAlertasSql}
-                FROM his_dl h
-                INNER JOIN his_dl_dt dt ON dt.ID = h.ID
-                WHERE (h.DNI, h.ANO, h.MES, h.DIA) IN (" . implode(',', $tuplasAlerta) . ")
-                  AND dt.DX IN ({$placeholdersAlertas})
-                  {$scope}
-            ";
-            try {
-                $stmtFilasAlerta = $pdo->prepare($sqlFilasAlerta);
-                $stmtFilasAlerta->execute(array_merge($paramsTuplasAlerta, $codigosConsulta, $scopeParams));
-                foreach ($stmtFilasAlerta->fetchAll() as $filaAlerta) {
-                    $filasAlertas[] = $filaAlerta;
-                }
-            } catch (Throwable $e) {
-                error_log('[PlanificaHIS] alertas filas relevantes: ' . $e->getMessage());
-            }
-        }
-    }
-
-    $mejores = [];
-    foreach ($filasAlertas as $row) {
-        $dni = trim((string)($row['dni'] ?? ''));
-        $codigoHis = trim((string)($row['codigo_his'] ?? ''));
-        if ($dni === '' || $codigoHis === '' || !isset($relevantesSeleccionados[$dni])) {
-            continue;
-        }
-        $meta = resolver_metodo_catalogo($catalogo, $codigoHis);
-        if ($meta === null || (int)$meta['dias_ciclo'] <= 0) {
-            continue;
-        }
-        $fecha = fecha_aplicacion_his($row);
-        if ($fecha === '') {
-            continue;
-        }
-        try {
-            $proximo = (new DateTimeImmutable($fecha))->modify('+' . (int)$meta['dias_ciclo'] . ' days');
-        } catch (Throwable $e) {
-            continue;
-        }
-        $diasRestantes = (int)$hoy->diff($proximo)->format('%r%a');
-        if ($diasRestantes > 1 || $diasRestantes < -$lookbackVencidas) {
-            continue;
-        }
-        $score = $fecha . '|' . str_pad((string)(int)$meta['dias_ciclo'], 4, '0', STR_PAD_LEFT)
-            . '|' . str_pad((string)(int)($row['id_his'] ?? 0), 12, '0', STR_PAD_LEFT);
-        if (isset($mejores[$dni]) && strcmp($score, (string)$mejores[$dni]['_score']) <= 0) {
-            continue;
-        }
-        $mejores[$dni] = [
-            '_score' => $score,
-            'row' => $row,
-            'meta' => $meta,
-            'fecha' => $fecha,
-            'proximo' => $proximo->format('Y-m-d'),
-            'dias_restantes' => $diasRestantes,
+            'grupo' => $grupo,
         ];
     }
 
-    if (!$mejores) {
+    if (!$totales['hoy'] && !$totales['manana'] && !$totales['proximos_7']) {
+        alertas_cache_set($cacheKey, $vacio);
         return $vacio;
     }
 
-    $dnis = array_keys($mejores);
-    $contactos = contactos_pacientes_por_dni($pdo, $dnis);
-    $dnisObstetras = array_map(static fn ($sel) => (string)($sel['row']['obstetra_dni'] ?? ''), $mejores);
-    $nombresObstetras = nombres_personas_por_dni($pdo, $dnisObstetras);
-    $listas = ['manana' => [], 'hoy' => [], 'vencidas' => []];
+    // Solo se construyen tarjetas completas hasta el límite por grupo; los
+    // totales reales ya quedaron contados con la fuente única de verdad.
+    $seleccionados = [];
+    foreach ($porGrupo as $listaGrupo) {
+        uasort($listaGrupo, static function (array $a, array $b): int {
+            $cmp = (int)$a['dias'] <=> (int)$b['dias'];
+            return $cmp !== 0 ? $cmp : strcmp((string)($a['sel']['dni'] ?? ''), (string)($b['sel']['dni'] ?? ''));
+        });
+        foreach (array_slice($listaGrupo, 0, max(1, $limiteLista), true) as $dniGrupo => $metaGrupo) {
+            $seleccionados[$dniGrupo] = $metaGrupo;
+        }
+    }
 
-    foreach ($mejores as $dni => $sel) {
+    $dnis = array_keys($seleccionados);
+    $contactos = contactos_pacientes_por_dni($pdo, $dnis);
+    $dnisObstetras = array_map(static fn ($metaSel) => (string)($metaSel['sel']['row']['obstetra_dni'] ?? ''), $seleccionados);
+    $nombresObstetras = nombres_personas_por_dni($pdo, $dnisObstetras);
+    $listas = ['manana' => [], 'hoy' => [], 'proximos_7' => []];
+
+    foreach ($seleccionados as $dni => $metaSel) {
+        $sel = $metaSel['sel'];
         $row = $sel['row'];
         $meta = $sel['meta'];
         $cap = $contactos[$dni] ?? [];
@@ -2893,10 +2933,10 @@ function alertas_programaticas_datos(PDO $pdo, array $session, ?array $catalogo 
         }
         $codEstab = trim((string)($row['cod_estab'] ?? ($cap['cod_estab'] ?? '')));
         $codObstetra = trim((string)($row['obstetra_dni'] ?? ''));
-        $diasRestantes = (int)$sel['dias_restantes'];
-        $prioridad = $diasRestantes < 0
-            ? 'ALTA (VENCIDA)'
-            : ($diasRestantes === 0 ? 'ALTA (HOY)' : ($diasRestantes === 1 ? 'ALTA (MAÑANA)' : ($diasRestantes <= 7 ? 'MEDIA' : 'BAJA')));
+        $diasRestantes = (int)$metaSel['dias'];
+        $prioridad = $diasRestantes === 0
+            ? 'ALTA (HOY)'
+            : ($diasRestantes === 1 ? 'ALTA (MAÑANA)' : 'MEDIA');
         $fila = [
             'dni' => $dni,
             'paciente_nombre' => $pacienteNombre,
@@ -2904,16 +2944,16 @@ function alertas_programaticas_datos(PDO $pdo, array $session, ?array $catalogo 
             'historia_clinica' => (string)($row['historia_clinica'] ?? ''),
             'cod_estab' => $codEstab,
             'establecimiento' => resolver_nombre_establecimiento($pdo, $codEstab),
-            'codigo_metodo' => (string)$meta['codigo_dx'],
-            'codigo_his' => (string)($row['codigo_his'] ?? ''),
-            'nombre_metodo' => (string)$meta['nombre_metodo'],
-            'fecha_aplicacion' => fecha_para_mostrar($sel['fecha']),
-            'fecha_aplicacion_iso' => $sel['fecha'],
-            'dias_ciclo' => (int)$meta['dias_ciclo'],
-            'fecha_proximo_metodo' => fecha_para_mostrar($sel['proximo']),
-            'fecha_proximo_metodo_iso' => $sel['proximo'],
+            'codigo_metodo' => (string)$sel['codigo'],
+            'codigo_his' => (string)$sel['codigo_his'],
+            'nombre_metodo' => (string)($meta['nombre_metodo'] ?? $sel['codigo']),
+            'fecha_aplicacion' => fecha_para_mostrar($sel['fecha_aplicacion']),
+            'fecha_aplicacion_iso' => $sel['fecha_aplicacion'],
+            'dias_ciclo' => (int)$sel['dias_ciclo'],
+            'fecha_proximo_metodo' => fecha_para_mostrar($sel['fecha_proximo']),
+            'fecha_proximo_metodo_iso' => $sel['fecha_proximo'],
             'dias_restantes' => $diasRestantes,
-            'estado_programacion' => $diasRestantes < 0 ? 'VENCIDO_ABANDONO' : ($diasRestantes === 0 ? 'TOCA_EN_FECHA' : 'PROXIMO_7_DIAS'),
+            'estado_programacion' => $diasRestantes === 0 ? 'TOCA_EN_FECHA' : 'PROXIMO_7_DIAS',
             'prioridad_llamada' => $prioridad,
             'celular' => (string)($cap['celular'] ?? ''),
             'direccion' => (string)($cap['direccion'] ?? ''),
@@ -2922,20 +2962,9 @@ function alertas_programaticas_datos(PDO $pdo, array $session, ?array $catalogo 
             'obstetra_dni' => $codObstetra,
             'nombre_obstetra' => (string)($nombresObstetras[$codObstetra] ?? ('OBST. ' . $codObstetra)),
         ];
-        if ($diasRestantes === 1) {
-            $listas['manana'][] = $fila;
-        } elseif ($diasRestantes === 0) {
-            $listas['hoy'][] = $fila;
-        } else {
-            $listas['vencidas'][] = $fila;
-        }
+        $listas[$metaSel['grupo']][] = $fila;
     }
 
-    $totales = [
-        'manana' => (int)$totalesAlerta['manana'],
-        'hoy' => (int)$totalesAlerta['hoy'],
-        'vencidas' => (int)$totalesAlerta['vencidas'],
-    ];
     foreach ($listas as &$lista) {
         usort($lista, static function (array $a, array $b): int {
             $cmp = (int)$a['dias_restantes'] <=> (int)$b['dias_restantes'];
@@ -2946,10 +2975,10 @@ function alertas_programaticas_datos(PDO $pdo, array $session, ?array $catalogo 
     unset($lista);
 
     $resultado = [
-        'manana' => $totales['manana'],
-        'hoy' => $totales['hoy'],
-        'vencidas' => $totales['vencidas'],
-        'total' => $totales['manana'] + $totales['hoy'] + $totales['vencidas'],
+        'manana' => (int)$totales['manana'],
+        'hoy' => (int)$totales['hoy'],
+        'proximos_7' => (int)$totales['proximos_7'],
+        'total' => (int)$totales['hoy'] + (int)$totales['manana'] + (int)$totales['proximos_7'],
         'listas' => $listas,
     ];
     alertas_cache_set($cacheKey, $resultado);
@@ -4174,7 +4203,10 @@ if ($action === 'reporte_programacion') {
     }
 
     $rangoModo = strtolower(trim((string)($_GET['rango_modo'] ?? 'exacto')));
-    if (!in_array($rangoModo, ['exacto', 'ventana_7d', 'vencidas', 'todos'], true)) {
+    // Solo se admiten la fecha exacta y la ventana accionable de 7 días.
+    // Cualquier modo histórico/vencidas de clientes antiguos se normaliza a
+    // fecha exacta para no disparar escaneos masivos sobre his_dl.
+    if (!in_array($rangoModo, ['exacto', 'ventana_7d'], true)) {
         $rangoModo = 'exacto';
     }
 
@@ -4202,48 +4234,9 @@ if ($action === 'reporte_programacion') {
         }
         $codigosFiltro = array_values(array_unique($codigosFiltro));
     }
-    $codigosConsulta = codigos_consulta_metodos($catalogo, $codigosFiltro);
-
-    // 7-B.2 Ventanas de fecha de aplicación AGRUPADAS POR CICLO. Los 14 métodos
-    // oficiales solo tienen 6 ciclos (30, 60, 90, 120, 180 y 365 días), por lo
-    // que en vez de ~28 condiciones se construyen como máximo 6. Al calcular
-    // fecha_proximo = fecha_aplicacion + dias_ciclo, la consulta se acota a los
-    // días exactos en que cada método pudo aplicarse para vencer en el rango.
-    $historicoVencidas = !empty($_GET['historico']);
-    $lookbackVencidas = $historicoVencidas ? 730 : 365; // abandonos recuperables
-    $lookbackTodos = 365;     // "vencidas recientes" al combinar todos los modos
-    $gruposPorCiclo = [];
-    foreach ($codigosConsulta as $codigo) {
-        $metaCiclo = resolver_metodo_catalogo($catalogo, $codigo);
-        $dias = max(1, (int)($metaCiclo['dias_ciclo'] ?? 30));
-        $gruposPorCiclo[$dias][] = (string)$codigo;
-    }
-    ksort($gruposPorCiclo);
-
-    $ventanas = [];
-    $ventanasPorCiclo = [];
-    foreach ($gruposPorCiclo as $dias => $listaCodigosCiclo) {
-        if ($rangoModo === 'exacto') {
-            $desde = $fechaBase->modify('-' . $dias . ' days')->format('Y-m-d');
-            $hasta = $desde;
-        } elseif ($rangoModo === 'ventana_7d') {
-            $desde = $fechaBase->modify('-' . $dias . ' days')->format('Y-m-d');
-            $desplazamiento7d = 7 - $dias;
-            $hasta = $fechaBase->modify(($desplazamiento7d >= 0 ? '+' : '-') . abs($desplazamiento7d) . ' days')->format('Y-m-d');
-        } elseif ($rangoModo === 'vencidas') {
-            $desde = $fechaBase->modify('-' . ($dias + $lookbackVencidas) . ' days')->format('Y-m-d');
-            $hasta = $fechaBase->modify('-' . ($dias + 1) . ' days')->format('Y-m-d');
-        } else {
-            $desde = $fechaBase->modify('-' . ($dias + $lookbackTodos) . ' days')->format('Y-m-d');
-            $desplazamientoTodos = 7 - $dias;
-            $hasta = $fechaBase->modify(($desplazamientoTodos >= 0 ? '+' : '-') . abs($desplazamientoTodos) . ' days')->format('Y-m-d');
-        }
-        $ventanasPorCiclo[(int)$dias] = ['desde' => $desde, 'hasta' => $hasta];
-        foreach ($listaCodigosCiclo as $codigoCiclo) {
-            $ventanas[$codigoCiclo] = ['desde' => $desde, 'hasta' => $hasta];
-        }
-    }
-
+    // 7-B.2 FUENTE ÚNICA DE VERDAD: exactamente la misma función que alimenta
+    // las alertas superiores, la agenda y el padrón. Así “HOY” del dashboard y
+    // “Toca fecha” de la programación devuelven siempre el mismo número.
     $esAdminReporte = is_admin_session($session);
     $rolReporte = rol_sesion($session);
     $esObstetraReporte = !$esAdminReporte && $rolReporte !== 'JEFA_OBSTETRAS';
@@ -4267,274 +4260,53 @@ if ($action === 'reporte_programacion') {
         'codigos_estab' => $codigosEstabProgramacion,
     ];
 
-    // El establecimiento se aplica SIEMPRE en la consulta principal con todas
-    // sus variantes. Si his_dl no reconoce el formato, el alcance se amplía
-    // para que el reporte no salga en cero.
-    $condicionEstabH = '';
-    $paramsEstab = [];
-    if (!$modoRedReporte && $codigosEstabProgramacion) {
-        $placeholdersEstab = implode(',', array_fill(0, count($codigosEstabProgramacion), '?'));
-        $condicionEstabH = " AND h.COD_ESTAB IN ({$placeholdersEstab}) ";
-        $paramsEstab = $codigosEstabProgramacion;
-    }
+    $fechaBaseIso = $fechaBase->format('Y-m-d');
+    $hastaProgramacion = $rangoModo === 'ventana_7d'
+        ? $fechaBase->modify('+7 days')
+        : $fechaBase;
+    $hastaProgramacionIso = $hastaProgramacion->format('Y-m-d');
 
-    $columnasReporteSql = "
-                    h.ID AS id_his, h.DNI AS dni, h.COD_ESTAB AS cod_estab,
-                    TRIM(h.Apellido_p) AS apellido_paterno,
-                    TRIM(h.Apellido_m) AS apellido_materno,
-                    TRIM(COALESCE(NULLIF(h.Dnombres, ''), h.Pnombre)) AS nombres,
-                    h.EDAD AS edad, h.HCLFAM AS historia_clinica,
-                    h.FICHAFAM AS ficha_familiar, h.CODPSAL AS obstetra_dni,
-                    h.DIA, h.MES, h.ANO, h.fecha_reg,
-                    dt.DX AS codigo_metodo, dt.id_dosis AS dosis, dt.fecha_reg AS fecha_dx";
-
-    $placeholdersReporte = implode(',', array_fill(0, count($codigosConsulta), '?'));
-    $primeroFechaReporte = in_array($rangoModo, ['exacto', 'ventana_7d'], true);
-    if ($primeroFechaReporte && indice_existe($pdo, 'his_dl', 'idx_his_dl_ano_mes_dia')) {
-        $hintReporte = ' FORCE INDEX(idx_his_dl_ano_mes_dia)';
-        $joinReporte = 'STRAIGHT_JOIN';
-    } elseif (!$primeroFechaReporte && indice_existe($pdo, 'his_dl', 'idx_his_dl_id_dni_fecha')) {
-        $hintReporte = ' FORCE INDEX(idx_his_dl_id_dni_fecha)';
-        $joinReporte = 'INNER JOIN';
-    } else {
-        $hintReporte = '';
-        $joinReporte = $primeroFechaReporte ? 'STRAIGHT_JOIN' : 'INNER JOIN';
-    }
-
-    // Se ejecuta UNA consulta por ciclo (máximo 6), cada una con su ventana
-    // exacta. Así la fecha exacta y los 7 días solo recorren sus pocos días y
-    // vencidas/todos no genera un OR gigantesco sobre 2 años.
-    $ultimasReporte = [];
-    foreach ($gruposPorCiclo as $diasCicloReporte => $listaCodigosReporte) {
-        $rangoCicloReporte = $ventanasPorCiclo[(int)$diasCicloReporte] ?? null;
-        if ($rangoCicloReporte === null || !$listaCodigosReporte) {
-            continue;
-        }
-        $marcasCicloReporte = implode(',', array_fill(0, count($listaCodigosReporte), '?'));
-        $paramsRangoCicloReporte = [];
-        $condicionRangoCicloReporte = sql_condicion_rango_ymd(
-            'h',
-            (string)$rangoCicloReporte['desde'],
-            (string)$rangoCicloReporte['hasta'],
-            $paramsRangoCicloReporte
+    try {
+        $candidatos = programacion_candidatos_rango(
+            $pdo,
+            $session,
+            $catalogo,
+            $fechaBaseIso,
+            $hastaProgramacionIso,
+            $codigosFiltro
         );
-        $anioMinCicloReporte = (int)substr((string)$rangoCicloReporte['desde'], 0, 4);
-        $anioMaxCicloReporte = (int)substr((string)$rangoCicloReporte['hasta'], 0, 4);
-        $sqlCicloReporte = "
-            SELECT h.DNI AS dni,
-                   MAX(h.ANO * 10000 + h.MES * 100 + h.DIA) AS ymd,
-                   SUBSTRING_INDEX(
-                       MAX(CONCAT(
-                           LPAD(h.ANO * 10000 + h.MES * 100 + h.DIA, 8, '0'), '|',
-                           LPAD('" . (int)$diasCicloReporte . "', 4, '0'), '|',
-                           dt.DX
-                       )),
-                       '|', -1
-                   ) AS codigo
-            FROM his_dl h{$hintReporte}
-            {$joinReporte} his_dl_dt dt ON dt.ID = h.ID
-            WHERE h.ANO BETWEEN ? AND ?
-              AND dt.DX IN ({$marcasCicloReporte})
-              AND {$condicionRangoCicloReporte}
-              {$condicionEstabH}
-            GROUP BY h.DNI
-        ";
-        $paramsCicloReporte = array_merge(
-            [$anioMinCicloReporte, $anioMaxCicloReporte],
-            $listaCodigosReporte,
-            $paramsRangoCicloReporte,
-            $paramsEstab
-        );
-        try {
-            $stmtCicloReporte = $pdo->prepare($sqlCicloReporte);
-            $stmtCicloReporte->execute($paramsCicloReporte);
-            foreach ($stmtCicloReporte->fetchAll() as $filaCicloReporte) {
-                $dniCicloReporte = (string)$filaCicloReporte['dni'];
-                $ymdCicloReporte = (int)$filaCicloReporte['ymd'];
-                $diasCicloActual = (int)$diasCicloReporte;
-                $existenteCiclo = $ultimasReporte[$dniCicloReporte] ?? null;
-                if (
-                    $existenteCiclo === null
-                    || $ymdCicloReporte > (int)$existenteCiclo['ymd']
-                    || ($ymdCicloReporte === (int)$existenteCiclo['ymd'] && $diasCicloActual > (int)$existenteCiclo['dias'])
-                ) {
-                    $ultimasReporte[$dniCicloReporte] = [
-                        'dni' => $dniCicloReporte,
-                        'ymd' => $ymdCicloReporte,
-                        'dias' => $diasCicloActual,
-                        'codigo' => (string)$filaCicloReporte['codigo'],
-                    ];
-                }
-            }
-        } catch (Throwable $e) {
-            error_log('[PlanificaHIS] reporte_programacion query failure: ' . $e->getMessage());
-            json_error('No se pudo calcular la programación. Verifique los índices clínicos del HIS e intente nuevamente.', 503, [
-                'code' => 'REPORTE_QUERY_FAILED',
-            ]);
-        }
-    }
-    $ultimasReporte = array_values($ultimasReporte);
-
-    // Clasificación clínica de la última atención real por DNI. Como la ventana
-    // global cubre todas las fechas de aplicación que podrían vencer en el
-    // rango, este MAX por DNI ya incorpora renovaciones y cambios de método.
-    $limiteCandidatos = 8000;
-    $relevantesReporte = [];
-    foreach ($ultimasReporte as $filaUltimaReporte) {
-        $dniReporte = trim((string)($filaUltimaReporte['dni'] ?? ''));
-        $codigoReporte = trim((string)($filaUltimaReporte['codigo'] ?? ''));
-        $ymdReporte = (int)($filaUltimaReporte['ymd'] ?? 0);
-        if ($dniReporte === '' || $codigoReporte === '' || $ymdReporte <= 0) {
-            continue;
-        }
-        $metaReporte = resolver_metodo_catalogo($catalogo, $codigoReporte);
-        if ($metaReporte === null || (int)$metaReporte['dias_ciclo'] <= 0) {
-            continue;
-        }
-        $anioReporte = intdiv($ymdReporte, 10000);
-        $mesReporte = intdiv($ymdReporte - $anioReporte * 10000, 100);
-        $diaReporte = $ymdReporte % 100;
-        if (!checkdate($mesReporte, $diaReporte, $anioReporte)) {
-            continue;
-        }
-        $fechaReporte = sprintf('%04d-%02d-%02d', $anioReporte, $mesReporte, $diaReporte);
-        try {
-            $proximoReporte = (new DateTimeImmutable($fechaReporte))->modify('+' . (int)$metaReporte['dias_ciclo'] . ' days');
-        } catch (Throwable $e) {
-            continue;
-        }
-        $diasReporte = (int)$fechaBase->diff($proximoReporte)->format('%r%a');
-        $aplicaReporte = match ($rangoModo) {
-            'exacto' => $diasReporte === 0,
-            'ventana_7d' => $diasReporte >= 0 && $diasReporte <= 7,
-            'vencidas' => $diasReporte < 0 && $diasReporte >= -$lookbackVencidas,
-            'todos' => $diasReporte <= 7 && $diasReporte >= -$lookbackTodos,
-            default => false,
-        };
-        if (!$aplicaReporte) {
-            continue;
-        }
-        $relevantesReporte[$dniReporte] = [
-            'ymd' => $ymdReporte,
-            'dias' => $diasReporte,
-        ];
-    }
-    // Prioriza a las más urgentes y respeta el límite de candidatos del reporte.
-    uasort($relevantesReporte, static function (array $a, array $b): int {
-        return (int)$a['dias'] <=> (int)$b['dias'];
-    });
-    $relevantesReporte = array_slice($relevantesReporte, 0, $limiteCandidatos, true);
-
-    // Se traen las filas completas solo de las pacientes relevantes (DNI+fecha).
-    $filasBase = [];
-    if ($relevantesReporte) {
-        foreach (array_chunk(array_keys($relevantesReporte), 500) as $loteDnisReporte) {
-            $tuplasReporte = [];
-            $paramsTuplasReporte = [];
-            foreach ($loteDnisReporte as $dniLoteReporte) {
-                $ymdLoteReporte = (int)$relevantesReporte[$dniLoteReporte]['ymd'];
-                $tuplasReporte[] = '(?, ?, ?, ?)';
-                $paramsTuplasReporte[] = $dniLoteReporte;
-                $paramsTuplasReporte[] = intdiv($ymdLoteReporte, 10000);
-                $paramsTuplasReporte[] = intdiv($ymdLoteReporte - intdiv($ymdLoteReporte, 10000) * 10000, 100);
-                $paramsTuplasReporte[] = $ymdLoteReporte % 100;
-            }
-            $sqlFilasReporte = "
-                SELECT {$columnasReporteSql}
-                FROM his_dl h
-                INNER JOIN his_dl_dt dt ON dt.ID = h.ID
-                WHERE (h.DNI, h.ANO, h.MES, h.DIA) IN (" . implode(',', $tuplasReporte) . ")
-                  AND dt.DX IN ({$placeholdersReporte})
-                  {$condicionEstabH}
-            ";
-            try {
-                $stmtFilasReporte = $pdo->prepare($sqlFilasReporte);
-                $stmtFilasReporte->execute(array_merge($paramsTuplasReporte, $codigosConsulta, $paramsEstab));
-                foreach ($stmtFilasReporte->fetchAll() as $filaReporte) {
-                    $filasBase[] = $filaReporte;
-                }
-            } catch (Throwable $e) {
-                error_log('[PlanificaHIS] reporte_programacion filas relevantes: ' . $e->getMessage());
-            }
-        }
+    } catch (Throwable $e) {
+        error_log('[PlanificaHIS] reporte_programacion query failure: ' . $e->getMessage());
+        json_error('No se pudo calcular la programación. Verifique los índices clínicos del HIS e intente nuevamente.', 503, [
+            'code' => 'REPORTE_QUERY_FAILED',
+        ]);
     }
 
-    // 7-B.4 Se elige la última atención con método por DNI. Si una misma
-    // atención tiene varios códigos, gana el ciclo más largo (método real).
-    $seleccionados = [];
-    foreach ($filasBase as $row) {
-        $dniKey = trim((string)($row['dni'] ?? ''));
-        $codigo = trim((string)($row['codigo_metodo'] ?? ''));
-        $metaMetodo = resolver_metodo_catalogo($catalogo, $codigo);
-        if ($dniKey === '' || $metaMetodo === null) {
-            continue;
-        }
-        $diasCiclo = (int)($metaMetodo['dias_ciclo'] ?? 0);
-        if ($diasCiclo <= 0) {
-            continue;
-        }
-        $fechaAplicacion = trim((string)($row['fecha_aplicacion'] ?? ''));
-        if ($fechaAplicacion === '' || str_starts_with($fechaAplicacion, '0000-00-00')) {
-            $fechaAplicacion = fecha_aplicacion_his($row);
-        }
-        if ($fechaAplicacion === '') {
-            continue;
-        }
-        try {
-            $fechaProximo = (new DateTimeImmutable($fechaAplicacion))->modify('+' . $diasCiclo . ' days');
-        } catch (Throwable $e) {
-            continue;
-        }
-        $score = $fechaAplicacion
-            . '|' . str_pad((string)$diasCiclo, 4, '0', STR_PAD_LEFT)
-            . '|' . str_pad((string)(int)($row['id_his'] ?? 0), 12, '0', STR_PAD_LEFT);
-        if (isset($seleccionados[$dniKey]) && strcmp($score, $seleccionados[$dniKey]['_score']) <= 0) {
-            continue;
-        }
-        $seleccionados[$dniKey] = [
-            '_score' => $score,
-            'row' => $row,
-            'codigo' => (string)($metaMetodo['codigo_dx'] ?? $codigo),
-            'codigo_his' => $codigo,
-            'nombre_metodo' => (string)($metaMetodo['nombre_metodo'] ?? $codigo),
-            'dias_ciclo' => $diasCiclo,
-            'fecha_aplicacion' => $fechaAplicacion,
-            'fecha_proximo' => $fechaProximo->format('Y-m-d'),
-        ];
-    }
-
-    // 7-B.5 Filtro clínico final y cálculo de días restantes respecto de la
-    // fecha objetivo (positivo = falta; 0 = hoy; negativo = vencida).
+    $hoy = new DateTimeImmutable('today');
+    $hoyIso = $hoy->format('Y-m-d');
+    $mananaIso = $hoy->modify('+1 day')->format('Y-m-d');
     $dnis = [];
-    $candidatos = [];
-    foreach ($seleccionados as $dniKey => $sel) {
-        $diasRestantes = (int)$fechaBase->diff(new DateTimeImmutable($sel['fecha_proximo']))->format('%r%a');
-        $aplica = match ($rangoModo) {
-            'exacto' => $diasRestantes === 0,
-            'ventana_7d' => $diasRestantes >= 0 && $diasRestantes <= 7,
-            'vencidas' => $diasRestantes < 0 && $diasRestantes >= -$lookbackVencidas,
-            'todos' => $diasRestantes <= 7 && $diasRestantes >= -$lookbackTodos,
-            default => false,
-        };
-        if (!$aplica) {
+    $candidatosFiltrados = [];
+    foreach ($candidatos as $dniKey => $sel) {
+        $fechaProximo = (string)$sel['fecha_proximo'];
+        if ($fechaProximo < $fechaBaseIso || $fechaProximo > $hastaProgramacionIso) {
             continue;
         }
-        if ($diasRestantes === 0) {
+        $diasRestantes = (int)$hoy->diff(new DateTimeImmutable($fechaProximo))->format('%r%a');
+        if ($fechaProximo === $fechaBaseIso) {
             $estado = 'TOCA_EN_FECHA';
-        } elseif ($diasRestantes > 0 && $diasRestantes <= 7) {
+        } elseif ($diasRestantes >= 0 && $diasRestantes <= 7) {
             $estado = 'PROXIMO_7_DIAS';
-        } elseif ($diasRestantes < 0) {
-            $estado = 'VENCIDO_ABANDONO';
         } else {
             $estado = 'AL_DIA';
         }
         $sel['dias_restantes'] = $diasRestantes;
         $sel['estado'] = $estado;
-        $candidatos[$dniKey] = $sel;
+        $candidatosFiltrados[$dniKey] = $sel;
         $dnis[] = $dniKey;
     }
 
-    // 7-B.6 Cruce por DNI con pacientes_sin_metodo para adjuntar contacto y
+    // 7-B.3 Cruce por DNI con pacientes_sin_metodo para adjuntar contacto y
     // domicilio descifrados (AES-256-GCM) solo dentro de la sesión 2FA.
     $captaciones = [];
     if ($dnis) {
@@ -4556,7 +4328,7 @@ if ($action === 'reporte_programacion') {
     }
 
     $filas = [];
-    foreach ($candidatos as $dniKey => $sel) {
+    foreach ($candidatosFiltrados as $dniKey => $sel) {
         $row = $sel['row'];
         $cap = $captaciones[$dniKey] ?? [];
         $codEstab = trim((string)($row['cod_estab'] ?? ($cap['cod_estab'] ?? '')));
@@ -4598,9 +4370,9 @@ if ($action === 'reporte_programacion') {
             'ficha_familiar' => (string)($row['ficha_familiar'] ?? ''),
             'cod_estab' => $codEstab,
             'establecimiento' => resolver_nombre_establecimiento($pdo, $codEstab),
-            'codigo_metodo' => $sel['codigo'],
-            'codigo_his' => (string)($sel['codigo_his'] ?? ''),
-            'nombre_metodo' => (string)($sel['nombre_metodo'] ?? $sel['codigo']),
+            'codigo_metodo' => (string)$sel['codigo'],
+            'codigo_his' => (string)$sel['codigo_his'],
+            'nombre_metodo' => (string)($sel['meta']['nombre_metodo'] ?? $sel['codigo']),
             'dosis' => (string)($row['dosis'] ?? ''),
             'fecha_aplicacion' => fecha_para_mostrar($sel['fecha_aplicacion']),
             'fecha_aplicacion_iso' => $sel['fecha_aplicacion'],
@@ -4622,21 +4394,31 @@ if ($action === 'reporte_programacion') {
         return $cmp !== 0 ? $cmp : strcmp($a['paciente_nombre'], $b['paciente_nombre']);
     });
 
+    // Resumen accionable: sin “vencidas” ni escaneos históricos. “Toca fecha”
+    // cuenta exactamente las pacientes cuya fecha de próximo control es la
+    // fecha objetivo; para HOY coincide 1:1 con la tarjeta superior.
     $resumen = [
         'total' => count($filas),
         'toca_en_fecha' => 0,
+        'manana' => 0,
         'proximo_7_dias' => 0,
-        'vencido_abandono' => 0,
         'al_dia' => 0,
     ];
     foreach ($filas as $fila) {
-        $clave = match ($fila['estado_programacion']) {
-            'TOCA_EN_FECHA' => 'toca_en_fecha',
-            'PROXIMO_7_DIAS' => 'proximo_7_dias',
-            'VENCIDO_ABANDONO' => 'vencido_abandono',
-            default => 'al_dia',
-        };
-        $resumen[$clave]++;
+        $fechaProximoFila = (string)$fila['fecha_proximo_metodo_iso'];
+        $diasFila = (int)$fila['dias_restantes'];
+        if ($fechaProximoFila === $fechaBaseIso) {
+            $resumen['toca_en_fecha']++;
+        }
+        if ($fechaBaseIso <= $hoyIso && $fechaProximoFila === $mananaIso) {
+            $resumen['manana']++;
+        }
+        if ($diasFila >= 2 && $diasFila <= 7) {
+            $resumen['proximo_7_dias']++;
+        }
+        if ($diasFila > 7) {
+            $resumen['al_dia']++;
+        }
     }
 
     $establecimientoActual = [
@@ -4686,11 +4468,10 @@ if ($action === 'reporte_programacion') {
         'filas' => $filas,
         'metadata' => [
             'generado_en' => date('c'),
-            'limite_candidatos' => $limiteCandidatos,
-            'lookback_vencidas_dias' => $lookbackVencidas,
-            'lookback_todos_dias' => $lookbackTodos,
-            'ventanas_aplicacion' => $ventanas,
+            'ventana_desde' => $fechaBaseIso,
+            'ventana_hasta' => $hastaProgramacionIso,
             'fuente_catalogo' => 'app_catalogo_metodos',
+            'fuente_unica' => 'programacion_candidatos_rango',
             'emisor' => [
                 'dni' => (string)$session['dni'],
                 'nombre' => HospitalHuaralDB::nombrePersona((string)$session['dni'], $pdo),
@@ -4757,7 +4538,9 @@ if ($action === 'reporte_padron') {
     $catalogo = catalogo_metodos_planificacion($pdo);
     $alertas = alertas_programaticas_datos($pdo, $session, $catalogo, 1000);
     $grupoFiltro = strtolower(trim((string)($_GET['grupo'] ?? 'todas')));
-    $grupos = in_array($grupoFiltro, ['manana', 'hoy', 'vencidas'], true) ? [$grupoFiltro] : ['hoy', 'manana', 'vencidas'];
+    $grupos = in_array($grupoFiltro, ['manana', 'hoy', 'proximos_7'], true)
+        ? [$grupoFiltro]
+        : ['hoy', 'manana', 'proximos_7'];
     $filas = [];
     foreach ($grupos as $grupo) {
         foreach (($alertas['listas'][$grupo] ?? []) as $fila) {
@@ -4794,7 +4577,7 @@ if ($action === 'reporte_padron') {
         'resumen' => [
             'manana' => (int)$alertas['manana'],
             'hoy' => (int)$alertas['hoy'],
-            'vencidas' => (int)$alertas['vencidas'],
+            'proximos_7' => (int)$alertas['proximos_7'],
             'total' => (int)$alertas['total'],
         ],
         'filas' => $filas,
@@ -4962,10 +4745,10 @@ function reporte_estado_metodo(?string $fechaProxima, ?int $diasCiclo): array
     }
     $dias = (int)$hoy->diff($proxima)->format('%r%a');
     if ($dias < 0) {
-        return ['estado' => 'VENCIDA', 'etiqueta' => 'Vencida / captación inmediata', 'dias_restantes' => $dias, 'prioridad' => 0];
+        return ['estado' => 'VENCIDA', 'etiqueta' => 'Control pendiente / captación inmediata', 'dias_restantes' => $dias, 'prioridad' => 0];
     }
     if ($dias <= 7) {
-        return ['estado' => 'PROXIMA', 'etiqueta' => 'Próxima a vencer (≤ 7 días)', 'dias_restantes' => $dias, 'prioridad' => 1];
+        return ['estado' => 'PROXIMA', 'etiqueta' => 'Le toca dentro de 7 días', 'dias_restantes' => $dias, 'prioridad' => 1];
     }
     return ['estado' => 'VIGENTE', 'etiqueta' => 'Vigente / al día', 'dias_restantes' => $dias, 'prioridad' => 2];
 }
@@ -5509,7 +5292,13 @@ function reporte_metodos_datos(PDO $pdo, array $session, array $input, int $page
         ],
         'fuente' => $fuenteBase,
         'catalogo' => array_values($catalogo),
-        'resumen' => $resumen,
+        'resumen' => [
+            'vigente' => (int)($resumen['vigente'] ?? 0),
+            'proxima' => (int)($resumen['proxima'] ?? 0),
+            'proximos_7_dias' => (int)($resumen['proxima'] ?? 0),
+            'sin_metodo' => (int)($resumen['sin_metodo'] ?? 0),
+            'total' => (int)($resumen['total'] ?? 0),
+        ],
         'filas' => $filasPagina,
         'sectores' => $sectores,
         'paginacion' => [

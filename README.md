@@ -27,8 +27,9 @@ AI Studio fue retirado.
   desde **Reportes → Programación y Seguimiento** con rol administrador.
 - Al abrir la app, el tablero y la barra superior muestran
   **🔔 Alertas de Seguimiento Programático** con los controles de **MAÑANA (+1 día)**,
-  **HOY** y **VENCIDAS**, además de los botones para ver pacientes a llamar y
-  descargar el Excel de la alerta.
+  **HOY** y **PRÓXIMOS 7 DÍAS**, además de los botones para ver pacientes a llamar y
+  descargar el Excel de la alerta. Las pacientes activas se calculan con una sola
+  fuente de verdad y se deduplican por DNI.
 
 ## Roles, accesos y recuperación de clave
 
@@ -51,14 +52,16 @@ AI Studio fue retirado.
 
 ## Reportes oficiales
 
-La pestaña **Reportes** incluye cuatro salidas con membrete institucional (escudo
+La pestaña **Reportes** incluye cinco salidas con membrete institucional (escudo
 del Gobierno Regional de Lima y logo del Hospital San Juan Bautista de Huaral):
 
 1. **Pacientes captadas en campo/barrido** (`pacientes_sin_metodo`).
 2. **Productividad diaria por obstetra**.
 3. **Programación y seguimiento por método** (14 códigos HIS, filtros mañana,
-   hoy, 7 días, vencidas y fecha exacta).
-4. **Padrón de pacientes por llamar** (teléfono y prioridad de llamada).
+   hoy, próximos 7 días y fecha exacta, sin vencidas).
+4. **Padrón de pacientes por llamar** (teléfono, prioridad de llamada y
+   próximos 7 días).
+5. **Indicadores por método anticonceptivo**.
 
 Cada reporte ofrece **Descargar Excel Oficial (.xls con membrete y bordes)** e
 **Imprimir / Guardar PDF Oficial** en tamaño A4 horizontal, con fecha de emisión,
