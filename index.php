@@ -49,10 +49,11 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
 <html lang="es">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5, viewport-fit=cover" />
   <title>PlanificaSalud HIS — Hospital San Juan Bautista Huaral</title>
   <meta name="description" content="Captación y seguimiento de Planificación Familiar del Hospital San Juan Bautista Huaral y la Red Huaral-Chancay. Seguridad AES-256-GCM y auditoría SHA-256." />
-  <meta name="theme-color" content="#0f172a" />
+  <meta name="theme-color" content="#0F172A" />
+  <meta name="color-scheme" content="light" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
@@ -61,24 +62,293 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
   <link rel="icon" type="image/svg+xml" href="./public/icon.svg?v=3" />
   <link rel="icon" type="image/x-icon" href="./public/favicon.ico?v=3" />
   <link rel="apple-touch-icon" href="./public/apple-touch-icon.png?v=3" sizes="180x180" />
-  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="preconnect" href="https://cdn.tailwindcss.com" />
   <script defer src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <style>
-    body { font-family: 'Plus Jakarta Sans', sans-serif; -webkit-tap-highlight-color: transparent; }
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" media="print" onload="this.media='all'" />
+  <noscript><link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" /></noscript>
+  <style id="phs-critical-css">
+    /* =====================================================================
+       CRITICAL CSS — Splash institucional, safe areas, skeletons y PWA.
+       Se pinta antes de Tailwind, fuentes o cualquier petición de red.
+       ===================================================================== */
+    :root {
+      --phs-blue: #0369a1;
+      --phs-blue-deep: #0f172a;
+      --phs-safe-top: env(safe-area-inset-top, 0px);
+      --phs-safe-bottom: env(safe-area-inset-bottom, 0px);
+      --phs-safe-left: env(safe-area-inset-left, 0px);
+      --phs-safe-right: env(safe-area-inset-right, 0px);
+    }
+    html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+    html, body { margin: 0; padding: 0; background: #f8fafc; }
+    body {
+      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      -webkit-tap-highlight-color: transparent;
+      -webkit-font-smoothing: antialiased;
+    }
+    button, a, [role="button"], select, input, textarea, label {
+      -webkit-tap-highlight-color: transparent;
+      touch-action: manipulation;
+    }
+    button { cursor: pointer; }
     .font-mono { font-family: 'JetBrains Mono', monospace; font-variant-numeric: tabular-nums; }
     .hide-scrollbar::-webkit-scrollbar { display: none; }
     .safe-bottom { padding-bottom: env(safe-area-inset-bottom); }
+
+    /* Header fijo con Notch / Dynamic Island */
+    .app-header {
+      padding-top: max(env(safe-area-inset-top), 12px) !important;
+      padding-left: max(env(safe-area-inset-left), 12px);
+      padding-right: max(env(safe-area-inset-right), 12px);
+    }
+    .app-login-hero {
+      padding-top: max(env(safe-area-inset-top), 2rem) !important;
+      padding-left: max(env(safe-area-inset-left), 1.5rem);
+      padding-right: max(env(safe-area-inset-right), 1.5rem);
+    }
+    .app-main {
+      padding-left: max(env(safe-area-inset-left), 1rem);
+      padding-right: max(env(safe-area-inset-right), 1rem);
+      padding-bottom: calc(5.5rem + max(env(safe-area-inset-bottom), 10px)) !important;
+    }
+    .app-bottom-nav {
+      padding-bottom: max(env(safe-area-inset-bottom), 10px) !important;
+      min-height: calc(4rem + max(env(safe-area-inset-bottom), 10px));
+      padding-left: max(env(safe-area-inset-left), 0px);
+      padding-right: max(env(safe-area-inset-right), 0px);
+    }
+    .ios-install-banner {
+      bottom: calc(4.5rem + max(env(safe-area-inset-bottom), 10px)) !important;
+      padding-left: max(env(safe-area-inset-left), 0.75rem);
+      padding-right: max(env(safe-area-inset-right), 0.75rem);
+    }
+
     /* iOS Safari: evita el auto-zoom al enfocar inputs/selects/textareas. */
     @media (max-width: 768px) {
       input, select, textarea { font-size: 16px !important; }
     }
+
+    /* Splash institucional: visible desde el primer frame. */
+    #phs-splash {
+      position: fixed;
+      inset: 0;
+      z-index: 99999;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      color: #0f172a;
+      background:
+        radial-gradient(circle at 50% 18%, rgba(14, 165, 233, 0.16), transparent 42%),
+        linear-gradient(165deg, #f8fafc 0%, #eef6ff 55%, #e0f2fe 100%);
+      transition: opacity 0.35s ease, visibility 0.35s ease;
+    }
+    #phs-splash.phs-splash--hide {
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+    }
+    .phs-splash__card {
+      width: 100%;
+      max-width: 360px;
+      text-align: center;
+      padding: 28px 22px 24px;
+      border: 1px solid rgba(186, 230, 253, 0.9);
+      border-radius: 28px;
+      background: rgba(255, 255, 255, 0.88);
+      box-shadow: 0 24px 70px rgba(15, 23, 42, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+      -webkit-backdrop-filter: blur(14px);
+      backdrop-filter: blur(14px);
+    }
+    .phs-splash__logo {
+      width: 92px;
+      height: 92px;
+      margin: 0 auto 14px;
+      padding: 10px;
+      border-radius: 26px;
+      background: #ffffff;
+      border: 1px solid #e2e8f0;
+      box-shadow: 0 10px 24px rgba(3, 105, 161, 0.16);
+      animation: phs-pulse 2.1s ease-in-out infinite;
+    }
+    .phs-splash__logo img { width: 100%; height: 100%; object-fit: contain; display: block; }
+    .phs-splash__brand { font-size: 17px; line-height: 1.2; font-weight: 800; letter-spacing: -0.02em; color: #0f172a; }
+    .phs-splash__sub { margin-top: 4px; font-size: 11px; line-height: 1.45; color: #475569; font-weight: 600; }
+    .phs-splash__spinner {
+      width: 30px;
+      height: 30px;
+      margin: 20px auto 14px;
+      border-radius: 50%;
+      border: 3px solid rgba(3, 105, 161, 0.16);
+      border-top-color: #0369a1;
+      border-right-color: #0ea5e9;
+      animation: phs-spin 0.8s linear infinite;
+    }
+    .phs-splash__progress {
+      position: relative;
+      width: 100%;
+      height: 5px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: #e2e8f0;
+    }
+    .phs-splash__progress span {
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 42%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, #0284c7, #38bdf8, #0284c7);
+      animation: phs-progress 1.35s ease-in-out infinite;
+    }
+    #phs-splash-status {
+      min-height: 32px;
+      margin-top: 12px;
+      font-size: 11px;
+      line-height: 1.45;
+      font-weight: 700;
+      color: #0369a1;
+      letter-spacing: 0.01em;
+    }
+    .phs-splash__footer { margin-top: 10px; font-size: 9px; line-height: 1.4; color: #94a3b8; font-weight: 600; }
+
+    /* Skeletons tipo shimmer para el App Shell y tarjetas clínicas. */
+    .phs-skeleton {
+      position: relative;
+      overflow: hidden;
+      border-radius: 16px;
+      background: linear-gradient(90deg, #e2e8f0 20%, #f1f5f9 40%, #e2e8f0 60%);
+      background-size: 400% 100%;
+      animation: phs-shimmer 1.35s ease-in-out infinite;
+    }
+    .phs-skeleton--line { height: 12px; border-radius: 999px; }
+    .phs-skeleton--card { height: 92px; }
+    .phs-skeleton--tall { height: 132px; }
+    .phs-skeleton--kpi { height: 74px; }
+    .phs-skeleton-stack { display: grid; gap: 10px; }
+    .phs-skeleton-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+
+    /* Indicador elegante de revalidación en segundo plano. */
+    .phs-refresh-badge {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      margin: 10px 16px 0;
+      padding: 7px 12px;
+      border: 1px solid #bae6fd;
+      border-radius: 999px;
+      background: rgba(240, 249, 255, 0.96);
+      color: #075985;
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.01em;
+      box-shadow: 0 4px 14px rgba(2, 132, 199, 0.08);
+    }
+    .phs-spin {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border: 2px solid rgba(3, 105, 161, 0.2);
+      border-top-color: #0369a1;
+      border-radius: 50%;
+      animation: phs-spin 0.8s linear infinite;
+    }
+    .phs-install-hidden, .pwa-install-hidden {
+      display: none !important;
+      visibility: hidden !important;
+      pointer-events: none !important;
+    }
+
+    /* Regla global obligatoria: nunca mostrar instalación dentro de la PWA. */
+    @media all and (display-mode: standalone), all and (display-mode: fullscreen), all and (display-mode: minimal-ui) {
+      .pwa-install-btn, #btn-instalar-pwa, #btnInstalarApp, #pwa-install-banner, [data-pwa-install] {
+        display: none !important;
+        visibility: hidden !important;
+        pointer-events: none !important;
+      }
+    }
+
+    @keyframes phs-pulse {
+      0%, 100% { transform: scale(1); box-shadow: 0 10px 24px rgba(3, 105, 161, 0.16); }
+      50% { transform: scale(1.035); box-shadow: 0 14px 34px rgba(3, 105, 161, 0.24); }
+    }
+    @keyframes phs-spin { to { transform: rotate(360deg); } }
+    @keyframes phs-progress {
+      0% { left: -45%; width: 35%; }
+      50% { width: 55%; }
+      100% { left: 110%; width: 30%; }
+    }
+    @keyframes phs-shimmer {
+      0% { background-position: 100% 0; }
+      100% { background-position: -100% 0; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .phs-splash__logo, .phs-splash__spinner, .phs-splash__progress span, .phs-skeleton, .phs-spin { animation: none !important; }
+      #phs-splash { transition: none; }
+    }
   </style>
 </head>
 <body class="bg-slate-200/70 text-slate-900 antialiased min-h-[100dvh] flex flex-col items-center">
+  <!-- Splash institucional: primer elemento del body para pintar en 0 ms. -->
+  <div id="phs-splash" role="status" aria-live="polite" aria-label="Cargando PlanificaSalud HIS">
+    <div class="phs-splash__card">
+      <div class="phs-splash__logo"><img src="./public/logo.png" alt="Hospital San Juan Bautista Huaral" width="72" height="72" fetchpriority="high" /></div>
+      <div class="phs-splash__brand">PlanificaSalud HIS</div>
+      <div class="phs-splash__sub">Hospital San Juan Bautista Huaral<br />Red de Salud Huaral-Chancay · DIRESA Lima</div>
+      <div class="phs-splash__spinner" aria-hidden="true"></div>
+      <div class="phs-splash__progress" aria-hidden="true"><span></span></div>
+      <div id="phs-splash-status">Verificando sesión segura...</div>
+      <div class="phs-splash__footer">Conexión clínica protegida · AES-256-GCM</div>
+    </div>
+  </div>
   <div id="app-root" class="w-full max-w-[480px] md:max-w-3xl lg:max-w-5xl min-h-[100dvh] bg-slate-50 shadow-2xl border-x border-slate-200 flex flex-col relative"></div>
   <div id="ios-banner-root"></div>
 
+  <script>
+    // Control del splash sin depender de Tailwind ni de la API.
+    (function () {
+      var textos = [
+        'Verificando sesión segura...',
+        'Conectando con Red de Salud Huaral-Chancay...',
+        'Sincronizando programación del establecimiento...'
+      ];
+      var indice = 0;
+      var timer = null;
+      var splash = document.getElementById('phs-splash');
+      var estado = document.getElementById('phs-splash-status');
+      function rotar() {
+        if (!estado) return;
+        estado.textContent = textos[indice % textos.length];
+        indice++;
+      }
+      rotar();
+      timer = window.setInterval(rotar, 1500);
+      window.PlanificaSplash = {
+        show: function (texto) {
+          if (timer) { window.clearInterval(timer); timer = null; }
+          if (texto && estado) estado.textContent = texto;
+          if (splash) {
+            splash.classList.remove('phs-splash--hide');
+            splash.setAttribute('aria-hidden', 'false');
+          }
+        },
+        setStatus: function (texto) {
+          if (estado && texto) estado.textContent = texto;
+        },
+        hide: function () {
+          if (timer) { window.clearInterval(timer); timer = null; }
+          if (!splash) return;
+          splash.classList.add('phs-splash--hide');
+          splash.setAttribute('aria-hidden', 'true');
+        }
+      };
+    })();
+  </script>
+
+  <!-- Tailwind se carga al final: el splash crítico ya está pintado. -->
+  <script src="https://cdn.tailwindcss.com"></script>
   <script>
     'use strict';
 
@@ -96,6 +366,13 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
     const DEVICE_KEY = 'planificahis.php.offline.device-key.v1';
     const IOS_DISMISS_KEY = 'planificahis.php.ios-install-dismissed.v1';
     const LOGO_REPORTES_KEY = 'planificahis.php.logo.reportes.v1';
+    // Marca persistente de instalación PWA. Se escribe al detectar standalone,
+    // al recibir appinstalled o al aceptar el prompt nativo de Android.
+    const PWA_INSTALLED_KEY = 'planificahis_pwa_installed';
+    // Caché local del último overview (KPIs, alertas, programación y pacientes)
+    // aislada por DNI + establecimiento activo. Permite pintar en 0 ms.
+    const OVERVIEW_CACHE_PREFIX = 'planificahis.php.overview.v2.';
+    const OVERVIEW_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
     const ESTADOS = {
       INSATISFECHA_SIN_METODO: 'Sin Método (Insatisfecha)',
       SEGUIMIENTO_DOMICILIARIO: 'En Seguimiento',
@@ -279,11 +556,17 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       syncingOffline: false,
       changingEstab: false,
       canInstall: false,
+      pwaInstalled: false,
       logoPersonalizadoData: (function () { try { return localStorage.getItem(LOGO_REPORTES_KEY) || ''; } catch (e) { return ''; } })(),
       iosBanner: false,
       iosStep: 1,
       showSecurity: true,
       booted: false,
+      overviewLoaded: false,
+      overviewFromCache: false,
+      overviewRefreshing: false,
+      overviewError: '',
+      loginSubmitting: false,
       reporteVista: 'CAMPO',
       campoFiltros: Object.assign(filtrosReportePorDefecto(), { alcance: 'establecimiento', ambito: 'establecimiento' }),
       campoData: null,
@@ -496,6 +779,11 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       state.reporteProgramacion = null;
       state.reporteLoading = false;
       state.reporteError = '';
+      state.overviewLoaded = false;
+      state.overviewFromCache = false;
+      state.overviewRefreshing = false;
+      state.overviewError = '';
+      state.loginSubmitting = false;
     }
 
     function clearSession() {
@@ -592,6 +880,10 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       state.accesosData = null;
       state.movimientosData = null;
       state.equipoData = null;
+      state.overviewLoaded = false;
+      state.overviewFromCache = false;
+      state.overviewRefreshing = false;
+      state.overviewError = '';
     }
 
     function sincronizarAlcanceFiltros() {
@@ -747,10 +1039,201 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
     }
 
     // ---------------------------------------------------------------------
+    // Splash, caché local instantánea y skeletons
+    // ---------------------------------------------------------------------
+    function mostrarSplash(texto) {
+      if (window.PlanificaSplash) window.PlanificaSplash.show(texto || 'Verificando sesión segura...');
+    }
+    function ocultarSplash() {
+      if (window.PlanificaSplash) window.PlanificaSplash.hide();
+    }
+    function activarSplashEnvio(buttonId, texto) {
+      mostrarSplash(texto || 'Iniciando sesión...');
+      const boton = document.getElementById(buttonId);
+      if (boton) {
+        boton.dataset.phsTextoOriginal = boton.textContent;
+        boton.textContent = texto || 'Iniciando sesión...';
+        boton.disabled = true;
+        boton.classList.add('opacity-70');
+      }
+    }
+    function restaurarBotonEnvio(buttonId) {
+      const boton = document.getElementById(buttonId);
+      if (!boton) return;
+      boton.disabled = false;
+      if (boton.dataset.phsTextoOriginal) boton.textContent = boton.dataset.phsTextoOriginal;
+      boton.classList.remove('opacity-70');
+    }
+
+    function normalizarDistritos(lista) {
+      return (Array.isArray(lista) ? lista : []).map(function (d) {
+        if (typeof d === 'string') return d;
+        return String((d && (d.DESC_DIST || d.desc_dist || d.distrito)) || '');
+      }).filter(function (d) { return d !== ''; });
+    }
+
+    function overviewCacheKey(session) {
+      const s = session || state.session || {};
+      const dni = String(s.dni || '').trim();
+      const estab = String(s.cod_estab || 'ALL').trim() || 'ALL';
+      return OVERVIEW_CACHE_PREFIX + encodeURIComponent(dni + '|' + estab);
+    }
+
+    function podarOverviewCaches() {
+      try {
+        const entradas = [];
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          if (!key || key.indexOf(OVERVIEW_CACHE_PREFIX) !== 0) continue;
+          let cachedAt = 0;
+          try {
+            const parsed = JSON.parse(localStorage.getItem(key) || '{}');
+            cachedAt = Number(parsed._cachedAt || 0);
+          } catch (e) { cachedAt = 0; }
+          entradas.push({ key: key, cachedAt: cachedAt });
+        }
+        if (entradas.length <= 6) return;
+        entradas.sort(function (a, b) { return a.cachedAt - b.cachedAt; });
+        entradas.slice(0, entradas.length - 6).forEach(function (entrada) {
+          try { localStorage.removeItem(entrada.key); } catch (e) {}
+        });
+      } catch (e) {}
+    }
+
+    function guardarOverviewCache(data) {
+      if (!state.session || !state.token) return;
+      const key = overviewCacheKey(state.session);
+      const payload = {
+        _v: 2,
+        _cachedAt: Date.now(),
+        stats: data.stats || state.stats,
+        alertas: data.alertas || state.alertas,
+        pacientes: data.pacientes || state.pacientes,
+        agendaAmpollas: data.agendaAmpollas || state.agendaAmpollas,
+        produccionObstetras: data.produccionObstetras || state.produccionObstetras,
+        auditLogs: data.auditLogs || state.auditLogs,
+        catalogoMetodos: data.catalogoMetodos || state.catalogoMetodos,
+        distritos: data.distritos || state.distritos,
+        securityMetrics: data.securityMetrics || state.securityMetrics
+      };
+      try {
+        localStorage.setItem(key, JSON.stringify(payload));
+      } catch (e) {
+        // Si el payload excede la cuota, se conserva una versión liviana que
+        // mantiene KPIs, alertas y las primeras tarjetas clínicas.
+        try {
+          payload.pacientes = (payload.pacientes || []).slice(0, 150);
+          payload.agendaAmpollas = (payload.agendaAmpollas || []).slice(0, 60);
+          payload.auditLogs = (payload.auditLogs || []).slice(0, 10);
+          localStorage.setItem(key, JSON.stringify(payload));
+        } catch (e2) {
+          try { localStorage.removeItem(key); } catch (e3) {}
+        }
+      }
+      podarOverviewCaches();
+    }
+
+    function leerOverviewCache(session) {
+      try {
+        const key = overviewCacheKey(session);
+        const raw = localStorage.getItem(key);
+        if (!raw) return null;
+        const data = JSON.parse(raw);
+        if (!data || typeof data !== 'object') {
+          localStorage.removeItem(key);
+          return null;
+        }
+        const cachedAt = Number(data._cachedAt || 0);
+        const edad = Date.now() - cachedAt;
+        if (!Number.isFinite(edad) || edad < 0 || (edad > OVERVIEW_CACHE_TTL_MS && navigator.onLine)) {
+          localStorage.removeItem(key);
+          return null;
+        }
+        return data;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    function limpiarTodosOverviewCaches() {
+      try {
+        const keys = [];
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          if (key && key.indexOf(OVERVIEW_CACHE_PREFIX) === 0) keys.push(key);
+        }
+        keys.forEach(function (key) {
+          try { localStorage.removeItem(key); } catch (e) {}
+        });
+      } catch (e) {}
+    }
+
+    function aplicarOverviewData(data) {
+      state.pacientes = data.pacientes || [];
+      state.agendaAmpollas = data.agendaAmpollas || [];
+      state.produccionObstetras = data.produccionObstetras || [];
+      state.auditLogs = data.auditLogs || [];
+      state.catalogoMetodos = data.catalogoMetodos || [];
+      state.alertas = data.alertas || state.alertas;
+      state.distritos = normalizarDistritos(data.distritos);
+      if (!state.distritos.length) state.distritos = DISTRITOS;
+      if (data.stats) state.stats = Object.assign(state.stats, data.stats);
+      if (data.securityMetrics) state.securityMetrics = data.securityMetrics;
+      if (data.session) {
+        const dniApi = String(data.session.dni || '');
+        const dniActual = String((state.session && state.session.dni) || '');
+        if (dniActual && dniApi && dniActual !== dniApi) {
+          clearSession();
+          throw new Error('La identidad de la sesión cambió. Inicie sesión nuevamente.');
+        }
+        state.session = Object.assign({}, state.session || {}, data.session, { token: state.token });
+        sincronizarAlcanceFiltros();
+        persistSession();
+      }
+      state.offlinePending = readQueueRaw().length;
+      state.overviewLoaded = true;
+      state.overviewFromCache = Boolean(data._cachedAt);
+      state.overviewError = '';
+    }
+
+    function renderSkeletonDashboard() {
+      return `<div class="phs-skeleton-stack" aria-hidden="true">
+        <div class="phs-skeleton-grid">
+          <div class="phs-skeleton phs-skeleton--kpi"></div>
+          <div class="phs-skeleton phs-skeleton--kpi"></div>
+          <div class="phs-skeleton phs-skeleton--kpi"></div>
+        </div>
+        <div class="phs-skeleton phs-skeleton--tall"></div>
+        <div class="phs-skeleton phs-skeleton--card"></div>
+        <div class="phs-skeleton-stack">
+          <div class="phs-skeleton phs-skeleton--card"></div>
+          <div class="phs-skeleton phs-skeleton--card"></div>
+          <div class="phs-skeleton phs-skeleton--card"></div>
+        </div>
+        <div class="phs-skeleton phs-skeleton--line" style="width:62%"></div>
+        <div class="phs-skeleton phs-skeleton--line" style="width:45%"></div>
+      </div>`;
+    }
+
+    function renderOverviewError() {
+      return `<div class="p-4 rounded-2xl bg-amber-50 border border-amber-200 text-xs text-amber-950 space-y-2">
+        <div class="font-extrabold">No se pudo actualizar la programación.</div>
+        <p class="leading-relaxed">${esc(state.overviewError || 'La red móvil no respondió. Los datos guardados seguirán disponibles en este dispositivo.')}</p>
+        <button type="button" onclick="reintentarOverview()" class="w-full min-h-[42px] rounded-xl bg-amber-700 text-white text-xs font-bold">Reintentar ahora</button>
+      </div>`;
+    }
+
+    async function reintentarOverview() {
+      if (!state.token) return;
+      await loadOverview({ silent: false, render: true, background: true });
+    }
+
+    // ---------------------------------------------------------------------
     // Render principal
     // ---------------------------------------------------------------------
     function render() {
       const root = document.getElementById('app-root');
+      if (!root) return;
       if (!state.session) {
         root.innerHTML = renderLogin();
       } else {
@@ -758,11 +1241,12 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       }
       renderIosBanner();
       updatePendingIndicators();
+      if (state.pwaInstalled) hidePwaInstallUi();
     }
 
     function renderLogin() {
       return `
-        <div class="bg-gradient-to-b from-sky-50/80 to-white border-b border-slate-100 px-6 pt-8 pb-5 text-center">
+        <div class="app-login-hero bg-gradient-to-b from-sky-50/80 to-white border-b border-slate-100 px-6 pb-5 text-center">
           <div class="w-24 h-24 mx-auto mb-3">${HOSPITAL_LOGO_HTML}</div>
           <h1 class="text-lg font-bold text-slate-900 tracking-tight">Hospital San Juan Bautista Huaral</h1>
           <p class="text-xs text-slate-500 mt-0.5">Planificación Familiar · Captación y Seguimiento Obstétrico</p>
@@ -782,13 +1266,13 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
             <form onsubmit="handleLogin(event)" class="space-y-4">
               <div>
                 <label class="block text-xs font-semibold text-slate-700 mb-1.5">DNI de la Obstetra</label>
-                <input id="login-dni" type="text" inputmode="numeric" maxlength="11" required placeholder="Ingrese su DNI (8 dígitos)" class="w-full min-h-[48px] px-4 rounded-xl border border-slate-300 text-sm font-mono" />
+                <input id="login-dni" type="text" inputmode="numeric" maxlength="11" required autocomplete="username" enterkeyhint="next" placeholder="Ingrese su DNI (8 dígitos)" class="w-full min-h-[48px] px-4 rounded-xl border border-slate-300 text-sm font-mono" />
               </div>
               <div>
                 <label class="block text-xs font-semibold text-slate-700 mb-1.5">Contraseña</label>
-                <input id="login-pass" type="password" required placeholder="••••••••" class="w-full min-h-[48px] px-4 rounded-xl border border-slate-300 text-sm" />
+                <input id="login-pass" type="password" required autocomplete="current-password" enterkeyhint="go" placeholder="••••••••" class="w-full min-h-[48px] px-4 rounded-xl border border-slate-300 text-sm" />
               </div>
-              <button type="submit" class="w-full min-h-[50px] rounded-xl bg-sky-700 hover:bg-sky-800 text-white text-sm font-semibold">Ingresar a la Aplicación</button>
+              <button id="btn-login-submit" type="submit" class="w-full min-h-[50px] rounded-xl bg-sky-700 hover:bg-sky-800 text-white text-sm font-semibold">Ingresar a la Aplicación</button>
             </form>
             <div class="text-center">
               <button type="button" onclick="setAuthStep('RECOVER')" class="min-h-[36px] text-[11px] font-semibold text-sky-700 underline underline-offset-2">¿Olvidaste tu contraseña?</button>
@@ -812,12 +1296,12 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
                 <select id="reg-estab" class="w-full min-h-[44px] px-3 rounded-xl border border-slate-300 text-xs bg-white">${optionsEstablecimientos('000005481')}</select>
               </div>
               <div><label class="block text-xs font-semibold text-slate-700 mb-1">Contraseña (mínimo 8 caracteres)</label><input id="reg-pass" type="password" required minlength="8" placeholder="Mínimo 8 caracteres" class="w-full min-h-[44px] px-3 rounded-xl border border-slate-300 text-sm" /></div>
-              <button type="submit" class="w-full min-h-[48px] rounded-xl bg-sky-700 hover:bg-sky-800 text-white text-sm font-semibold">Crear Cuenta de Obstetra</button>
+              <button id="btn-register-submit" type="submit" class="w-full min-h-[48px] rounded-xl bg-sky-700 hover:bg-sky-800 text-white text-sm font-semibold">Crear Cuenta de Obstetra</button>
             </form>` : ''}
         </div>
         <div class="px-6 py-4 bg-slate-50 border-t border-slate-100 flex items-center justify-between">
           <span class="text-xs text-slate-500">App Móvil Oficial</span>
-          <button type="button" onclick="installPwa()" class="min-h-[40px] px-3 rounded-xl bg-slate-900 text-white text-xs font-semibold">Instalar</button>
+          ${state.pwaInstalled ? '' : '<button id="btnInstalarApp" type="button" data-pwa-install="1" onclick="installPwa()" class="pwa-install-btn min-h-[40px] px-3 rounded-xl bg-slate-900 text-white text-xs font-semibold">Instalar</button>'}
         </div>`;
     }
 
@@ -855,8 +1339,21 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
 
     function renderApp() {
       const s = state.session;
+      const contenido = state.overviewLoaded
+        ? renderAlertaBanner() +
+          (state.activeTab === 'CAPTAR' ? renderCaptar() : '') +
+          (state.activeTab === 'PACIENTES' ? renderPacientes() : '') +
+          (state.activeTab === 'REPORTES' ? renderReportes() : '') +
+          (state.activeTab === 'AGENDA' ? renderAgenda() : '') +
+          (state.activeTab === 'PERFIL' ? renderPerfil() : '')
+        : (state.overviewError ? renderOverviewError() : renderSkeletonDashboard());
+      const badge = state.overviewRefreshing
+        ? '<div class="phs-refresh-badge" role="status"><span class="phs-spin" aria-hidden="true"></span> Actualizando datos en tiempo real...</div>'
+        : (state.overviewError && state.overviewLoaded
+          ? '<div class="phs-refresh-badge" role="status" style="border-color:#fde68a;background:#fffbeb;color:#92400e;">⚠️ Mostrando datos guardados · sin conexión</div>'
+          : '');
       return `
-        <div class="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-slate-200 px-3 py-2.5 flex items-center justify-between gap-2">
+        <div class="app-header sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-slate-200 px-3 py-2.5 flex items-center justify-between gap-2">
           <div class="flex items-center gap-2 min-w-0 flex-1">
             <div class="w-9 h-9 shrink-0">${HOSPITAL_LOGO_HTML}</div>
             <div class="min-w-0 flex-1">
@@ -876,16 +1373,12 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
             <button type="button" onclick="logout()" aria-label="Cerrar sesión" class="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl text-slate-500 hover:text-red-600 hover:bg-slate-100">Salir</button>
           </div>
         </div>
+        ${badge}
         ${!navigator.onLine ? '<div class="mx-4 mt-3 p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-[11px] text-amber-900 font-medium">Sin conexión. Las captaciones se guardarán cifradas en este dispositivo y se sincronizarán automáticamente.</div>' : ''}
-        <main class="flex-1 p-4 pb-[calc(5rem+env(safe-area-inset-bottom))] space-y-4">
-          ${renderAlertaBanner()}
-          ${state.activeTab === 'CAPTAR' ? renderCaptar() : ''}
-          ${state.activeTab === 'PACIENTES' ? renderPacientes() : ''}
-          ${state.activeTab === 'REPORTES' ? renderReportes() : ''}
-          ${state.activeTab === 'AGENDA' ? renderAgenda() : ''}
-          ${state.activeTab === 'PERFIL' ? renderPerfil() : ''}
+        <main class="flex-1 p-4 app-main space-y-4" aria-busy="${state.overviewRefreshing ? 'true' : 'false'}">
+          ${contenido}
         </main>
-        <nav class="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-[480px] md:max-w-3xl lg:max-w-5xl z-40 bg-white/95 backdrop-blur-md border-t border-slate-200 grid grid-cols-5 items-center h-16 safe-bottom">
+        <nav class="app-bottom-nav fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-[480px] md:max-w-3xl lg:max-w-5xl z-40 bg-white/95 backdrop-blur-md border-t border-slate-200 grid grid-cols-5 items-center">
           ${navButton('CAPTAR', 'Captar')}
           ${navButton('PACIENTES', 'Pacientes')}
           ${navButton('REPORTES', 'Reportes')}
@@ -1819,9 +2312,9 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       const estabCuenta = s.cod_estab_asignado || (s.cod_estab && s.cod_estab !== 'ALL' ? s.cod_estab : '');
       return `<div class="p-4 rounded-2xl bg-white border ${esSuperAdmin ? 'border-2 border-amber-400' : 'border border-slate-200'} space-y-3">
         <div class="flex items-center gap-3"><div class="w-12 h-12 shrink-0">${HOSPITAL_LOGO_HTML}</div><div class="min-w-0"><div class="text-sm font-bold text-slate-900">${esc(s.nombreCompleto)} ${esSuperAdmin ? '<span class="ml-1 px-2 py-0.5 rounded-lg bg-gradient-to-r from-amber-400 via-yellow-300 to-sky-500 text-slate-950 text-[9px] font-black border border-amber-500 align-middle">★ SUPER ADMIN</span>' : ''}</div><div class="text-xs text-slate-500 font-mono">DNI / CODPSAL: ${esc(s.dni)}</div><div class="text-xs text-sky-700">${esc(s.estab_nombre || establishName(s.cod_estab))}</div><div class="text-[10px] font-bold text-slate-600 mt-0.5">Rol: ${esc(s.rol_etiqueta || s.rol || 'OBSTETRA')}</div></div></div>
-        <div class="pt-3 border-t border-slate-100 flex items-center justify-between text-xs"><span class="text-slate-600">Instalación en celular</span><button type="button" onclick="installPwa()" class="min-h-[38px] px-3 rounded-xl bg-slate-900 text-white text-xs font-semibold">Instalar App</button></div>
+        <div data-pwa-install="1" class="pt-3 border-t border-slate-100 flex items-center justify-between text-xs"><span class="text-slate-600">Instalación en celular</span><button id="btnInstalarApp" type="button" data-pwa-install="1" onclick="installPwa()" class="pwa-install-btn min-h-[38px] px-3 rounded-xl bg-slate-900 text-white text-xs font-semibold">Instalar App</button></div>
       </div>
-      <div class="p-4 rounded-2xl bg-white border border-slate-200 space-y-2.5">
+      <div data-pwa-install="1" class="p-4 rounded-2xl bg-white border border-slate-200 space-y-2.5">
         <div class="text-xs font-bold text-slate-900">Instalación Android / iPhone</div>
         <div class="rounded-xl bg-sky-50 border border-sky-200 px-3 py-2 text-[11px] text-sky-950 leading-relaxed">
           <strong>Android (Chrome):</strong> menú ⋮ → “Instalar aplicación” o “Agregar a pantalla de inicio”.<br />
@@ -3755,16 +4248,38 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       state.session = Object.assign({}, session);
       state.activeTab = 'CAPTAR';
       state.authStep = 'CREDENTIALS';
+      state.overviewLoaded = false;
+      state.overviewFromCache = false;
+      state.overviewError = '';
       sincronizarAlcanceFiltros();
       persistSession();
-      await loadOverview();
-      startOfflineSync();
+
+      // Stale-While-Revalidate: si este usuario ya abrió la app en este
+      // establecimiento, el dashboard se pinta de inmediato desde localStorage.
+      const cache = leerOverviewCache(state.session);
+      if (cache) {
+        aplicarOverviewData(cache);
+        state.overviewFromCache = true;
+      }
       render();
+      if (cache) ocultarSplash();
+
+      // La red continúa en segundo plano; el splash permanece solo cuando no
+      // existe caché local (primer inicio de sesión).
+      await loadOverview({ silent: true, render: true, background: true });
+      state.loginSubmitting = false;
+      restaurarBotonEnvio('btn-login-submit');
+      ocultarSplash();
+      render();
+      if (state.token) startOfflineSync();
     }
 
     async function handleLogin(event) {
       event.preventDefault();
+      if (state.loginSubmitting) return;
+      state.loginSubmitting = true;
       state.feedback = null;
+      activarSplashEnvio('btn-login-submit', 'Iniciando sesión...');
       const dni = document.getElementById('login-dni').value.trim();
       const password = document.getElementById('login-pass').value;
       try {
@@ -3774,6 +4289,9 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         }
         await enterApp(data.session);
       } catch (error) {
+        state.loginSubmitting = false;
+        ocultarSplash();
+        restaurarBotonEnvio('btn-login-submit');
         showFeedback('error', error.message);
       }
     }
@@ -3803,7 +4321,10 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
 
     async function handleRegister(event) {
       event.preventDefault();
+      if (state.loginSubmitting) return;
+      state.loginSubmitting = true;
       state.feedback = null;
+      activarSplashEnvio('btn-register-submit', 'Creando cuenta segura...');
       const payload = {
         dni: document.getElementById('reg-dni').value.trim(),
         nombre1: document.getElementById('reg-nom').value.trim(),
@@ -3821,37 +4342,35 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         }
         await enterApp(data.session);
       } catch (error) {
+        state.loginSubmitting = false;
+        ocultarSplash();
+        restaurarBotonEnvio('btn-register-submit');
         showFeedback('error', error.message);
       }
     }
 
-    async function loadOverview() {
-      if (!state.token) return;
+    async function loadOverview(options) {
+      const opts = options || {};
+      if (!state.token) return false;
+      if (opts.background) {
+        state.overviewRefreshing = true;
+        if (opts.render !== false) render();
+      }
       try {
         const data = await apiGet('overview', { cod_estab: codEstabConsulta() });
-        state.pacientes = data.pacientes || [];
-        state.agendaAmpollas = data.agendaAmpollas || [];
-        state.produccionObstetras = data.produccionObstetras || [];
-        state.auditLogs = data.auditLogs || [];
-        state.catalogoMetodos = data.catalogoMetodos || [];
-        state.alertas = data.alertas || state.alertas;
-        state.distritos = (data.distritos || []).map(function (d) { return d.DESC_DIST; });
-        if (data.stats) state.stats = Object.assign(state.stats, data.stats);
-        if (data.securityMetrics) state.securityMetrics = data.securityMetrics;
-        if (data.session) {
-          const dniApi = String(data.session.dni || '');
-          const dniActual = String((state.session && state.session.dni) || '');
-          if (dniActual && dniApi && dniActual !== dniApi) {
-            clearSession();
-            throw new Error('La identidad de la sesión cambió. Inicie sesión nuevamente.');
-          }
-          state.session = Object.assign({}, state.session || {}, data.session, { token: state.token });
-          sincronizarAlcanceFiltros();
-          persistSession();
-        }
-        state.offlinePending = readQueueRaw().length;
+        aplicarOverviewData(data);
+        guardarOverviewCache(data);
+        state.overviewFromCache = false;
+        state.overviewRefreshing = false;
+        state.overviewError = '';
+        if (opts.render) render();
+        return true;
       } catch (error) {
-        if (state.token) showFeedback('error', error.message);
+        state.overviewRefreshing = false;
+        state.overviewError = error.message;
+        if (opts.render) render();
+        if (!opts.silent && state.token) showFeedback('error', error.message);
+        return false;
       }
     }
 
@@ -3867,8 +4386,16 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         sincronizarAlcanceFiltros();
         limpiarDatosAlcance();
         persistSession();
-        await loadOverview();
-        state.feedback = { type: 'success', text: 'Establecimiento activo: ' + ((data.session && data.session.estab_nombre) || state.session.estab_nombre) + '. Las búsquedas de DNI revisan toda la Red y registran en el establecimiento de su cuenta.' };
+        const cache = leerOverviewCache(state.session);
+        if (cache) {
+          aplicarOverviewData(cache);
+          state.overviewFromCache = true;
+        }
+        render();
+        const ok = await loadOverview({ silent: true, render: true, background: true });
+        state.feedback = ok
+          ? { type: 'success', text: 'Establecimiento activo: ' + ((data.session && data.session.estab_nombre) || state.session.estab_nombre) + '. Las búsquedas de DNI revisan toda la Red y registran en el establecimiento de su cuenta.' }
+          : { type: 'error', text: state.overviewError || 'No se pudo cargar la programación del establecimiento seleccionado.' };
         if (state.activeTab === 'REPORTES') setVistaReporte(state.reporteVista);
       } catch (error) {
         state.feedback = { type: 'error', text: error.message };
@@ -3882,6 +4409,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       if (state.token) {
         apiPost('logout', {}).catch(function () {});
       }
+      limpiarTodosOverviewCaches();
       clearSession();
       render();
     }
@@ -4433,24 +4961,108 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
     // PWA, iOS y sincronización automática
     // ---------------------------------------------------------------------
     let deferredInstallPrompt = null;
+
+    /**
+     * Detector universal de instalación PWA.
+     * Cubre Android/Chrome (standalone/TWA), iPhone/iPad (navigator.standalone)
+     * y la marca persistente que sobrevive al cierre del navegador.
+     */
+    function isAppInstalled() {
+      const isStandaloneMedia = window.matchMedia('(display-mode: standalone)').matches ||
+                                window.matchMedia('(display-mode: fullscreen)').matches ||
+                                window.matchMedia('(display-mode: minimal-ui)').matches ||
+                                window.matchMedia('(display-mode: window-controls-overlay)').matches;
+      const isIOSStandalone = window.navigator.standalone === true;
+      const isAndroidTWA = String(document.referrer || '').includes('android-app://');
+      let isSavedInstalled = false;
+      try { isSavedInstalled = localStorage.getItem('planificahis_pwa_installed') === '1'; } catch (e) {}
+      return isStandaloneMedia || isIOSStandalone || isAndroidTWA || isSavedInstalled;
+    }
+
+    function persistPwaInstalledFlag() {
+      try {
+        const standalone = window.matchMedia('(display-mode: standalone)').matches ||
+          window.matchMedia('(display-mode: fullscreen)').matches ||
+          window.matchMedia('(display-mode: minimal-ui)').matches;
+        const twa = String(document.referrer || '').includes('android-app://');
+        if (standalone || window.navigator.standalone === true || twa) {
+          localStorage.setItem('planificahis_pwa_installed', '1');
+          state.pwaInstalled = true;
+        }
+      } catch (e) {}
+    }
+
+    function hidePwaInstallUi() {
+      const selector = '.pwa-install-btn, #btn-instalar-pwa, #btnInstalarApp, #pwa-install-banner, [data-pwa-install]';
+      document.querySelectorAll(selector).forEach(function (node) {
+        node.classList.add('phs-install-hidden', 'pwa-install-hidden');
+        node.setAttribute('aria-hidden', 'true');
+        if (node.parentNode) node.parentNode.removeChild(node);
+      });
+    }
+
     window.addEventListener('beforeinstallprompt', function (event) {
       event.preventDefault();
+      if (isAppInstalled()) {
+        state.pwaInstalled = true;
+        hidePwaInstallUi();
+        return;
+      }
       deferredInstallPrompt = event;
       state.canInstall = true;
       render();
     });
+
+    window.addEventListener('appinstalled', function () {
+      try { localStorage.setItem('planificahis_pwa_installed', '1'); } catch (e) {}
+      state.pwaInstalled = true;
+      state.iosBanner = false;
+      state.canInstall = false;
+      deferredInstallPrompt = null;
+      hidePwaInstallUi();
+      renderIosBanner();
+      render();
+    });
+
+    try {
+      const mediaStandalone = window.matchMedia('(display-mode: standalone)');
+      const alCambiarDisplay = function (event) {
+        if (event.matches) {
+          try { localStorage.setItem('planificahis_pwa_installed', '1'); } catch (e) {}
+          state.pwaInstalled = true;
+          hidePwaInstallUi();
+          renderIosBanner();
+          render();
+        }
+      };
+      if (mediaStandalone.addEventListener) mediaStandalone.addEventListener('change', alCambiarDisplay);
+      else if (mediaStandalone.addListener) mediaStandalone.addListener(alCambiarDisplay);
+    } catch (e) {}
+
     async function installPwa() {
+      if (isAppInstalled()) {
+        state.pwaInstalled = true;
+        hidePwaInstallUi();
+        render();
+        return;
+      }
       if (deferredInstallPrompt) {
         deferredInstallPrompt.prompt();
-        await deferredInstallPrompt.userChoice;
+        const eleccion = await deferredInstallPrompt.userChoice.catch(function () { return { outcome: 'dismissed' }; });
         deferredInstallPrompt = null;
         state.canInstall = false;
+        if (eleccion && eleccion.outcome === 'accepted') {
+          try { localStorage.setItem('planificahis_pwa_installed', '1'); } catch (e) {}
+          state.pwaInstalled = true;
+          hidePwaInstallUi();
+        }
         render();
         return;
       }
       const ua = window.navigator.userAgent.toLowerCase();
       if (/iphone|ipad|ipod/.test(ua)) {
         state.iosBanner = true;
+        state.iosStep = 1;
         render();
         return;
       }
@@ -4467,18 +5079,26 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
     function renderIosBanner() {
       const container = document.getElementById('ios-banner-root');
       if (!container) return;
-      if (!state.iosBanner || localStorage.getItem(IOS_DISMISS_KEY) === '1') {
+      if (!state.iosBanner || state.pwaInstalled || isAppInstalled() || localStorage.getItem(IOS_DISMISS_KEY) === '1') {
         container.innerHTML = '';
         return;
       }
-      container.innerHTML = `<div class="fixed inset-x-0 bottom-16 z-50 px-3 safe-bottom">
+      container.innerHTML = `<div id="pwa-install-banner" data-pwa-install="1" class="ios-install-banner fixed inset-x-0 z-50">
         <div class="mx-auto max-w-[430px] rounded-2xl bg-slate-950 text-white shadow-2xl border border-slate-700 p-4">
-          <div class="flex items-start justify-between gap-3"><div><div class="text-sm font-bold">Instalar PlanificaHIS en iPhone</div><div class="text-[11px] text-slate-300">Paso ${state.iosStep} de 2 · Safari iOS</div></div><button type="button" onclick="dismissIosBanner()" class="text-slate-400 text-lg leading-none" aria-label="Cerrar">×</button></div>
-          <p class="mt-3 text-xs text-slate-200">${state.iosStep === 1 ? '1. Toca el botón Compartir en la barra inferior de Safari (cuadro con flecha hacia arriba).' : '2. Desliza y elige “Agregar a pantalla de inicio”, luego confirma con “Agregar”.'}</p>
-          <div class="mt-3 flex items-center justify-between"><button type="button" onclick="dismissIosBanner()" class="min-h-[40px] px-3 text-xs font-semibold text-slate-300">Ahora no</button>${state.iosStep === 1 ? '<button type="button" onclick="nextIosStep()" class="min-h-[40px] px-4 rounded-xl bg-sky-600 text-xs font-bold">Siguiente paso</button>' : '<button type="button" onclick="dismissIosBanner()" class="min-h-[40px] px-4 rounded-xl bg-emerald-600 text-xs font-bold">Entendido</button>'}</div>
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <div class="text-sm font-bold">Instalar PlanificaHIS en iPhone</div>
+              <div class="text-[11px] text-slate-300">Safari iOS · Agregar a pantalla de inicio</div>
+            </div>
+            <button type="button" onclick="dismissIosBanner()" class="min-h-[34px] min-w-[34px] rounded-lg text-slate-400 text-lg leading-none" aria-label="Cerrar">×</button>
+          </div>
+          <p class="mt-3 text-xs leading-relaxed text-slate-100">En iPhone: Toca el botón Compartir (⬆️) en la barra de Safari y selecciona “Agregar a inicio” ➕.</p>
+          <div class="mt-3 flex items-center justify-between gap-2">
+            <button type="button" onclick="dismissIosBanner()" class="min-h-[40px] px-3 text-xs font-semibold text-slate-300">Ahora no</button>
+            <button type="button" onclick="dismissIosBanner()" class="min-h-[40px] px-4 rounded-xl bg-emerald-600 text-xs font-bold">Entendido</button>
+          </div>
         </div></div>`;
     }
-    function nextIosStep() { state.iosStep = 2; renderIosBanner(); }
     function dismissIosBanner() {
       try { localStorage.setItem(IOS_DISMISS_KEY, '1'); } catch (e) {}
       state.iosBanner = false;
@@ -4500,7 +5120,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
 
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function () {
-        navigator.serviceWorker.register('./sw.js', { scope: './' }).catch(function () {
+        navigator.serviceWorker.register('./sw.js', { scope: './', updateViaCache: 'none' }).catch(function () {
           // La app funciona igual sin SW; el registro es opcional.
         });
       });
@@ -4529,41 +5149,40 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
 
     // Restaurar sesión persistente (7 días): sessionStorage por pestaña y,
     // solo si el DNI coincide, el espejo verificado de localStorage.
+    // El App Shell se pinta ANTES de cualquier petición de red. La validación
+    // del token y los datos frescos llegan en segundo plano mediante overview.
     (async function boot() {
-      if (isIos() && !isStandalone()) state.iosBanner = true;
+      persistPwaInstalledFlag();
+      state.pwaInstalled = state.pwaInstalled || isAppInstalled();
       state.offlinePending = readQueueRaw().length;
       const sesionGuardada = leerSesionPersistida();
       if (sesionGuardada && sesionGuardada.token && sesionGuardada.dni) {
         state.token = sesionGuardada.token;
         state.session = sesionGuardada;
         sincronizarAlcanceFiltros();
-      }
-      if (state.token) {
-        try {
-          // Valida el token de ESTA pestaña y renueva la sesión sin pedir login.
-          const data = await apiGet('session_restore');
-          if (data && data.session && data.session.token) {
-            const dniApi = String(data.session.dni || '');
-            const dniLocal = String((state.session && state.session.dni) || '');
-            if (dniLocal && dniApi && dniLocal !== dniApi) {
-              clearSession();
-            } else {
-              state.token = data.session.token;
-              state.session = data.session;
-              sincronizarAlcanceFiltros();
-              persistSession();
-              await loadOverview();
-              startOfflineSync();
-            }
-          }
-        } catch (e) {
-          // Sin sesión válida se muestra el login. Si el fallo es de red y la
-          // sesión local sigue presente, se conserva para operar offline.
-          if (!state.token || !state.session) clearSession();
+        const cache = leerOverviewCache(state.session);
+        if (cache) {
+          aplicarOverviewData(cache);
+          state.overviewFromCache = true;
         }
       }
+      state.booted = true;
       render();
+      // Con caché local el splash desaparece en el mismo frame. En el primer
+      // inicio se mantiene junto al skeleton hasta que responde api.php.
+      if (!state.token || state.overviewLoaded) ocultarSplash();
+
+      if (state.token) {
+        const ok = await loadOverview({ silent: true, render: true, background: true });
+        state.loginSubmitting = false;
+        ocultarSplash();
+        render();
+        if (ok) startOfflineSync();
+      } else {
+        ocultarSplash();
+      }
       updatePendingIndicators();
+      if (state.pwaInstalled) hidePwaInstallUi();
     })();
   </script>
 </body>

@@ -2140,7 +2140,6 @@ if ($action === 'resetear_clave_usuario' || $action === 'resetear_clave_obstetra
 if ($action === 'overview') {
     $session = require_session();
     $platform = $session['platform'];
-    $catalogo = catalogo_metodos_planificacion($pdo);
     $verRed = puede_ver_red($session);
     $rolSesion = HospitalHuaralDB::rolUsuario((string)$session['dni']);
     $esJefaSesion = $rolSesion === 'JEFA_OBSTETRAS';
@@ -2153,6 +2152,25 @@ if ($action === 'overview') {
     if ($obstetraFiltro === 'TODOS') {
         $obstetraFiltro = '';
     }
+
+    // Caché de corta duración (TTL 90 s) por establecimiento + fecha + rol.
+    // La clave incluye el DNI para que el payload con perfil y datos clínicos
+    // nunca se comparta entre dos usuarias distintas del mismo servicio.
+    $overviewCacheKey = overview_cache_key([
+        'dni' => (string)$session['dni'],
+        'cod_estab' => (string)($session['cod_estab'] ?? ''),
+        'rol' => $rolSesion,
+        'fecha' => date('Y-m-d'),
+        'obstetra' => $obstetraFiltro,
+        'modo_red' => $modoRed ? '1' : '0',
+    ]);
+    $overviewCacheado = overview_cache_get($overviewCacheKey);
+    if ($overviewCacheado !== null) {
+        header('X-Planifica-Cache: HIT');
+        json_out($overviewCacheado);
+    }
+    header('X-Planifica-Cache: MISS');
+    $catalogo = catalogo_metodos_planificacion($pdo);
 
     // RBAC estricto de la pestaña Pacientes:
     //  - OBSTETRA: solo sus propias captaciones (sin bloquear por cod_estab).
@@ -2321,7 +2339,7 @@ if ($action === 'overview') {
     }
     $rol = HospitalHuaralDB::rolUsuario((string)$session['dni']);
 
-    json_out([
+    $respuestaOverview = [
         'session' => [
             'dni' => $session['dni'],
             'cod_estab' => $session['cod_estab'],
@@ -2371,7 +2389,9 @@ if ($action === 'overview') {
             ['UBIGEO' => '150611', 'DESC_DIST' => 'SUMBILCA'],
             ['UBIGEO' => '150612', 'DESC_DIST' => 'VEINTISIETE DE NOVIEMBRE'],
         ],
-    ]);
+    ];
+    overview_cache_set($overviewCacheKey, $respuestaOverview);
+    json_out($respuestaOverview);
 }
 
 // ---------------------------------------------------------------------------
@@ -2519,6 +2539,84 @@ function contactos_pacientes_por_dni(PDO $pdo, array $dnis): array
 }
 
 /**
+ * Caché ligera del payload completo de overview (TTL 90 s).
+ *
+ * En producción Linux los archivos viven en /tmp/planificahis_cache_*.json.
+ * En Windows/XAMPP se usa el directorio temporal de PHP. La clave incluye
+ * establecimiento, fecha, rol, DNI, filtro de obstetra y alcance de red para
+ * que ninguna respuesta clínica se comparta entre usuarios distintos.
+ */
+function overview_cache_dir(): string
+{
+    $dir = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR);
+    return $dir !== '' ? $dir : DIRECTORY_SEPARATOR . 'tmp';
+}
+
+function overview_cache_key(array $parts): string
+{
+    return hash('sha256', implode('|', [
+        'overview-v2',
+        (string)($parts['dni'] ?? ''),
+        (string)($parts['cod_estab'] ?? ''),
+        (string)($parts['rol'] ?? ''),
+        (string)($parts['fecha'] ?? date('Y-m-d')),
+        (string)($parts['obstetra'] ?? ''),
+        (string)($parts['modo_red'] ?? '0'),
+    ]));
+}
+
+function overview_cache_path(string $key): string
+{
+    return overview_cache_dir() . DIRECTORY_SEPARATOR . 'planificahis_cache_' . $key . '.json';
+}
+
+function overview_cache_get(string $key): ?array
+{
+    $path = overview_cache_path($key);
+    if (!is_file($path)) {
+        return null;
+    }
+    $mtime = @filemtime($path);
+    if ($mtime === false || (time() - $mtime) > 90) {
+        @unlink($path);
+        return null;
+    }
+    $raw = @file_get_contents($path);
+    if ($raw === false || $raw === '') {
+        return null;
+    }
+    $data = json_decode($raw, true);
+    return is_array($data) ? $data : null;
+}
+
+function overview_cache_set(string $key, array $data): void
+{
+    $path = overview_cache_path($key);
+    $json = json_encode($data, JSON_UNESCAPED_UNICODE);
+    if ($json === false) {
+        return;
+    }
+    // Escritura atómica: varias obstetras pueden pedir overview al mismo tiempo.
+    $tmp = $path . '.' . str_replace('.', '', uniqid('', true)) . '.tmp';
+    if (@file_put_contents($tmp, $json, LOCK_EX) === false) {
+        @unlink($tmp);
+        return;
+    }
+    @chmod($tmp, 0600);
+    if (!@rename($tmp, $path)) {
+        @unlink($tmp);
+    }
+}
+
+function overview_cache_invalidate(): void
+{
+    $patron = overview_cache_dir() . DIRECTORY_SEPARATOR . 'planificahis_cache_*.json';
+    foreach (glob($patron) ?: [] as $archivo) {
+        @unlink($archivo);
+    }
+}
+
+/**
  * Caché ligera de alertas programáticas (TTL 90 s).
  * Evita que 15 obstetras del mismo establecimiento golpeen TiDB Cloud al
  * mismo tiempo: la primera petición consulta y las demás leen el JSON local.
@@ -2558,7 +2656,7 @@ function alertas_cache_set(string $key, array $data): void
     @file_put_contents($path, $json, LOCK_EX);
 }
 
-/** Invalida todas las cachés de alertas al guardar una paciente o un método. */
+/** Invalida alertas y overview al registrar, editar o cambiar el estado de una paciente. */
 function alertas_cache_invalidate(): void
 {
     $patron = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR)
@@ -2566,6 +2664,7 @@ function alertas_cache_invalidate(): void
     foreach (glob($patron) ?: [] as $archivo) {
         @unlink($archivo);
     }
+    overview_cache_invalidate();
 }
 
 /**
