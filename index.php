@@ -9,6 +9,8 @@
  */
 declare(strict_types=1);
 
+date_default_timezone_set('America/Lima');
+
 require_once __DIR__ . '/catalogo_establecimientos.php';
 
 header('X-Content-Type-Options: nosniff');
@@ -36,14 +38,19 @@ $apkJson = json_encode($apkDisponible ? './public/planificahis.apk' : '', JSON_U
 // offline, PDF y Excel sin depender de una petición adicional al servidor.
 $diresaLogoPath = __DIR__ . '/public/logo-diresa-lima.jpg';
 $hospitalLogoPath = __DIR__ . '/public/logo.png';
+$hospitalIconPath = __DIR__ . '/public/icon.svg';
 $diresaLogoDataUri = is_file($diresaLogoPath)
     ? 'data:image/jpeg;base64,' . base64_encode((string)file_get_contents($diresaLogoPath))
     : './public/logo-diresa-lima.jpg';
 $hospitalLogoDataUri = is_file($hospitalLogoPath)
     ? 'data:image/png;base64,' . base64_encode((string)file_get_contents($hospitalLogoPath))
     : './public/logo.png';
+$hospitalSvgDataUri = is_file($hospitalIconPath)
+    ? 'data:image/svg+xml;base64,' . base64_encode((string)file_get_contents($hospitalIconPath))
+    : './public/icon.svg';
 $diresaLogoJson = json_encode($diresaLogoDataUri, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
 $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+$hospitalSvgJson = json_encode($hospitalSvgDataUri, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
 ?>
 <!doctype html>
 <html lang="es">
@@ -59,9 +66,9 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="PlanificaHIS" />
   <link rel="manifest" href="./manifest.webmanifest" />
-  <link rel="icon" type="image/svg+xml" href="./public/icon.svg?v=3" />
-  <link rel="icon" type="image/x-icon" href="./public/favicon.ico?v=3" />
-  <link rel="apple-touch-icon" href="./public/apple-touch-icon.png?v=3" sizes="180x180" />
+  <link rel="icon" type="image/svg+xml" href="./public/icon.svg?v=20261113" />
+  <link rel="icon" type="image/x-icon" href="./public/favicon.ico?v=20261113" />
+  <link rel="apple-touch-icon" href="./public/apple-touch-icon.png?v=20261113" sizes="180x180" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link rel="preconnect" href="https://cdn.tailwindcss.com" />
@@ -294,7 +301,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
   <!-- Splash institucional: primer elemento del body para pintar en 0 ms. -->
   <div id="phs-splash" role="status" aria-live="polite" aria-label="Cargando PlanificaSalud HIS">
     <div class="phs-splash__card">
-      <div class="phs-splash__logo"><img src="./public/logo.png" alt="Hospital San Juan Bautista Huaral" width="72" height="72" fetchpriority="high" /></div>
+      <div class="phs-splash__logo"><img src="./public/icon.svg?v=20261113" alt="Hospital San Juan Bautista Huaral" width="72" height="72" fetchpriority="high" style="object-fit:contain;image-rendering:-webkit-optimize-contrast;" /></div>
       <div class="phs-splash__brand">PlanificaSalud HIS</div>
       <div class="phs-splash__sub">Hospital San Juan Bautista Huaral<br />Red de Salud Huaral-Chancay · DIRESA Lima</div>
       <div class="phs-splash__spinner" aria-hidden="true"></div>
@@ -358,6 +365,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
     const APK_URL = <?= $apkJson ?>;
     const DIRESA_LOGO_DATA_URI = <?= $diresaLogoJson ?>;
     const HOSPITAL_LOGO_DATA_URI = <?= $hospitalLogoJson ?>;
+    const HOSPITAL_SVG_DATA_URI = <?= $hospitalSvgJson ?>;
     const API = './api.php';
     const TOKEN_KEY = 'planificahis.php.token.v1';
     const SESSION_KEY = 'planificahis.php.session.v1';
@@ -467,9 +475,9 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       }
     }
 
-    // Logo oficial del Hospital San Juan Bautista Huaral (public/logo.png).
-    // Se usa SIEMPRE la imagen original, sin SVG inventados ni filtros.
-    const HOSPITAL_LOGO_HTML = '<img src="' + HOSPITAL_LOGO_DATA_URI + '" alt="Hospital San Juan Bautista Huaral" style="width:100%;height:100%;object-fit:contain;" />';
+    // Logo oficial del Hospital San Juan Bautista Huaral. En la interfaz se usa
+    // el SVG institucional (public/icon.svg) para escalar sin pérdida.
+    const HOSPITAL_LOGO_HTML = '<img src="' + HOSPITAL_SVG_DATA_URI + '" alt="Hospital San Juan Bautista Huaral" width="512" height="512" style="width:100%;height:100%;object-fit:contain;image-rendering:-webkit-optimize-contrast;" />';
 
 
     function localIsoDate(offsetDays) {
@@ -648,13 +656,13 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       return Object.assign({}, params || {}, { _ts: String(Date.now()) });
     }
 
-    async function apiGet(action, params) {
+    async function apiGet(action, params, options) {
       const query = new URLSearchParams(Object.assign({ action: action }, paramsConMarcaTiempo(params)));
-      const res = await fetch(API + '?' + query.toString(), {
+      const res = await fetch(API + '?' + query.toString(), Object.assign({
         headers: authHeaders(),
         cache: 'no-store',
         credentials: 'same-origin'
-      });
+      }, options || {}));
       const data = await res.json().catch(function () { return {}; });
       if (res.status === 401) {
         clearSession();
@@ -1432,6 +1440,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         TOCA_HOY: { card: 'bg-amber-50 border-amber-400 text-amber-950', badge: 'bg-amber-600 text-white', label: 'TOCA HOY' },
         PROXIMO_7_DIAS: { card: 'bg-sky-50 border-sky-300 text-sky-950', badge: 'bg-sky-700 text-white', label: 'PRÓXIMO' },
         VENCIDO_ABANDONO: { card: 'bg-red-50 border-red-400 text-red-950', badge: 'bg-red-700 text-white', label: 'VENCIDA' },
+        DEFINITIVO: { card: 'bg-emerald-50 border-emerald-400 text-emerald-950', badge: 'bg-emerald-700 text-white', label: 'DEFINITIVO' },
         SIN_METODO: { card: 'bg-slate-50 border-slate-300 text-slate-800', badge: 'bg-slate-600 text-white', label: 'SIN MÉTODO' }
       };
       const meta = mapa[prog.estadoProgramacion] || mapa.SIN_METODO;
@@ -1441,6 +1450,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         nombre: prog.nombreMetodo,
         fecha_aplicacion: prog.fechaUltimaAplicacion,
         dias_ciclo: prog.diasCiclo,
+        es_definitivo: prog.esDefinitivo,
         fecha_proximo: prog.fechaProximoMetodo,
         dias_restantes: prog.diasParaProximo,
         id_dosis: prog.dosis,
@@ -1449,9 +1459,11 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         establecimiento: prog.establecimientoNombre
       };
       const dias = actual.dias_restantes;
-      const diasTexto = (dias === null || dias === undefined)
-        ? 'Sin fecha de próximo método'
-        : (Number(dias) === 0 ? 'Le toca HOY' : (Number(dias) > 0 ? 'Faltan ' + Number(dias) + ' días' : 'Vencida hace ' + Math.abs(Number(dias)) + ' días'));
+      const diasTexto = actual.es_definitivo
+        ? 'Método definitivo · no requiere cita'
+        : ((dias === null || dias === undefined)
+          ? 'Sin fecha de próximo método'
+          : (Number(dias) === 0 ? 'Le toca HOY' : (Number(dias) > 0 ? 'Faltan ' + Number(dias) + ' días' : 'Vencida hace ' + Math.abs(Number(dias)) + ' días')));
       const origen = prog.establecimientoUltimoMetodo || {};
       const historial = Array.isArray(prog.historialMetodos) ? prog.historialMetodos : [];
       const anterior = prog.metodoAnterior || null;
@@ -1466,7 +1478,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
           <div class="text-[10px] font-mono text-slate-600">Código HIS original: <b>${esc(actual.codigo_his || '—')}</b></div>
           <div class="grid grid-cols-2 gap-x-2 gap-y-1 text-[11px] font-mono">
             <div>Aplicado: <b>${esc(actual.fecha_aplicacion || '—')}</b></div>
-            <div>Ciclo: <b>${Number(actual.dias_ciclo || 0)} días</b></div>
+            <div>Ciclo: <b>${actual.es_definitivo ? 'No requiere' : Number(actual.dias_ciclo || 0) + ' días'}</b></div>
             <div>Próximo: <b>${esc(actual.fecha_proximo || '—')}</b></div>
             <div class="font-semibold">${esc(diasTexto)}</div>
             <div>Dosis / ID: <b>${esc(actual.id_dosis || '—')}</b></div>
@@ -1514,6 +1526,10 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       const distritoActual = (lookup && lookup.establecimiento && lookup.establecimiento.distrito) || 'HUARAL';
       const tipoDocForm = draft.tipo_doc || (lookup && lookup.documento && lookup.documento.tipo_doc) || 'DNI';
       const cfgDocForm = docConfig(tipoDocForm);
+      const estadoFormCaptar = draft.estado_paciente || 'INSATISFECHA_SIN_METODO';
+      const mostrarMetodoCaptar = ['CAPTADA_CON_METODO', 'SATISFECHA_CON_METODO'].includes(estadoFormCaptar);
+      const metodoSeleccionadoCaptar = draft.ultimo_codigo_metodo
+        || ((prog && prog.tieneMetodoRegistrado && !prog.esDefinitivo) ? prog.codigoMetodo : '');
       const opcionesTipoDoc = Object.keys(TIPOS_DOCUMENTO).map(function (codigo) {
         return '<option value="' + codigo + '"' + (tipoDocForm === codigo ? ' selected' : '') + '>' + esc(TIPOS_DOCUMENTO[codigo].etiqueta) + '</option>';
       }).join('');
@@ -1539,7 +1555,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
 
           ${lookup ? `<div class="p-3.5 rounded-xl border text-xs space-y-1 ${prog && prog.tieneMetodoRegistrado ? 'bg-emerald-50 border-emerald-300 text-emerald-950' : 'bg-amber-50 border-amber-300 text-amber-950'}">
             ${prog && prog.tieneMetodoRegistrado
-              ? '<div class="font-bold">Método registrado en la Red: ' + esc(prog.nombreMetodo) + ' (' + esc(prog.codigoMetodo) + ')</div><p>' + esc((lookup.hisRecord && (lookup.hisRecord.Apellido_p + ' ' + lookup.hisRecord.Apellido_m + ', ' + (lookup.hisRecord.Dnombres || lookup.hisRecord.Pnombre))) || '') + '.</p>'
+              ? '<div class="font-bold">Método registrado en la Red: ' + esc(prog.nombreMetodo) + ' (' + esc(prog.codigoMetodo) + ')</div><p>' + esc((lookup.precargaDesdeHis && lookup.precargaDesdeHis.nombre_completo) || '') + '.</p>'
               : '<div class="font-bold">' + (lookup.foundInHis ? 'Paciente en base del hospital pero SIN método vigente' : 'Paciente nueva sin método registrado') + '</div><p>Complete sus datos abajo para registrarla en seguimiento.</p>'}
           </div>` : ''}
 
@@ -1640,6 +1656,15 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
               <div><label class="block text-xs text-slate-700 mb-1">Estado</label><select id="f-est" onchange="marcarEstadoExplicito(this)" class="w-full min-h-[44px] px-2 rounded-xl border border-slate-300 text-xs bg-white">${Object.keys(ESTADOS).map(function (e) { return '<option value="' + e + '"' + ((draft.estado_paciente || 'INSATISFECHA_SIN_METODO') === e ? ' selected' : '') + '>' + esc(ESTADOS[e]) + '</option>'; }).join('')}</select><div class="text-[9px] text-slate-500 mt-1">${state.estadoExplicito ? 'Cambio de estado explícito: se guardará al confirmar.' : 'Solo cambia si usted elige otro estado.'}</div></div>
             </div>
           </div>
+          <div id="f-metodo-box" class="${mostrarMetodoCaptar ? '' : 'hidden'} p-3 rounded-xl border-2 border-sky-300 bg-sky-50/60 space-y-2">
+            <div class="text-[10px] font-extrabold text-sky-900">Método anticonceptivo registrado</div>
+            <div class="text-[9px] text-sky-800 leading-snug">Si el HIS ya registra el método, puede dejarlo como está. Si es un método externo o previo, selecciónelo aquí para que el reporte no confunda "Con método" con "Sin método".</div>
+            <select id="f-metodo" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white">${opcionesMetodoSelector(metodoSeleccionadoCaptar)}</select>
+            <div class="grid grid-cols-[1fr_auto] gap-2 items-end">
+              <div><label class="block text-[9px] font-bold text-slate-600 mb-1">Fecha de la última atención</label><input id="f-fecha-metodo" type="date" value="${esc(draft.fecha_ultima_atencion || '')}" class="w-full min-h-[38px] px-2 rounded-xl border border-slate-300 text-xs bg-white" /></div>
+              <div class="text-[8px] text-slate-500 pb-1">Opcional</div>
+            </div>
+          </div>
           <button type="submit" class="w-full min-h-[48px] rounded-xl bg-sky-700 hover:bg-sky-800 text-white text-sm font-semibold">${esCaso1 ? 'Guardar Actualización de la Paciente' : (esCaso2 ? 'Registrar Paciente en mi Establecimiento' : 'Guardar Paciente')}</button>
         </form>` : ''}`;
     }
@@ -1667,6 +1692,8 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
               <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Dirección</label><input id="ep-dir-${id}" type="text" value="${esc(p.direccion || '')}" placeholder="Calle / Av. / Urb. / Referencia" class="w-full min-h-[42px] px-3 rounded-xl border border-slate-300 text-sm bg-white" /></div>
               <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Sector</label><input id="ep-sec-${id}" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="10" value="${esc(p.sector || '')}" placeholder="Ej: 01" oninput="this.value = this.value.replace(/[^0-9]/g, '');" onpaste="this.value = this.value.replace(/[^0-9]/g, '');" class="w-full min-h-[42px] px-3 rounded-xl border border-slate-300 text-sm bg-white font-mono" /></div>
               <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Estado / Opinión sobre el método</label><select id="ep-est-${id}" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white">${opcionesEdicion}</select></div>
+              <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Método anticonceptivo (si está satisfecha con método)</label><select id="ep-metodo-${id}" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white">${opcionesMetodoSelector(p.ultimo_codigo_metodo || p.ultimo_metodo_codigo || '')}</select></div>
+              <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Fecha de última atención (opcional)</label><input id="ep-fecha-metodo-${id}" type="date" value="${esc((p.fecha_ultima_atencion || '').slice(0, 10))}" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white" /></div>
             </div>
             <div class="grid grid-cols-2 gap-2">
               <button type="button" onclick="guardarEdicionPaciente(${id})" class="min-h-[42px] rounded-xl bg-sky-700 hover:bg-sky-800 text-white text-xs font-bold">Guardar cambios</button>
@@ -1712,6 +1739,8 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       const dir = document.getElementById('ep-dir-' + id);
       const sec = document.getElementById('ep-sec-' + id);
       const est = document.getElementById('ep-est-' + id);
+      const metodo = document.getElementById('ep-metodo-' + id);
+      const fechaMetodo = document.getElementById('ep-fecha-metodo-' + id);
       const payload = {
         id: Number(id),
         estado_paciente: est ? est.value : (paciente.estado_paciente || 'INSATISFECHA_SIN_METODO'),
@@ -1719,6 +1748,10 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         direccion: dir ? dir.value.trim() : '',
         sector: sec ? sec.value.trim() : ''
       };
+      if (metodo && metodo.value && ['CAPTADA_CON_METODO', 'SATISFECHA_CON_METODO'].includes(est ? est.value : '')) {
+        payload.ultimo_codigo_metodo = metodo.value;
+        payload.fecha_ultima_atencion = fechaMetodo ? fechaMetodo.value : '';
+      }
       try {
         await apiPost('update_estado', payload);
         state.editandoPaciente = null;
@@ -1820,6 +1853,22 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       return lista.slice().sort(function (a, b) {
         return Number(a.orden || 0) - Number(b.orden || 0) || String(a.nombre_metodo).localeCompare(String(b.nombre_metodo));
       });
+    }
+
+    /**
+     * Opciones del selector de método anticonceptivo para estados "Con método".
+     * Incluye un marcador explícito para método externo/previo.
+     */
+    function opcionesMetodoSelector(seleccionado) {
+      const actual = String(seleccionado || '');
+      const opciones = catalogoReportes()
+        .filter(function (m) { return Number(m.activo === undefined ? 1 : m.activo) !== 0; })
+        .map(function (m) {
+          const codigo = String(m.codigo_dx || '');
+          const etiqueta = String(m.nombre_metodo || codigo) + ' (' + codigo + ')';
+          return '<option value="' + esc(codigo) + '"' + (actual === codigo ? ' selected' : '') + '>' + esc(etiqueta) + '</option>';
+        }).join('');
+      return '<option value="">— Seleccione el método —</option>' + opciones;
     }
 
     function obstetrasParaReporte() {
@@ -2198,7 +2247,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         '<p><b>Programación del ' + esc(fecha) + '</b></p><p>' + esc(descripcionRangoReporte(r)) + '</p><p>' + esc(alcance) + '</p>' +
         '<div class="chips"><div class="chip">Total<b>' + Number(resumen.total || 0) + '</b></div><div class="chip">Toca fecha<b>' + Number(resumen.toca_en_fecha || 0) + '</b></div><div class="chip">Próx. 7d<b>' + Number(resumen.proximo_7_dias || 0) + '</b></div></div></div>' +
         (tarjetas || '<div class="empty">No hay pacientes programadas para los filtros seleccionados.</div>') +
-        '<div class="end">Vista autónoma para celular · Generada ' + esc(new Date().toLocaleString('es-PE')) + '</div>' +
+        '<div class="end">Vista autónoma para celular · Generada ' + esc(new Date().toLocaleString('es-PE', { timeZone: 'America/Lima' })) + '</div>' +
         '</div></body></html>';
     }
 
@@ -2374,14 +2423,14 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         <button type="button" onclick="cargarEquipoJefatura(true)" ${state.equipoLoading ? 'disabled' : ''} class="w-full min-h-[38px] rounded-xl bg-emerald-700 text-white text-[10px] font-bold disabled:opacity-60">${state.equipoLoading ? 'Cargando equipo...' : 'Actualizar equipo de obstetras'}</button>
         <div class="space-y-2">
           ${obstetras.length ? obstetras.map(function (o) { return `<div class="p-2.5 rounded-xl border ${Number(o.activo) === 1 ? 'border-emerald-200 bg-emerald-50/50' : 'border-red-200 bg-red-50/50'} space-y-1">
-            <div class="flex items-start justify-between gap-2"><div class="min-w-0"><div class="text-[11px] font-bold text-slate-900 truncate">${esc(o.nombre_completo || (o.nombres + ' ' + o.apellido_paterno + ' ' + o.apellido_materno))}</div><div class="font-mono text-[9px] text-slate-600">DNI ${esc(o.dni)} · ${Number(o.activo) === 1 ? 'ACTIVA' : 'INACTIVA'}</div></div><span class="px-2 py-0.5 rounded-lg bg-slate-900 text-white text-[8px] font-extrabold">${Number(o.captadas_mes || 0)} este mes</span></div>
+            <div class="flex items-start justify-between gap-2"><div class="min-w-0 flex-1 overflow-hidden"><div class="text-[11px] font-bold text-slate-900 truncate overflow-hidden text-ellipsis whitespace-nowrap">${esc(o.nombre_completo || (o.nombres + ' ' + o.apellido_paterno + ' ' + o.apellido_materno))}</div><div class="font-mono text-[9px] text-slate-600">DNI ${esc(o.dni)} · ${Number(o.activo) === 1 ? 'ACTIVA' : 'INACTIVA'}</div></div><span class="px-2 py-0.5 rounded-lg bg-slate-900 text-white text-[8px] font-extrabold whitespace-nowrap shrink-0">${Number(o.captadas_mes || 0)} este mes</span></div>
             <div class="grid grid-cols-4 gap-1 text-center text-[9px] font-mono">
               <div class="p-1 rounded-lg bg-white border border-slate-200"><div class="text-slate-500">Hoy</div><b>${Number(o.captadas_hoy || 0)}</b></div>
               <div class="p-1 rounded-lg bg-white border border-slate-200"><div class="text-slate-500">Mes</div><b>${Number(o.captadas_mes || 0)}</b></div>
               <div class="p-1 rounded-lg bg-white border border-slate-200"><div class="text-slate-500">Total</div><b>${Number(o.total_captadas || 0)}</b></div>
-              <div class="p-1 rounded-lg bg-white border border-slate-200"><div class="text-slate-500">Últ. act.</div><b>${esc((o.ultima_actividad || '—').slice(0, 10))}</b></div>
+              <div class="p-1 rounded-lg bg-white border border-slate-200"><div class="text-slate-500">Últ. act.</div><b>${esc((o.ultima_actividad_legible || o.ultima_actividad || '—').slice(0, 16))}</b></div>
             </div>
-            <div class="flex items-center justify-between gap-2 text-[9px] text-slate-500"><span>Último login: ${esc(o.ultimo_login || '—')}</span><button type="button" onclick="resetearClaveUsuario('${esc(o.dni)}','${esc(String(o.nombre_completo || o.dni).replace(/'/g, ' '))}')" class="min-h-[28px] px-2 rounded-lg bg-amber-700 text-white text-[8px] font-bold">Restablecer clave</button></div>
+            <div class="flex items-center justify-between gap-2 text-[9px] text-slate-500"><span class="min-w-0 truncate">Último login: ${esc(o.ultimo_login_legible || o.ultimo_login || '—')}</span><button type="button" onclick="resetearClaveUsuario('${esc(o.dni)}','${esc(String(o.nombre_completo || o.dni).replace(/'/g, ' '))}')" class="min-h-[28px] px-2 rounded-lg bg-amber-700 text-white text-[8px] font-bold whitespace-nowrap shrink-0">Restablecer clave</button></div>
           </div>`; }).join('') : '<div class="p-3 text-[10px] text-slate-500 text-center">No hay obstetras registradas en su establecimiento.</div>'}
         </div>
       </div>`;
@@ -2560,6 +2609,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
     function estadoIndicadorBadge(estado) {
       const mapa = {
         VIGENTE: 'bg-emerald-100 text-emerald-900 border-emerald-300',
+        DEFINITIVO: 'bg-emerald-100 text-emerald-900 border-emerald-400',
         PROXIMA: 'bg-amber-100 text-amber-900 border-amber-300',
         VENCIDA: 'bg-amber-100 text-amber-900 border-amber-300',
         SIN_METODO: 'bg-slate-200 text-slate-800 border-slate-400'
@@ -2691,7 +2741,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
           <div class="overflow-x-auto -mx-1">
             <table class="w-full text-[10px] border-collapse min-w-[980px]">
               <thead><tr class="bg-slate-100 text-slate-700"><th class="p-2 text-left">Fecha y hora</th><th class="p-2 text-left">Sector</th><th class="p-2 text-left">DNI</th><th class="p-2 text-left">Paciente</th><th class="p-2 text-center">Edad</th><th class="p-2 text-left">Celular</th><th class="p-2 text-left">Dirección / Distrito</th><th class="p-2 text-center">Estado</th><th class="p-2 text-center">99208</th><th class="p-2 text-left">Último método / Próxima cita</th><th class="p-2 text-left">Obstetra / Establecimiento</th></tr></thead>
-              <tbody>${filas.map(function (p) { return '<tr class="border-b border-slate-100 align-top"><td class="p-2 font-mono whitespace-nowrap">' + esc(p.fecha_registro_ddmmyyyy_hhmmss || p.fecha_registro) + '</td><td class="p-2">' + esc(p.sector) + '</td><td class="p-2 font-mono font-bold">' + esc(p.dni) + '</td><td class="p-2"><div class="font-bold">' + esc(p.paciente_nombre) + '</div></td><td class="p-2 text-center">' + Number(p.edad || 0) + '</td><td class="p-2 font-mono">' + esc(p.celular || '—') + '</td><td class="p-2">' + esc(p.direccion || '—') + '<div class="text-slate-500">' + esc(p.distrito || '') + '</div></td><td class="p-2 text-center"><span class="inline-block px-2 py-1 rounded-lg border text-[9px] font-bold ' + estadoPacienteBadge(p.estado_paciente) + '">' + esc(estadoPacienteTexto(p.estado_paciente)) + '</span></td><td class="p-2 text-center font-bold ' + (p.atencion_99208 ? 'text-emerald-700' : 'text-slate-400') + '">' + (p.atencion_99208 ? 'SÍ' : 'NO') + '</td><td class="p-2">' + esc(p.ultimo_metodo_nombre || 'Sin método') + '<div class="text-slate-500 font-mono">' + esc(p.fecha_proxima_cita || '—') + '</div></td><td class="p-2">' + esc(p.nombre_obstetra) + '<div class="text-slate-500">' + esc(p.estab_nombre) + '</div></td></tr>'; }).join('') || '<tr><td colspan="11" class="p-4 text-center text-slate-500">No hay pacientes para los filtros seleccionados.</td></tr>'}</tbody>
+              <tbody>${filas.map(function (p) { return '<tr class="border-b border-slate-100 align-top"><td class="p-2 font-mono whitespace-nowrap">' + esc(p.fecha_registro_ddmmyyyy_hhmmss || p.fecha_registro) + '</td><td class="p-2">' + esc(p.sector) + '</td><td class="p-2 font-mono font-bold">' + esc(p.dni) + '</td><td class="p-2"><div class="font-bold">' + esc(p.paciente_nombre) + '</div></td><td class="p-2 text-center">' + Number(p.edad || 0) + '</td><td class="p-2 font-mono">' + esc(p.celular || '—') + '</td><td class="p-2">' + esc(p.direccion || '—') + '<div class="text-slate-500">' + esc(p.distrito || '') + '</div></td><td class="p-2 text-center"><span class="inline-block px-2 py-1 rounded-lg border text-[9px] font-bold ' + estadoPacienteBadge(p.estado_paciente) + '">' + esc(estadoPacienteTexto(p.estado_paciente)) + '</span></td><td class="p-2 text-center font-bold ' + (p.atencion_99208 ? 'text-emerald-700' : 'text-slate-400') + '">' + (p.atencion_99208 ? 'SÍ' : 'NO') + '</td><td class="p-2">' + esc(p.ultimo_metodo_nombre || 'Sin método') + '<div class="text-slate-500 font-mono">' + esc(p.es_definitivo ? 'Definitivo' : (p.fecha_proxima_cita || '-')) + '</div></td><td class="p-2">' + esc(p.nombre_obstetra) + '<div class="text-slate-500">' + esc(p.estab_nombre) + '</div></td></tr>'; }).join('') || '<tr><td colspan="11" class="p-4 text-center text-slate-500">No hay pacientes para los filtros seleccionados.</td></tr>'}</tbody>
             </table>
           </div>
           <div class="flex items-center justify-between pt-1">
@@ -2720,13 +2770,15 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
           </div>
           <div class="grid grid-cols-2 gap-2">
             <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Mes / Año rápido</label><input type="month" onchange="aplicarMesMetodos(this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs font-mono" /></div>
-            <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Método</label><select onchange="actualizarFiltroMetodos('codigo_metodo', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white"><option value="TODOS">Todos los métodos</option>${catalogo.map(function (m) { return '<option value="' + esc(m.codigo_dx) + '"' + (f.codigo_metodo === m.codigo_dx ? ' selected' : '') + '>' + esc(m.nombre_metodo) + ' (' + Number(m.dias_ciclo) + 'd)</option>'; }).join('')}</select></div>
+            <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Método</label><select onchange="actualizarFiltroMetodos('codigo_metodo', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white"><option value="TODOS">Todos los métodos</option>${catalogo.map(function (m) { return '<option value="' + esc(m.codigo_dx) + '"' + (f.codigo_metodo === m.codigo_dx ? ' selected' : '') + '>' + esc(m.nombre_metodo) + ' (' + (Number(m.dias_ciclo) > 0 ? Number(m.dias_ciclo) + 'd' : 'Definitivo') + ')</option>'; }).join('')}</select></div>
           </div>
           <div class="grid grid-cols-2 gap-2">
             <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Estado de vencimiento</label><select onchange="actualizarFiltroMetodos('estado_vencimiento', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white">
               <option value="TODOS" ${f.estado_vencimiento === 'TODOS' ? 'selected' : ''}>Todos</option>
               <option value="VIGENTE" ${f.estado_vencimiento === 'VIGENTE' ? 'selected' : ''}>Vigente / al día</option>
+              <option value="DEFINITIVO" ${f.estado_vencimiento === 'DEFINITIVO' ? 'selected' : ''}>Método definitivo</option>
               <option value="PROXIMA" ${f.estado_vencimiento === 'PROXIMA' ? 'selected' : ''}>Le toca dentro de 7 días</option>
+              <option value="VENCIDA" ${f.estado_vencimiento === 'VENCIDA' ? 'selected' : ''}>Vencida / control pendiente</option>
               <option value="SIN_METODO" ${f.estado_vencimiento === 'SIN_METODO' ? 'selected' : ''}>Sin método</option>
             </select></div>
             <div><label class="block text-[10px] font-bold text-slate-600 mb-1">Sector</label><select onchange="actualizarFiltroMetodos('sector', this.value)" class="w-full min-h-[42px] px-2 rounded-xl border border-slate-300 text-xs bg-white"><option value="TODOS">Todos</option>${sectores.map(function (s) { return '<option value="' + esc(s) + '"' + (f.sector === s ? ' selected' : '') + '>' + esc(s) + '</option>'; }).join('')}</select></div>
@@ -2774,7 +2826,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
           <div class="overflow-x-auto -mx-1">
             <table class="w-full text-[10px] border-collapse min-w-[980px]">
               <thead><tr class="bg-slate-100 text-slate-700"><th class="p-2 text-left">Paciente</th><th class="p-2 text-left">Sector</th><th class="p-2 text-left">Método actual</th><th class="p-2 text-center">Ciclo</th><th class="p-2 text-left">Última atención</th><th class="p-2 text-left">Próxima atención / Próximos 7 días</th><th class="p-2 text-center">Estado del control</th><th class="p-2 text-left">Obstetra / Establecimiento</th></tr></thead>
-              <tbody>${filas.map(function (p) { return '<tr class="border-b border-slate-100 align-top"><td class="p-2"><div class="font-bold">' + esc(p.paciente_nombre) + '</div><div class="font-mono text-slate-500">' + esc(p.dni) + ' · ' + Number(p.edad || 0) + ' años</div><div class="font-mono text-slate-500">' + esc(p.celular || '—') + '</div></td><td class="p-2">' + esc(p.sector || '—') + '</td><td class="p-2">' + esc(p.nombre_metodo || 'Sin método') + '<div class="font-mono text-slate-500">' + esc(p.codigo_metodo || '—') + '</div></td><td class="p-2 text-center font-bold">' + Number(p.dias_ciclo || 0) + ' d</td><td class="p-2 font-mono">' + esc(fechaDdMmYyyy(p.fecha_ultima_atencion) || '—') + '</td><td class="p-2 font-mono"><div>' + esc(fechaDdMmYyyy(p.fecha_proxima_cita) || '—') + '</div><div class="text-[9px] text-slate-500">' + (p.dias_restantes === null ? '' : (Number(p.dias_restantes) < 0 ? 'Control pendiente hace ' + Math.abs(Number(p.dias_restantes)) + ' d' : 'Faltan ' + Number(p.dias_restantes) + ' d')) + '</div></td><td class="p-2 text-center"><span class="inline-block px-2 py-1 rounded-lg border text-[9px] font-bold ' + estadoIndicadorBadge(p.estado_indicador) + '">' + esc(p.estado_indicador_etiqueta) + '</span></td><td class="p-2">' + esc(p.nombre_obstetra) + '<div class="text-slate-500">' + esc(p.estab_nombre) + '</div></td></tr>'; }).join('') || '<tr><td colspan="8" class="p-4 text-center text-slate-500">No hay pacientes para los filtros seleccionados.</td></tr>'}</tbody>
+              <tbody>${filas.map(function (p) { return '<tr class="border-b border-slate-100 align-top"><td class="p-2"><div class="font-bold">' + esc(p.paciente_nombre) + '</div><div class="font-mono text-slate-500">' + esc(p.dni) + ' · ' + Number(p.edad || 0) + ' años</div><div class="font-mono text-slate-500">' + esc(p.celular || '—') + '</div></td><td class="p-2">' + esc(p.sector || '—') + '</td><td class="p-2">' + esc(p.nombre_metodo || 'Sin método') + '<div class="font-mono text-slate-500">' + esc(p.codigo_metodo || '—') + '</div></td><td class="p-2 text-center font-bold">' + (p.es_definitivo ? 'No requiere' : Number(p.dias_ciclo || 0) + ' d') + '</td><td class="p-2 font-mono">' + esc(fechaDdMmYyyy(p.fecha_ultima_atencion) || '—') + '</td><td class="p-2 font-mono"><div>' + esc(p.es_definitivo ? 'Definitivo' : (fechaDdMmYyyy(p.fecha_proxima_cita) || '-')) + '</div><div class="text-[9px] text-slate-500">' + (p.es_definitivo ? 'No requiere' : (p.dias_restantes === null ? '' : (Number(p.dias_restantes) < 0 ? 'Control pendiente hace ' + Math.abs(Number(p.dias_restantes)) + ' d' : 'Faltan ' + Number(p.dias_restantes) + ' d'))) + '</div></td><td class="p-2 text-center"><span class="inline-block px-2 py-1 rounded-lg border text-[9px] font-bold ' + estadoIndicadorBadge(p.estado_indicador) + '">' + esc(p.estado_indicador_etiqueta) + '</span></td><td class="p-2">' + esc(p.nombre_obstetra) + '<div class="text-slate-500">' + esc(p.estab_nombre) + '</div></td></tr>'; }).join('') || '<tr><td colspan="8" class="p-4 text-center text-slate-500">No hay pacientes para los filtros seleccionados.</td></tr>'}</tbody>
             </table>
           </div>
           <div class="flex items-center justify-between pt-1">
@@ -2794,7 +2846,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
     function logoReportesHtml() {
       // SIEMPRE el logo oficial DIRESA Lima (JPG original), sin SVG inventados
       // ni recortes. Se mantiene la proporción con object-fit: contain.
-      return '<img src="' + DIRESA_LOGO_DATA_URI + '" alt="Gobierno Regional de Lima - Dirección Regional de Salud" style="max-width:100%;max-height:100%;object-fit:contain" />';
+      return '<img src="' + DIRESA_LOGO_DATA_URI + '" alt="Gobierno Regional de Lima - Dirección Regional de Salud" width="140" height="48" style="max-width:100%;max-height:100%;object-fit:contain;image-rendering:-webkit-optimize-contrast;" />';
     }
 
     function logoReportesDataUri() {
@@ -2834,7 +2886,7 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         emisorNombre: s.nombreCompleto || '',
         emisorRol: s.rol_etiqueta || s.rol || 'Obstetra',
         emisorDni: s.dni || '',
-        generadoEn: new Date().toLocaleString('es-PE')
+        generadoEn: new Date().toLocaleString('es-PE', { timeZone: 'America/Lima' })
       };
     }
 
@@ -3265,51 +3317,68 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
       const m = meta || metaOficial();
       const escudo = logoReportesDataUri();
       const logo = HOSPITAL_LOGO_DATA_URI;
+      const sumaPesos = columnas.reduce(function (total, col) {
+        return total + Number(col.pct || col.width || 1);
+      }, 0) || 1;
+      const porcentajes = columnas.map(function (col) {
+        return col.pct !== undefined ? Number(col.pct) : (Number(col.width || 1) / sumaPesos * 100);
+      });
       const filasHtml = (filas || []).map(function (fila) {
         return '<tr>' + columnas.map(function (col, i) {
-          const valor = fila[i] === null || fila[i] === undefined ? '' : fila[i];
-          return '<td style="text-align:' + (col.align || 'left') + '">' + esc(valor) + '</td>';
+          const valor = fila[i] === null || fila[i] === undefined ? '' : String(fila[i]);
+          let contenido;
+          if (col.fechaHora && valor.indexOf(' ') > 0) {
+            const partes = valor.split(/\s+/);
+            const fecha = partes.shift();
+            contenido = esc(fecha) + '<br />' + esc(partes.join(' '));
+          } else {
+            contenido = esc(valor);
+          }
+          return '<td class="' + (col.text ? 'nowrap ' : '') + '" style="text-align:' + (col.align || 'left') + '">' + contenido + '</td>';
         }).join('') + '</tr>';
       }).join('');
       return '<!doctype html><html lang="es"><head><meta charset="utf-8" /><title>' + esc(m.titulo) + '</title><style>' +
-        '@page { size: A4 landscape; margin: 9mm; }' +
+        '@page { size: A4 landscape; margin: 7mm 8mm; }' +
         '* { box-sizing: border-box; }' +
-        'body { margin: 0; font-family: Arial, Helvetica, sans-serif; color: #0f172a; font-size: 10px; }' +
-        '.membrete { width: 100%; border-collapse: collapse; border: 2px solid #0f172a; }' +
-        '.membrete td { border: 1px solid #94a3b8; padding: 4px 6px; vertical-align: middle; }' +
-        '.inst { font-size: 9px; font-weight: 800; color: #7f1d1d; text-align: center; line-height: 1.35; text-transform: uppercase; }' +
-        '.inst2 { font-size: 9px; font-weight: 800; color: #075985; text-align: center; line-height: 1.35; text-transform: uppercase; }' +
-        '.titulo { font-size: 13px; font-weight: 900; text-align: center; background: #f8fafc; line-height: 1.25; }' +
-        '.subtitulo { font-size: 9px; font-weight: 700; color: #075985; }' +
-        '.dato { font-size: 8.5px; color: #334155; }' +
-        '.data { width: 100%; border-collapse: collapse; margin-top: 8px; }' +
-        '.data th { border: 1px solid #475569; background: #0082C8; color: #fff; font-size: 8px; padding: 4px 4px; text-align: center; }' +
-        '.data td { border: 1px solid #94a3b8; font-size: 7.5px; padding: 3px 4px; vertical-align: top; }' +
-        '.data tr:nth-child(even) td { background: #f8fafc; }' +
-        '.resumen { width: 100%; border-collapse: collapse; margin-top: 8px; }' +
-        '.resumen td { border: 1px solid #94a3b8; background: #f1f5f9; font-size: 9px; font-weight: bold; padding: 4px 6px; }' +
-        '.firmas { width: 100%; margin-top: 26px; display: flex; justify-content: space-around; }' +
-        '.firma { width: 32%; text-align: center; font-size: 9px; color: #334155; }' +
-        '.firma .linea { border-top: 1px solid #334155; margin-bottom: 3px; padding-top: 3px; }' +
-        '.pie { margin-top: 12px; text-align: center; font-size: 8px; color: #64748b; }' +
+        'body { margin: 0; font-family: Arial, Helvetica, sans-serif; color: #0f172a; font-size: 9px; }' +
+        '.membrete { width: 100%; border-collapse: collapse; border: 1.5px solid #0f172a; table-layout: fixed; }' +
+        '.membrete td { border: 1px solid #94a3b8; padding: 3px 5px; vertical-align: middle; }' +
+        '.inst { font-size: 8px; font-weight: 800; color: #7f1d1d; text-align: center; line-height: 1.3; text-transform: uppercase; }' +
+        '.inst2 { font-size: 8px; font-weight: 800; color: #075985; text-align: center; line-height: 1.3; text-transform: uppercase; }' +
+        '.titulo { font-size: 11.5px; font-weight: 900; text-align: center; background: #f8fafc; line-height: 1.22; }' +
+        '.subtitulo { font-size: 8px; font-weight: 700; color: #075985; }' +
+        '.dato { font-size: 7.8px; color: #334155; }' +
+        'table.data { width: 100%; table-layout: fixed; border-collapse: collapse; margin-top: 6px; }' +
+        '.data th, .data td { box-sizing: border-box; padding: 3px 4px; font-size: 7.2pt; line-height: 1.18; vertical-align: middle; overflow: hidden; }' +
+        '.data th { border: 1px solid #475569; background: #0082C8; color: #fff; font-weight: 700; text-align: center; }' +
+        '.data td { border: 1px solid #94a3b8; }' +
+        '.data td.nowrap { white-space: nowrap; font-variant-numeric: tabular-nums; }' +
+        '.data tr { page-break-inside: avoid; break-inside: avoid; }' +
+        '.data thead { display: table-header-group; }' +
+        '.data tbody tr:nth-child(even) td { background: #f8fafc; }' +
+        '.resumen { width: 100%; border-collapse: collapse; margin-top: 6px; }' +
+        '.resumen td { border: 1px solid #94a3b8; background: #f1f5f9; font-size: 8px; font-weight: bold; padding: 3px 6px; }' +
+        '.firma { width: 320px; margin: 26px auto 0; text-align: center; font-size: 8.5px; color: #0f172a; }' +
+        '.firma .linea { border-top: 1.5px solid #0f172a; margin-bottom: 4px; padding-top: 6px; font-weight: bold; }' +
+        '.pie { margin-top: 10px; text-align: center; font-size: 7.5px; color: #64748b; }' +
         '</style></head><body>' +
         '<table class="membrete"><tr>' +
-        '<td rowspan="5" width="22%" align="center">' + (escudo ? '<img src="' + escudo + '" width="200" height="68" />' : '') + '</td>' +
+        '<td rowspan="4" width="22%" align="center">' + (escudo ? '<img src="' + escudo + '" width="190" height="65" style="max-width:100%;height:auto;object-fit:contain;image-rendering:-webkit-optimize-contrast;" />' : '') + '</td>' +
         '<td width="24%" class="inst">GOBIERNO REGIONAL DE LIMA<br/>DIRECCIÓN REGIONAL DE SALUD LIMA</td>' +
-        '<td rowspan="5" width="32%" class="titulo">' + esc(m.titulo) + '<br/><span class="subtitulo">' + esc(m.subtitulo) + '</span></td>' +
+        '<td rowspan="4" width="32%" class="titulo">' + esc(m.titulo) + '<br/><span class="subtitulo">' + esc(m.subtitulo) + '</span></td>' +
         '<td width="24%" class="inst2">RED DE SALUD HUARAL CHANCAY<br/>HOSPITAL SAN JUAN BAUTISTA DE HUARAL</td>' +
-        '<td rowspan="5" width="10%" align="center">' + (logo ? '<img src="' + logo + '" width="80" height="85" />' : '') + '</td>' +
+        '<td rowspan="4" width="10%" align="center">' + (logo ? '<img src="' + logo + '" width="74" height="74" style="max-width:100%;height:auto;object-fit:contain;image-rendering:-webkit-optimize-contrast;" />' : '') + '</td>' +
         '</tr>' +
         '<tr><td class="dato"><b>Establecimiento:</b> ' + esc(m.establecimiento) + '</td><td class="dato"><b>Periodo:</b> ' + esc(m.periodo || '—') + '</td></tr>' +
         '<tr><td class="dato"><b>Obstetra:</b> ' + esc(m.obstetra || '—') + '</td><td class="dato"><b>Emisión:</b> ' + esc(m.generadoEn) + '</td></tr>' +
-        '<tr><td class="dato" colspan="2"><b>Emisor:</b> ' + esc(m.emisorNombre || '—') + ' · ' + esc(m.emisorRol || '—') + ' · DNI ' + esc(m.emisorDni || '—') + '</td></tr>' +
-        '<tr><td class="dato" colspan="2">Sistema PlanificaHIS · Documento oficial de Planificación Familiar</td></tr>' +
+        '<tr><td class="dato" colspan="2"><b>Emisor:</b> ' + esc(m.emisorNombre || '—') + ' · ' + esc(m.emisorRol || '—') + ' · DNI ' + esc(m.emisorDni || '—') + ' · ' + esc(m.establecimiento) + '</td></tr>' +
         '</table>' +
-        '<table class="data"><thead><tr>' + columnas.map(function (col) { return '<th>' + esc(col.label) + '</th>'; }).join('') + '</tr></thead><tbody>' + filasHtml + '</tbody></table>' +
-        '<div style="margin-top:5px;font-size:8px;color:#475569">Total de registros: <b>' + (filas || []).length + '</b></div>' +
+        '<table class="data"><colgroup>' + porcentajes.map(function (pct) { return '<col style="width:' + pct.toFixed(2) + '%" />'; }).join('') + '</colgroup>' +
+        '<thead><tr>' + columnas.map(function (col) { return '<th>' + esc(col.label) + '</th>'; }).join('') + '</tr></thead><tbody>' + filasHtml + '</tbody></table>' +
+        '<div style="margin-top:4px;font-size:7.8px;color:#475569">Total de registros: <b>' + (filas || []).length + '</b></div>' +
         (resumenLineas && resumenLineas.length ? '<table class="resumen">' + resumenLineas.map(function (linea) { return '<tr><td>' + esc(linea) + '</td></tr>'; }).join('') + '</table>' : '') +
-        '<div class="firmas" style="width:100%;margin-top:38px;display:flex;justify-content:center;"><div class="firma" style="width:320px;text-align:center;font-size:9.5px;color:#0f172a;"><div class="linea" style="border-top:1.5px solid #0f172a;margin-bottom:4px;padding-top:6px;font-weight:bold;">' + esc(m.emisorNombre) + '</div><div style="font-weight:bold;color:#075985;">' + esc(m.emisorRol) + ' · DNI ' + esc(m.emisorDni) + '</div><div style="font-size:8.5px;color:#475569;">' + esc(m.establecimiento) + '</div><div style="font-size:8px;color:#64748b;margin-top:2px;">Firma y Sello del Responsable del Reporte</div></div></div>' +
-        '<div class="pie">Generado por PlanificaHIS el ' + esc(m.generadoEn) + ' · Impresión oficial con membrete institucional</div>' +
+        '<div class="firma"><div class="linea">Emisor: ' + esc(m.emisorNombre) + '</div><div style="font-weight:bold;color:#075985;">' + esc(m.emisorRol) + ' · DNI ' + esc(m.emisorDni) + ' · ' + esc(m.establecimiento) + '</div><div style="font-size:7.5px;color:#64748b;margin-top:2px;">Firma y Sello del Responsable del Reporte</div></div>' +
+        '<div class="pie">Generado por PlanificaHIS el ' + esc(m.generadoEn) + ' · Documento oficial con membrete institucional</div>' +
         '<script>window.addEventListener("load",function(){setTimeout(function(){window.focus();window.print();},450);});<\/script>' +
         '</body></html>';
     }
@@ -3370,26 +3439,29 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
 
     function columnasReporteMetodos() {
       return [
-        { label: 'N°', align: 'center', width: 28 },
-        { label: 'DNI', align: 'center', text: true, width: 60 },
-        { label: 'Paciente', width: 150 },
-        { label: 'Edad', align: 'center', width: 32 },
-        { label: 'Celular', align: 'center', text: true, width: 68 },
-        { label: 'Sector', width: 70 },
-        { label: 'Código Método', align: 'center', text: true, width: 55 },
-        { label: 'Método', width: 120 },
-        { label: 'Días de ciclo', align: 'center', width: 40 },
-        { label: 'Fecha última atención', align: 'center', width: 70 },
-        { label: 'Fecha programada siguiente atención', align: 'center', width: 82 },
-        { label: 'Estado del control', width: 80 },
-        { label: 'DNI Obstetra', align: 'center', text: true, width: 60 },
-        { label: 'Obstetra', width: 110 },
-        { label: 'Código Establecimiento', align: 'center', text: true, width: 60 },
-        { label: 'Establecimiento', width: 120 }
+        { label: 'N°', align: 'center', pct: 3.0 },
+        { label: 'DNI', align: 'center', text: true, pct: 6.5 },
+        { label: 'Paciente', pct: 13.0 },
+        { label: 'Edad', align: 'center', pct: 3.5 },
+        { label: 'Celular', align: 'center', text: true, pct: 6.5 },
+        { label: 'Sector', pct: 4.0 },
+        { label: 'Código Método', align: 'center', text: true, pct: 4.5 },
+        { label: 'Método', pct: 11.0 },
+        { label: 'Días de ciclo', align: 'center', pct: 3.5 },
+        { label: 'Fecha última atención', align: 'center', pct: 6.5 },
+        { label: 'Fecha programada siguiente atención', align: 'center', pct: 6.5 },
+        { label: 'Estado del control', pct: 7.5 },
+        { label: 'DNI Obstetra', align: 'center', text: true, pct: 6.0 },
+        { label: 'Obstetra', pct: 8.5 },
+        { label: 'Código Establecimiento', align: 'center', text: true, pct: 4.0 },
+        { label: 'Establecimiento', pct: 5.5 }
       ];
     }
 
     function filaReporteCampo(p, i) {
+      const proxima = p.es_definitivo
+        ? 'Definitivo'
+        : (p.fecha_proxima_cita ? fechaIsoADdMmAaaa(p.fecha_proxima_cita) : '—');
       return [
         i + 1,
         p.fecha_registro_ddmmyyyy_hhmmss || p.fecha_registro,
@@ -3402,30 +3474,37 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         p.distrito || '',
         estadoPacienteTexto(p.estado_paciente),
         p.atencion_99208 ? 'SÍ' : 'NO',
-        p.ultimo_metodo_nombre || 'Sin método',
-        p.fecha_proxima_cita || '—',
-        p.nombre_obstetra || '',
-        p.estab_nombre || ''
+        p.ultimo_metodo_nombre || (p.estado_paciente === 'CAPTADA_CON_METODO' ? 'Método externo / Previo' : 'Sin método'),
+        proxima,
+        p.nombre_obstetra || ''
       ];
+    }
+
+    function fechaIsoADdMmAaaa(valor) {
+      const texto = String(valor || '').trim();
+      const iso = texto.slice(0, 10);
+      if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) {
+        return iso.slice(8, 10) + '/' + iso.slice(5, 7) + '/' + iso.slice(0, 4);
+      }
+      return texto;
     }
 
     function columnasReporteCampo() {
       return [
-        { label: 'N°', align: 'center', width: 28 },
-        { label: 'Fecha y hora de registro', align: 'center', width: 105 },
-        { label: 'Sector', width: 70 },
-        { label: 'DNI', align: 'center', text: true, width: 60 },
-        { label: 'Apellidos y nombres', width: 150 },
-        { label: 'Edad', align: 'center', width: 32 },
-        { label: 'Celular', align: 'center', text: true, width: 68 },
-        { label: 'Dirección', width: 140 },
-        { label: 'Distrito', width: 70 },
-        { label: 'Estado', width: 85 },
-        { label: '99208', align: 'center', width: 38 },
-        { label: 'Último método', width: 100 },
-        { label: 'Próxima cita', align: 'center', width: 70 },
-        { label: 'Obstetra', width: 110 },
-        { label: 'Establecimiento', width: 120 }
+        { label: 'N°', align: 'center', width: 28, pct: 3.2 },
+        { label: 'Fecha y hora', align: 'center', width: 75, pct: 7.5, fechaHora: true },
+        { label: 'Sector', width: 40, pct: 4.0 },
+        { label: 'DNI', align: 'center', text: true, width: 68, pct: 6.8 },
+        { label: 'Apellidos y nombres', width: 145, pct: 14.5 },
+        { label: 'Edad', align: 'center', width: 35, pct: 3.5 },
+        { label: 'Celular', align: 'center', text: true, width: 68, pct: 6.8 },
+        { label: 'Dirección', width: 115, pct: 11.5 },
+        { label: 'Distrito', width: 58, pct: 5.8 },
+        { label: 'Estado', width: 75, pct: 7.5 },
+        { label: '99208', align: 'center', width: 36, pct: 3.6 },
+        { label: 'Último método', width: 105, pct: 10.5 },
+        { label: 'Próxima cita', align: 'center', width: 63, pct: 6.3 },
+        { label: 'Obstetra', width: 85, pct: 8.5 }
       ];
     }
 
@@ -3739,8 +3818,8 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
               p.nombre_metodo || '',
               Number(p.dias_ciclo || 0),
               fechaDdMmYyyy(p.fecha_ultima_atencion) || '',
-              fechaDdMmYyyy(p.fecha_proxima_cita) || '',
-              p.estado_indicador_etiqueta || '',
+              p.es_definitivo ? 'Definitivo' : (fechaDdMmYyyy(p.fecha_proxima_cita) || '—'),
+              p.estado_vigencia || p.estado_indicador_etiqueta || '',
               p.codpsal_obstetra || '',
               p.nombre_obstetra || '',
               p.cod_estab || '',
@@ -4116,7 +4195,9 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
           nombre_metodo: actual.nombre_metodo,
           dias_ciclo: Number(diasInput ? diasInput.value : actual.dias_ciclo),
           requiere_cita: actual.requiere_cita,
-          activo: activoInput && activoInput.checked ? 1 : 0
+          activo: activoInput && activoInput.checked ? 1 : 0,
+          alias_codigos: actual.alias_codigos || (Array.isArray(actual.alias) ? actual.alias.join(',') : ''),
+          orden: Number(actual.orden || 0)
         });
         state.metodosData.catalogo = data.catalogo || state.metodosData.catalogo;
         showFeedback('success', 'Tiempo de ciclo actualizado para ' + codigo + '.');
@@ -4419,23 +4500,35 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
     // ---------------------------------------------------------------------
     function fillDraftFromLookup(data) {
       const cap = data.existingCaptacion || {};
-      const his = data.hisRecord || {};
       const pre = data.precargaDesdeHis || {};
       const distritoActual = (data.establecimiento && data.establecimiento.distrito) || 'HUARAL';
       const caso = data.casoFlujo || 'NUEVA';
+      const dniDraft = String((data.documento && data.documento.numero) || data.dni || pre.dni || cap.dni || '');
+      // Solo se aceptan nombres reales. El DNI del paciente NUNCA se usa como
+      // nombre, apellido ni marcador de identidad.
+      const nombreSeguro = function (valor) {
+        const texto = String(valor || '').trim();
+        return texto !== '' && texto !== dniDraft && !/^X+$/i.test(texto) ? texto : '';
+      };
+      const apPaterno = nombreSeguro(pre.apellido_paterno) || nombreSeguro(cap.apellido_paterno);
+      const apMaterno = nombreSeguro(pre.apellido_materno) || nombreSeguro(cap.apellido_materno);
+      let nombres = nombreSeguro(pre.nombres) || nombreSeguro(cap.nombres);
+      if (nombres === '' && (data.foundInHis || cap.dni)) {
+        nombres = 'PACIENTE SIN NOMBRE EN PADRON HIS';
+      }
       // Caso 2: el distrito del establecimiento actual manda sobre el histórico
       // para que la obstetra confirme la nueva dirección de la paciente.
       const distrito = caso === 'OTRO_ESTABLECIMIENTO'
         ? distritoActual
-        : (cap.distrito || distritoActual || his.DESC_DIST || 'HUARAL');
+        : (cap.distrito || distritoActual || 'HUARAL');
       const isOtros = String(distrito).indexOf('OTROS:') === 0;
       return {
-        dni: (data.documento && data.documento.numero) || data.dni || pre.dni || his.DNI || cap.dni || '',
+        dni: dniDraft,
         tipo_doc: (data.documento && data.documento.tipo_doc) || data.tipo_doc || cap.tipo_doc || pre.tipo_doc || 'DNI',
-        apellido_paterno: cap.apellido_paterno || pre.apellido_paterno || his.Apellido_p || '',
-        apellido_materno: cap.apellido_materno || pre.apellido_materno || his.Apellido_m || '',
-        nombres: cap.nombres || pre.nombres || his.Dnombres || his.Pnombre || '',
-        edad: cap.edad || pre.edad || his.EDAD || '',
+        apellido_paterno: apPaterno,
+        apellido_materno: apMaterno,
+        nombres: nombres,
+        edad: cap.edad || pre.edad || '',
         celular: cap.celular || '',
         correo: cap.correo || '',
         distrito: isOtros ? 'OTROS' : distrito,
@@ -4444,12 +4537,21 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         sector: cap.sector || '',
         // Solo se usa para PRESELECCIONAR el selector. El estado clínico no se
         // modifica salvo que la obstetra elija otro valor de forma explícita.
-        estado_paciente: cap.estado_paciente || ''
+        estado_paciente: cap.estado_paciente || '',
+        ultimo_codigo_metodo: cap.ultimo_codigo_metodo || '',
+        fecha_ultima_atencion: cap.fecha_ultima_atencion || ''
       };
     }
 
+    let searchRequestId = 0;
+    let searchAbortController = null;
+
     function marcarEstadoExplicito(select) {
       state.estadoExplicito = select && select.value ? select.value : null;
+      const box = document.getElementById('f-metodo-box');
+      if (box) {
+        box.classList.toggle('hidden', !['CAPTADA_CON_METODO', 'SATISFECHA_CON_METODO'].includes(select ? select.value : ''));
+      }
     }
 
     function currentDni() {
@@ -4474,9 +4576,26 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         render();
         return;
       }
+      // Cancela la búsqueda anterior y descarta su respuesta si llega tarde.
+      if (searchAbortController) {
+        searchAbortController.abort();
+      }
+      searchAbortController = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      const requestId = ++searchRequestId;
+      // Limpia por completo el estado clínico del documento anterior.
       state.feedback = null;
+      state.hisLookup = null;
+      state.formDraft = null;
+      state.formVisible = false;
+      state.nombresDesbloqueados = false;
+      state.estadoExplicito = null;
+      render();
       try {
-        const data = await apiGet('lookup_dni', { dni: dni, tipo_doc: tipo, cod_estab: state.session.cod_estab });
+        const opciones = searchAbortController ? { signal: searchAbortController.signal } : undefined;
+        const data = await apiGet('lookup_dni', { dni: dni, tipo_doc: tipo, cod_estab: state.session.cod_estab }, opciones);
+        if (requestId !== searchRequestId) {
+          return;
+        }
         data.dni = dni;
         data.tipo_doc = tipo;
         state.hisLookup = data;
@@ -4486,11 +4605,17 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         // formulario se abre automáticamente para verificar/actualizar datos.
         state.formVisible = data.casoFlujo !== 'MISMO_ESTABLECIMIENTO';
         state.nombresDesbloqueados = false;
-      state.estadoExplicito = null;
         render();
       } catch (error) {
+        if (requestId !== searchRequestId || (error && error.name === 'AbortError')) {
+          return;
+        }
         state.feedback = { type: 'error', text: error.message };
         render();
+      } finally {
+        if (requestId === searchRequestId) {
+          searchAbortController = null;
+        }
       }
     }
 
@@ -4507,6 +4632,8 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
     function readPacienteForm() {
       const distSel = document.getElementById('f-dist').value;
       const otros = document.getElementById('f-dist-otros');
+      const estSel = document.getElementById('f-est') ? document.getElementById('f-est').value : '';
+      const conMetodo = ['CAPTADA_CON_METODO', 'SATISFECHA_CON_METODO'].includes(estSel);
       const draft = {
         dni: currentDni(),
         tipo_doc: currentTipoDoc(),
@@ -4520,7 +4647,9 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         distritoOtros: otros ? otros.value.trim() : '',
         direccion: document.getElementById('f-dir').value.trim(),
         sector: document.getElementById('f-sec').value.trim(),
-        estado_paciente: document.getElementById('f-est') ? document.getElementById('f-est').value : ''
+        estado_paciente: estSel,
+        ultimo_codigo_metodo: conMetodo && document.getElementById('f-metodo') ? document.getElementById('f-metodo').value : '',
+        fecha_ultima_atencion: conMetodo && document.getElementById('f-fecha-metodo') ? document.getElementById('f-fecha-metodo').value : ''
       };
       state.formDraft = draft;
       return draft;
@@ -4554,6 +4683,10 @@ $hospitalLogoJson = json_encode($hospitalLogoDataUri, JSON_UNESCAPED_UNICODE | J
         atencion_99208: Boolean(state.hisLookup.atencion99208 && state.hisLookup.atencion99208.tieneCodigo99208),
         pase_ups: true
       };
+      if (draft.ultimo_codigo_metodo) {
+        payload.ultimo_codigo_metodo = draft.ultimo_codigo_metodo;
+        payload.fecha_ultima_atencion = draft.fecha_ultima_atencion || '';
+      }
       // El pase UPS no debe sobrescribir el estado clínico existente. Solo se
       // envía si la obstetra cambió el selector de estado de forma explícita.
       if (state.estadoExplicito !== null && state.estadoExplicito !== '') {

@@ -14,6 +14,11 @@
  */
 declare(strict_types=1);
 
+// Toda la operación clínica (captaciones, próximas citas, reportes y
+// auditoría) se calcula en hora oficial del Perú, sin importar la zona
+// horaria configurada en el servidor web o en el Droplet.
+date_default_timezone_set('America/Lima');
+
 /**
  * DNI de la Cuenta Maestra del Sistema. Es inmutable por diseño: ni siquiera
  * el propio titular puede desactivarla ni rebajar su rol.
@@ -39,17 +44,17 @@ function hospital_catalogo_metodos_oficial(): array
     return [
         '99208.02' => [
             'codigo_dx' => '99208.02', 'nombre_metodo' => 'Preservativo o condón masculino',
-            'dias_ciclo' => 90, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 1,
+            'dias_ciclo' => 30, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 1,
             'alias' => ['9920802', '99208.2'],
         ],
         '99208.06' => [
             'codigo_dx' => '99208.06', 'nombre_metodo' => 'Preservativo o condón femenino',
-            'dias_ciclo' => 90, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 2,
+            'dias_ciclo' => 30, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 2,
             'alias' => ['9920806', '99208.6'],
         ],
         '99208.13' => [
             'codigo_dx' => '99208.13', 'nombre_metodo' => 'Hormonal combinado oral (Píldora)',
-            'dias_ciclo' => 120, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 3,
+            'dias_ciclo' => 30, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 3,
             'alias' => ['9920813', '99208.03', '9920803'],
         ],
         '99208.04' => [
@@ -64,27 +69,27 @@ function hospital_catalogo_metodos_oficial(): array
         ],
         '11975.00' => [
             'codigo_dx' => '11975.00', 'nombre_metodo' => 'Implante subdérmico',
-            'dias_ciclo' => 90, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 6,
+            'dias_ciclo' => 1095, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 6,
             'alias' => ['11975', '1197500', '11981', '11981.00', '11982', '11983'],
         ],
         '58300.00' => [
             'codigo_dx' => '58300.00', 'nombre_metodo' => 'DIU (T de cobre)',
-            'dias_ciclo' => 30, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 7,
-            'alias' => ['58300', '5830000'],
+            'dias_ciclo' => 365, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 7,
+            'alias' => ['58300', '5830000', 'Z301', 'Z301.0', 'Z3010'],
         ],
         '58300.01' => [
             'codigo_dx' => '58300.01', 'nombre_metodo' => 'DIU LNG (Liberador de Levonorgestrel)',
-            'dias_ciclo' => 30, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 8,
+            'dias_ciclo' => 365, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 8,
             'alias' => ['5830001', '58300.1'],
         ],
         '58600.00' => [
             'codigo_dx' => '58600.00', 'nombre_metodo' => 'Bloqueo Tubárico Bilateral (BTB)',
-            'dias_ciclo' => 365, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 9,
+            'dias_ciclo' => 0, 'requiere_cita' => 0, 'activo' => 1, 'orden' => 9,
             'alias' => ['58600', '5860000', '58605', '58611', '58615'],
         ],
         '55250.00' => [
             'codigo_dx' => '55250.00', 'nombre_metodo' => 'Vasectomía',
-            'dias_ciclo' => 365, 'requiere_cita' => 1, 'activo' => 1, 'orden' => 10,
+            'dias_ciclo' => 0, 'requiere_cita' => 0, 'activo' => 1, 'orden' => 10,
             'alias' => ['55250', '5525000'],
         ],
         '99208.07' => [
@@ -626,7 +631,11 @@ final class HospitalHuaralDB
         }
 
         $conectar = static function () use ($dsn, $user, $pass, $options): PDO {
-            return new PDO($dsn, $user, $pass, $options);
+            $nueva = new PDO($dsn, $user, $pass, $options);
+            // Hora oficial del Perú a nivel de sesión MySQL: NOW(),
+            // CURRENT_TIMESTAMP, CURDATE() y FROM_UNIXTIME se calculan en -05:00.
+            $nueva->exec("SET time_zone = '-05:00'");
+            return $nueva;
         };
 
         try {
@@ -682,10 +691,15 @@ final class HospitalHuaralDB
               `sector` varchar(50) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL,
               `tipo_doc` varchar(15) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL DEFAULT 'DNI' COMMENT 'DNI, CE, PASAPORTE, PTP, CNV',
               `estado_paciente` varchar(30) CHARACTER SET utf8 COLLATE utf8_general_ci NULL DEFAULT 'INSATISFECHA_SIN_METODO',
-              `codpsal_obstetra` varchar(11) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL COMMENT 'DNI de la obstetra que capta',
+              `codpsal_obstetra` varchar(15) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL COMMENT 'DNI de la obstetra que capta',
               `cod_estab` varchar(9) CHARACTER SET utf8 COLLATE utf8_general_ci NULL DEFAULT NULL,
+              `cod_estab_origen` varchar(9) CHARACTER SET utf8 COLLATE utf8_general_ci NULL DEFAULT NULL,
               `atencion_99208` tinyint(1) NOT NULL DEFAULT 0,
+              `ultimo_codigo_metodo` varchar(15) CHARACTER SET utf8 COLLATE utf8_general_ci NULL DEFAULT NULL,
+              `fecha_ultima_atencion` date NULL DEFAULT NULL,
+              `fecha_proxima_cita` date NULL DEFAULT NULL,
               `fecha_registro` timestamp NOT NULL DEFAULT current_timestamp(),
+              `fecha_actualizacion` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
               PRIMARY KEY (`id`) USING BTREE,
               UNIQUE INDEX `uk_dni_paciente`(`dni` ASC) USING BTREE,
               INDEX `idx_obstetra`(`codpsal_obstetra` ASC) USING BTREE,
@@ -842,6 +856,13 @@ final class HospitalHuaralDB
         foreach ([
             "ALTER TABLE `pacientes_sin_metodo` ADD COLUMN IF NOT EXISTS `tipo_doc` varchar(15) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL DEFAULT 'DNI' AFTER `dni`",
             "ALTER TABLE `pacientes_sin_metodo` ADD COLUMN IF NOT EXISTS `cod_estab` varchar(9) NULL DEFAULT NULL AFTER `codpsal_obstetra`",
+            "ALTER TABLE `pacientes_sin_metodo` ADD COLUMN IF NOT EXISTS `cod_estab_origen` varchar(9) NULL DEFAULT NULL AFTER `cod_estab`",
+            "ALTER TABLE `pacientes_sin_metodo` ADD COLUMN IF NOT EXISTS `atencion_99208` tinyint(1) NOT NULL DEFAULT 0 AFTER `cod_estab_origen`",
+            "ALTER TABLE `pacientes_sin_metodo` ADD COLUMN IF NOT EXISTS `ultimo_codigo_metodo` varchar(15) CHARACTER SET utf8 COLLATE utf8_general_ci NULL DEFAULT NULL AFTER `atencion_99208`",
+            "ALTER TABLE `pacientes_sin_metodo` ADD COLUMN IF NOT EXISTS `fecha_ultima_atencion` date NULL DEFAULT NULL AFTER `ultimo_codigo_metodo`",
+            "ALTER TABLE `pacientes_sin_metodo` ADD COLUMN IF NOT EXISTS `fecha_proxima_cita` date NULL DEFAULT NULL AFTER `fecha_ultima_atencion`",
+            "ALTER TABLE `pacientes_sin_metodo` ADD COLUMN IF NOT EXISTS `fecha_actualizacion` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp() AFTER `fecha_registro`",
+            "ALTER TABLE `pacientes_sin_metodo` MODIFY COLUMN `codpsal_obstetra` varchar(15) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL COMMENT 'DNI de la obstetra que capta'",
             "ALTER TABLE `pacientes_sin_metodo` ADD COLUMN IF NOT EXISTS `atencion_99208` tinyint(1) NOT NULL DEFAULT 0 AFTER `cod_estab`",
             "ALTER TABLE `auditoria_seguridad_app` ADD COLUMN IF NOT EXISTS `actor_estab` varchar(9) NOT NULL DEFAULT '' AFTER `actor_dni`",
             "ALTER TABLE `auditoria_seguridad_app` ADD COLUMN IF NOT EXISTS `plataforma` varchar(30) NOT NULL DEFAULT 'Web Desktop' AFTER `ip`",
@@ -968,7 +989,7 @@ final class HospitalHuaralDB
             return;
         }
         $verificado = true;
-        $catalogoVersion = 'oficial_2026_11_v7';
+        $catalogoVersion = 'oficial_2026_11_v9';
         try {
             try {
                 $pdo->exec("
@@ -1497,7 +1518,7 @@ final class HospitalHuaralDB
             SELECT s.token_hash, s.dni, s.cod_estab, s.plataforma, s.expires_at,
                    s.last_activity, s.revoked,
                    u.cod_estab AS usuario_cod_estab, u.rol, u.activo,
-                   u.protegido, u.puede_ver_red
+                   u.protegido, u.puede_ver_red, u.ultimo_login
             FROM app_sesiones s
             INNER JOIN app_usuarios u ON u.dni = s.dni
             WHERE s.token_hash = :th AND s.revoked = 0
@@ -1527,6 +1548,21 @@ final class HospitalHuaralDB
                 http_response_code(401);
             }
             return null;
+        }
+
+        // Hidratación del último acceso: si la cuenta nunca lo registró o la
+        // marca tiene más de 5 minutos, la actividad autenticada la actualiza.
+        // Se usa hora PHP de América/Lima (no la zona del Droplet).
+        $ultimoLogin = trim((string)($row['ultimo_login'] ?? ''));
+        $ultimoLoginTs = $ultimoLogin !== '' ? strtotime($ultimoLogin) : false;
+        if ($ultimoLoginTs === false || ($now - $ultimoLoginTs) > 300) {
+            try {
+                $pdo->prepare('UPDATE app_usuarios SET ultimo_login = :ahora WHERE dni = :dni LIMIT 1')
+                    ->execute([':ahora' => date('Y-m-d H:i:s'), ':dni' => $dni]);
+                self::olvidarAcceso($dni);
+            } catch (Throwable $e) {
+                // El último acceso es informativo: nunca bloquea la sesión.
+            }
         }
 
         $rol = strtoupper(trim((string)($row['rol'] ?? 'OBSTETRA')));

@@ -3,19 +3,19 @@
  * - Navegaciones HTML: Network-First con timeout corto y fallback al shell.
  * - api.php y escrituras clinicas: SIEMPRE red, sin cache.
  */
-const SW_VERSION = 'planificahis-v12';
+const SW_VERSION = 'planificahis-v2026.11.13';
 const NAV_TIMEOUT_MS = 3500;
 const PRECACHE = [
   './index.php',
   './manifest.webmanifest',
-  './public/icon.svg?v=3',
-  './public/logo.png',
-  './public/logo-diresa-lima.jpg',
-  './public/apple-touch-icon.png?v=3',
-  './public/favicon.ico?v=3',
-  './public/pwa-192x192.png?v=3',
-  './public/pwa-512x512.png?v=3',
-  './public/pwa-maskable-512x512.png?v=3',
+  './public/icon.svg?v=20261113',
+  './public/logo.png?v=20261113',
+  './public/logo-diresa-lima.jpg?v=20261113',
+  './public/apple-touch-icon.png?v=20261113',
+  './public/favicon.ico?v=20261113',
+  './public/pwa-192x192.png?v=20261113',
+  './public/pwa-512x512.png?v=20261113',
+  './public/pwa-maskable-512x512.png?v=20261113',
 ];
 
 self.addEventListener('install', (event) => {
