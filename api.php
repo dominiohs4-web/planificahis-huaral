@@ -1851,6 +1851,7 @@ if ($action === 'guardar_acceso') {
     $email = strtolower(HospitalHuaralDB::sanitizeText($body['email'] ?? '', 190));
     $celular = preg_replace('/[^0-9]/', '', (string)($body['celular'] ?? '')) ?? '';
     $password = (string)($body['password'] ?? '');
+    $migrarPacientes = filter_var($body['migrar_pacientes'] ?? false, FILTER_VALIDATE_BOOLEAN);
 
     if (strlen($dni) < 8 || strlen($dni) > 11) {
         json_error('El DNI debe tener entre 8 y 11 dígitos.', 400);
@@ -1890,6 +1891,10 @@ if ($action === 'guardar_acceso') {
     $puedeVerRed = hospital_es_rol_admin_superior($rol) ? 1 : 0;
 
     $existente = HospitalHuaralDB::accesoUsuario($dni);
+    $estabAnterior = $existente !== null
+        ? hospital_codigo_canonico((string)($existente['cod_estab'] ?? ''))
+        : '';
+    $cambioEstablecimiento = $existente !== null && $estabAnterior !== '' && $estabAnterior !== $codEstab;
     if (!$actorEsSuperAdmin && $dni !== (string)$session['dni'] && es_admin_estadistica_objetivo($existente)) {
         HospitalHuaralDB::registrarAuditoria(
             (string)$session['dni'],
@@ -1993,6 +1998,33 @@ if ($action === 'guardar_acceso') {
         }
         $pdo->prepare('UPDATE app_usuarios SET ' . implode(', ', $sets) . ' WHERE dni = :dni LIMIT 1')->execute($params);
     }
+
+    $pacientesMigrados = 0;
+    if ($migrarPacientes && $cambioEstablecimiento) {
+        try {
+            $stmtMigracion = $pdo->prepare(
+                'UPDATE pacientes_sin_metodo SET cod_estab = :nuevo WHERE TRIM(codpsal_obstetra) = :dni AND cod_estab = :anterior'
+            );
+            $stmtMigracion->execute([
+                ':nuevo' => $codEstab,
+                ':dni' => $dni,
+                ':anterior' => $estabAnterior,
+            ]);
+            $pacientesMigrados = $stmtMigracion->rowCount();
+            HospitalHuaralDB::registrarAuditoria(
+                (string)$session['dni'],
+                'PACIENTES_MIGRADOS',
+                'Traslado de ' . $pacientesMigrados . ' paciente(s) captada(s) del DNI ' . $dni . ' (' . $nombre . ') de '
+                    . hospital_nombre_establecimiento($estabAnterior) . ' (' . $estabAnterior . ') a '
+                    . hospital_nombre_establecimiento($codEstab) . ' (' . $codEstab . ').',
+                (string)$session['cod_estab'],
+                (string)$session['platform']
+            );
+        } catch (Throwable $e) {
+            error_log('[PlanificaHIS API] No se pudieron migrar pacientes del DNI ' . $dni . ': ' . $e->getMessage());
+        }
+    }
+
     HospitalHuaralDB::olvidarAcceso($dni);
     HospitalHuaralDB::establecerEstablecimientoObstetra($dni, $codEstab);
     try {
@@ -2009,7 +2041,14 @@ if ($action === 'guardar_acceso') {
         (string)$session['cod_estab'],
         (string)$session['platform']
     );
-    json_out(['success' => true, 'message' => 'Acceso guardado correctamente en app_usuarios.', 'dni' => $dni]);
+    json_out([
+        'success' => true,
+        'message' => $migrarPacientes && $cambioEstablecimiento
+            ? 'Acceso guardado correctamente en app_usuarios. Pacientes captadas trasladadas: ' . $pacientesMigrados . '.'
+            : 'Acceso guardado correctamente en app_usuarios.',
+        'dni' => $dni,
+        'pacientes_migrados' => $migrarPacientes && $cambioEstablecimiento ? $pacientesMigrados : null,
+    ]);
 }
 
 if ($action === 'cambiar_estado_acceso') {

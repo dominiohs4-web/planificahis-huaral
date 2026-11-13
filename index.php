@@ -598,7 +598,7 @@ $hospitalSvgJson = json_encode($hospitalSvgDataUri, JSON_UNESCAPED_UNICODE | JSO
       accesosLoading: false,
       accesosError: '',
       accesosFiltros: { q: '', rol: 'TODOS', cod_estab: 'TODOS', activo: 'TODOS' },
-      accesoForm: { dni: '', nombre_completo: '', nombres: '', apellido_paterno: '', apellido_materno: '', rol: 'OBSTETRA', cod_estab: '', pin: '', email: '', celular: '', activo: 1 },
+      accesoForm: { dni: '', nombre_completo: '', nombres: '', apellido_paterno: '', apellido_materno: '', rol: 'OBSTETRA', cod_estab: '', estab_original: '', migrar_pacientes: 0, pin: '', email: '', celular: '', activo: 1 },
       personasSugeridas: [],
       showAccesoModal: false,
       adminTab: 'DIRECTORIO',
@@ -766,7 +766,7 @@ $hospitalSvgJson = json_encode($hospitalSvgDataUri, JSON_UNESCAPED_UNICODE | JSO
       state.accesosLoading = false;
       state.accesosError = '';
       state.accesosFiltros = { q: '', rol: 'TODOS', cod_estab: 'TODOS', activo: 'TODOS' };
-      state.accesoForm = { dni: '', nombre_completo: '', nombres: '', apellido_paterno: '', apellido_materno: '', rol: 'OBSTETRA', cod_estab: '', pin: '', email: '', celular: '', activo: 1 };
+      state.accesoForm = { dni: '', nombre_completo: '', nombres: '', apellido_paterno: '', apellido_materno: '', rol: 'OBSTETRA', cod_estab: '', estab_original: '', migrar_pacientes: 0, pin: '', email: '', celular: '', activo: 1 };
       state.personasSugeridas = [];
       state.showAccesoModal = false;
       state.adminTab = 'DIRECTORIO';
@@ -2521,6 +2521,8 @@ $hospitalSvgJson = json_encode($hospitalSvgDataUri, JSON_UNESCAPED_UNICODE | JSO
         return r.codigo !== 'SUPER_ADMIN' && (esSuper || r.codigo !== 'ADMIN_ESTADISTICA');
       });
       const form = state.accesoForm || {};
+      const estabOriginal = String(form.estab_original || '');
+      const cambioEstablecimiento = estabOriginal !== '' && String(form.cod_estab || '') !== estabOriginal;
       return `<div class="fixed inset-0 z-50 bg-slate-900/60 flex items-end sm:items-center justify-center p-3">
         <div class="w-full max-w-[420px] max-h-[88vh] overflow-y-auto rounded-2xl bg-white border border-slate-300 p-4 space-y-3">
           <div class="flex items-center justify-between"><h3 class="text-sm font-bold text-slate-900">Agregar / Activar Usuario o Jefa</h3><button type="button" onclick="cerrarAccesoModal()" class="min-h-[34px] min-w-[34px] rounded-lg bg-slate-100 text-slate-700 font-bold">×</button></div>
@@ -2539,7 +2541,11 @@ $hospitalSvgJson = json_encode($hospitalSvgDataUri, JSON_UNESCAPED_UNICODE | JSO
             <select onchange="state.accesoForm.rol=this.value" class="min-h-[38px] px-1 rounded-xl border border-slate-300 text-[9px] bg-white">${roles.map(function (r) { return '<option value="' + esc(r.codigo) + '"' + (form.rol === r.codigo ? ' selected' : '') + '>' + esc(r.etiqueta) + '</option>'; }).join('')}</select>
             <input id="acc-pin" type="password" inputmode="numeric" maxlength="4" value="${esc(form.pin || '')}" placeholder="PIN 4 dígitos (opcional)" class="min-h-[38px] px-2 rounded-xl border border-slate-300 text-[10px] font-mono" />
           </div>
-          <select onchange="state.accesoForm.cod_estab=this.value" class="w-full min-h-[38px] px-1 rounded-xl border border-slate-300 text-[9px] bg-white">${optionsEstablecimientos(form.cod_estab || state.session.cod_estab || '000005481')}</select>
+          <select onchange="cambiarEstabAcceso(this.value)" class="w-full min-h-[38px] px-1 rounded-xl border border-slate-300 text-[9px] bg-white">${optionsEstablecimientos(form.cod_estab || state.session.cod_estab || '000005481')}</select>
+          <label id="acc-migrar-wrap" class="${cambioEstablecimiento ? '' : 'hidden'} flex items-start gap-2 p-2 rounded-xl border border-sky-300 bg-sky-50 text-[10px] font-semibold text-sky-900">
+            <input id="acc-migrar" type="checkbox" class="mt-0.5" ${Number(form.migrar_pacientes || 0) === 1 ? 'checked' : ''} onchange="state.accesoForm.migrar_pacientes=this.checked?1:0" />
+            <span>Trasladar también sus pacientes captadas al nuevo establecimiento</span>
+          </label>
           <input id="acc-pass" type="password" minlength="8" value="${esc(form.password || '')}" placeholder="Contraseña inicial (opcional, mínimo 8)" class="w-full min-h-[38px] px-2 rounded-xl border border-slate-300 text-[10px]" />
           <label class="flex items-center gap-2 text-[10px] font-semibold text-slate-700"><input type="checkbox" ${Number(form.activo || 0) === 1 ? 'checked' : ''} onchange="state.accesoForm.activo=this.checked?1:0" /> Acceso activo</label>
           <button type="button" onclick="guardarAcceso()" class="w-full min-h-[42px] rounded-xl bg-emerald-700 text-white text-[11px] font-bold">Guardar en app_usuarios</button>
@@ -4877,6 +4883,7 @@ $hospitalSvgJson = json_encode($hospitalSvgDataUri, JSON_UNESCAPED_UNICODE | JSO
       state.accesoForm = {
         dni: '', nombre_completo: '', nombres: '', apellido_paterno: '', apellido_materno: '',
         rol: 'OBSTETRA', cod_estab: (state.session && state.session.cod_estab) || '000005481',
+        estab_original: '', migrar_pacientes: 0,
         pin: '', email: '', celular: '', password: '', activo: 1
       };
       render();
@@ -4975,6 +4982,8 @@ $hospitalSvgJson = json_encode($hospitalSvgDataUri, JSON_UNESCAPED_UNICODE | JSO
         apellido_materno: String(a.apellido_materno || ''),
         rol: String(a.rol || 'OBSTETRA'),
         cod_estab: String(a.cod_estab || ''),
+        estab_original: String(a.cod_estab || ''),
+        migrar_pacientes: 0,
         pin: '',
         email: String(a.email || ''),
         celular: String(a.celular || ''),
@@ -5016,6 +5025,17 @@ $hospitalSvgJson = json_encode($hospitalSvgDataUri, JSON_UNESCAPED_UNICODE | JSO
       }
     }
 
+    function cambiarEstabAcceso(codEstab) {
+      state.accesoForm.cod_estab = codEstab;
+      const original = String(state.accesoForm.estab_original || '');
+      const cambio = original !== '' && String(codEstab) !== original;
+      state.accesoForm.migrar_pacientes = cambio ? 1 : 0;
+      const wrap = document.getElementById('acc-migrar-wrap');
+      const check = document.getElementById('acc-migrar');
+      if (wrap) wrap.classList.toggle('hidden', !cambio);
+      if (check) check.checked = cambio;
+    }
+
     async function guardarAcceso() {
       const dni = soloDigitos((document.getElementById('acc-dni') || {}).value || state.accesoForm.dni || '');
       if (dni.length < 8) {
@@ -5027,6 +5047,9 @@ $hospitalSvgJson = json_encode($hospitalSvgDataUri, JSON_UNESCAPED_UNICODE | JSO
         showFeedback('error', 'Seleccione el establecimiento del acceso.');
         return;
       }
+      const migrarWrap = document.getElementById('acc-migrar-wrap');
+      const migrarCheck = document.getElementById('acc-migrar');
+      const migrarPacientes = migrarWrap && !migrarWrap.classList.contains('hidden') && migrarCheck && migrarCheck.checked ? 1 : 0;
       try {
         const data = await apiPost('guardar_acceso', {
           dni: dni,
@@ -5040,10 +5063,11 @@ $hospitalSvgJson = json_encode($hospitalSvgDataUri, JSON_UNESCAPED_UNICODE | JSO
           celular: (document.getElementById('acc-cel') || {}).value || state.accesoForm.celular || '',
           pin: (document.getElementById('acc-pin') || {}).value || state.accesoForm.pin || '',
           password: (document.getElementById('acc-pass') || {}).value || state.accesoForm.password || '',
+          migrar_pacientes: migrarPacientes,
           activo: Number(state.accesoForm.activo) === 1 ? 1 : 0
         });
         state.showAccesoModal = false;
-        state.accesoForm = { dni: '', nombre_completo: '', nombres: '', apellido_paterno: '', apellido_materno: '', rol: 'OBSTETRA', cod_estab: (state.session && state.session.cod_estab) || '', pin: '', email: '', celular: '', password: '', activo: 1 };
+        state.accesoForm = { dni: '', nombre_completo: '', nombres: '', apellido_paterno: '', apellido_materno: '', rol: 'OBSTETRA', cod_estab: (state.session && state.session.cod_estab) || '', estab_original: '', migrar_pacientes: 0, pin: '', email: '', celular: '', password: '', activo: 1 };
         state.personasSugeridas = [];
         state.feedback = { type: 'success', text: data.message || 'Acceso guardado correctamente.' };
         await cargarAccesos(false);
