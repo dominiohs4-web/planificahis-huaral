@@ -25,12 +25,30 @@ metadata.json
 !.env.example
 
 # Dumps, respaldos y archivos temporales (NUNCA subir datos clínicos)
+*.sql
 dump*.sql
 *.dump
 *.bak
 *.old
 *.log
+*.bat
+*.cmd
+*.ps1
+*.zip
+*.tar
+*.gz
 sync_preview.sql
+
+# Scripts internos que solo deben ejecutarse por consola en la PC del hospital
+scripts_hospital/
+sync_cloud_to_local.php
+
+# Documentación y control de versiones
+*.md
+.git/
+.gitignore
+.env*
+!.env.example
 
 # Sistema operativo / editores
 .DS_Store

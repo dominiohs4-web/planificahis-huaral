@@ -34,19 +34,13 @@
  */
 declare(strict_types=1);
 
-require_once __DIR__ . '/catalogo_establecimientos.php';
-
+// Herramienta exclusiva de consola local: jamás debe ejecutarse por HTTP.
 if (PHP_SAPI !== 'cli') {
-    header('Content-Type: application/json; charset=utf-8');
-    header('X-Content-Type-Options: nosniff');
-    header('X-Frame-Options: DENY');
-    header('Referrer-Policy: no-referrer');
-    header('Strict-Transport-Security: max-age=63072000; includeSubDomains; preload');
-    header('Permissions-Policy: geolocation=(), camera=(), microphone=(), payment=(), usb=()');
-    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
-    header('Pragma: no-cache');
-    header('X-Robots-Tag: noindex, nofollow');
+    http_response_code(403);
+    exit('Forbidden');
 }
+
+require_once __DIR__ . '/catalogo_establecimientos.php';
 
 $isCli = PHP_SAPI === 'cli';
 $argvList = $isCli ? $argv : [];

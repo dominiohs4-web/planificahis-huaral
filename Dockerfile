@@ -24,7 +24,19 @@ WORKDIR /var/www/html
 
 # Se copia solo lo necesario; .dockerignore excluye node_modules, dumps y secretos.
 COPY . /var/www/html/
-RUN chown -R www-data:www-data /var/www/html
+
+# Limpieza de seguridad: aunque .dockerignore ya los excluye, se elimina
+# cualquier residuo de scripts locales, dumps, documentación y metadatos Git.
+RUN rm -rf /var/www/html/scripts_hospital \
+           /var/www/html/*.sql \
+           /var/www/html/*.bat \
+           /var/www/html/*.md \
+           /var/www/html/sync_cloud_to_local.php \
+           /var/www/html/.git \
+    && printf 'ServerTokens Prod\nServerSignature Off\nTraceEnable Off\n' \
+           > /etc/apache2/conf-available/zz-planificahis-security.conf \
+    && a2enconf zz-planificahis-security \
+    && chown -R www-data:www-data /var/www/html
 
 EXPOSE 80
 

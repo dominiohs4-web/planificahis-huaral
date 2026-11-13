@@ -193,6 +193,10 @@ function require_session(): array
             'code' => 'ACCESS_DISABLED',
         ]);
     }
+    // ZERO-TRUST: el rol efectivo se recalcula SIEMPRE desde app_usuarios.
+    // Ningún endpoint autoriza con un rol, cod_estab o dni enviados por
+    // POST/GET: esos valores solo describen al sujeto de la operación.
+    $session['rol'] = HospitalHuaralDB::rolUsuario($dni);
     return $session;
 }
 
@@ -7283,6 +7287,42 @@ if ($action === 'sync_export_local_sql') {
             'El script solo usa INSERT ... ON DUPLICATE KEY UPDATE; no elimina historial clínico.',
         ],
     ]);
+}
+
+// ---------------------------------------------------------------------------
+// 11-B. DESCARGA AUTENTICADA DEL SCRIPT DE ÍNDICES
+// El archivo .sql nunca se expone como estático (.htaccess lo bloquea); en
+// Docker se conserva una copia .txt fuera del alcance web y solo la lee PHP.
+// ---------------------------------------------------------------------------
+if ($action === 'indices_sql') {
+    $session = require_session();
+    if (!is_admin_session($session)) {
+        json_error('Solo el Administrador de Estadística puede descargar el script de índices.', 403, [
+            'code' => 'ADMIN_REQUIRED',
+        ]);
+    }
+    $candidatos = [
+        __DIR__ . '/public/optimizar_indices_5gb.sql.txt',
+        __DIR__ . '/optimizar_indices_5gb.sql',
+    ];
+    $ruta = '';
+    foreach ($candidatos as $candidato) {
+        if (is_file($candidato)) {
+            $ruta = $candidato;
+            break;
+        }
+    }
+    if ($ruta === '') {
+        json_error('El script de índices no está disponible en este servidor.', 404);
+    }
+    if (!headers_sent()) {
+        header('Content-Type: text/plain; charset=utf-8');
+        header('Content-Disposition: attachment; filename="optimizar_indices_5gb.sql"');
+        header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+        header('X-Content-Type-Options: nosniff');
+    }
+    readfile($ruta);
+    exit;
 }
 
 // ---------------------------------------------------------------------------

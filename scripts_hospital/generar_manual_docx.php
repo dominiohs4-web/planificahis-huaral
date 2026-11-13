@@ -5,6 +5,12 @@
  */
 declare(strict_types=1);
 
+// Herramienta exclusiva de consola: jamás debe ejecutarse por HTTP.
+if (PHP_SAPI !== 'cli') {
+    http_response_code(403);
+    exit('Forbidden');
+}
+
 $salida = dirname(__DIR__) . DIRECTORY_SEPARATOR . 'Manual_Operativo_Tiempos_Sincronizacion_y_Pruebas_PlanificaHIS.docx';
 
 function x(string $texto): string

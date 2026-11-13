@@ -3,7 +3,7 @@
  * - Navegaciones HTML: Network-First con timeout corto y fallback al shell.
  * - api.php y escrituras clinicas: SIEMPRE red, sin cache.
  */
-const SW_VERSION = 'planificahis-v2026.11.13';
+const SW_VERSION = 'planificahis-v2026.11.13-sec';
 const NAV_TIMEOUT_MS = 3500;
 const PRECACHE = [
   './index.php',

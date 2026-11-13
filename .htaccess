@@ -14,6 +14,9 @@ AddDefaultCharset UTF-8
 </IfModule>
 
 <IfModule mod_headers.c>
+  Header always unset X-Powered-By
+  Header unset X-Powered-By
+  Header always unset Server
   Header always set X-Content-Type-Options "nosniff"
   Header always set X-Frame-Options "DENY"
   Header always set Referrer-Policy "no-referrer"
@@ -43,9 +46,28 @@ AddDefaultCharset UTF-8
 <FilesMatch "(?i)^(\.env.*|\.git.*|composer\.(json|lock)|package(-lock)?\.json|tsconfig\.json|vite\.config\.ts|metadata\.json|Dockerfile|render\.ya?ml|README\.md|\.dockerignore|.*\.(dump|bak|old|log|ini|sh))$">
   Require all denied
 </FilesMatch>
-# Cualquier dump SQL queda fuera del alcance web, salvo el script de índices
-# que la propia aplicación ofrece como descarga.
-<FilesMatch "(?i)^(?!optimizar_indices_5gb\.sql$).*\.sql$">
+# Cualquier dump SQL queda fuera del alcance web.
+<FilesMatch "(?i)\.sql$">
+  Require all denied
+</FilesMatch>
+
+# Núcleo interno: solo puede incluirse desde PHP. Nunca por URL directa.
+<FilesMatch "(?i)^(db|catalogo_establecimientos|sync_cloud_to_local)\.php$">
+  Require all denied
+</FilesMatch>
+
+# Extensiones de datos, scripts locales, documentación y respaldos.
+<FilesMatch "(?i)\.(sql|bat|cmd|ps1|sh|md|ini|env|log|bak|old|dump|zip|tar|gz|7z|rar)$">
+  Require all denied
+</FilesMatch>
+
+# El .htaccess, el Dockerfile y los manifiestos de despliegue jamás se sirven.
+<FilesMatch "(?i)^(\.htaccess|\.htpasswd|Dockerfile|\.dockerignore|render\.ya?ml|composer\.(json|lock))$">
+  Require all denied
+</FilesMatch>
+
+# Copia interna del script de índices: solo la entrega api.php autenticado.
+<FilesMatch "(?i)^optimizar_indices_5gb\.sql\.txt$">
   Require all denied
 </FilesMatch>
 
@@ -56,7 +78,7 @@ AddDefaultCharset UTF-8
   # una variable de entorno que PHP sí puede leer.
   RewriteCond %{HTTP:Authorization} .
   RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
-  RewriteRule ^(?:node_modules|src|\.git|\.aistudio)(?:/|$) - [R=404,L]
+  RewriteRule ^(?:node_modules|src|\.git|\.aistudio|scripts_hospital|docker|storage|private)(?:/|$) - [R=404,L]
 </IfModule>
 
 # Los assets estáticos pueden cachearse; el HTML y PHP clínico no.
