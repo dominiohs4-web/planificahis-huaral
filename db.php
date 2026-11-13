@@ -989,7 +989,9 @@ final class HospitalHuaralDB
             return;
         }
         $verificado = true;
-        $catalogoVersion = 'oficial_2026_11_v9';
+        // v10: además de refrescar los 14 métodos oficiales, desactiva los
+        // códigos heredados con orden = 0 para que no se reactiven ni dupliquen.
+        $catalogoVersion = 'oficial_2026_11_v10';
         try {
             try {
                 $pdo->exec("
@@ -1034,6 +1036,11 @@ final class HospitalHuaralDB
                     ':orden' => (int)$meta['orden'],
                 ]);
             }
+            // Blindaje del catálogo: cualquier fila heredada fuera del rango
+            // oficial 1..14 (por ejemplo 99208, 9940204, Z300, 9920813 con
+            // orden = 0) queda inactiva y sin requerimiento de cita. Así no se
+            // reactiva ni se duplica como método válido en próximas corridas.
+            $pdo->exec("UPDATE app_catalogo_metodos SET activo = 0, requiere_cita = 0 WHERE orden = 0 OR orden > 14");
             $stmtMarca = $pdo->prepare("
                 INSERT INTO app_config (clave, valor) VALUES ('catalogo_metodos_version', :version)
                 ON DUPLICATE KEY UPDATE valor = VALUES(valor)

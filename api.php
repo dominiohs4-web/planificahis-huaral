@@ -3114,7 +3114,7 @@ function catalogo_metodos_planificacion(PDO $pdo, bool $forceReload = false): ar
     $filasDb = [];
     try {
         HospitalHuaralDB::ensureCatalogoOficial($pdo);
-        $stmt = $pdo->query('SELECT codigo_dx, nombre_metodo, alias_codigos, dias_ciclo, requiere_cita, activo, orden FROM app_catalogo_metodos ORDER BY orden ASC, nombre_metodo ASC');
+        $stmt = $pdo->query('SELECT codigo_dx, nombre_metodo, alias_codigos, dias_ciclo, requiere_cita, activo, orden FROM app_catalogo_metodos WHERE activo = 1 AND orden BETWEEN 1 AND 14 ORDER BY orden ASC, nombre_metodo ASC');
         foreach ($stmt->fetchAll() as $row) {
             $codigo = trim((string)($row['codigo_dx'] ?? ''));
             if ($codigo !== '') {
@@ -4736,8 +4736,14 @@ if ($action === 'reporte_programacion') {
     ];
 
     $fechaBaseIso = $fechaBase->format('Y-m-d');
+    // La ventana de consulta SIEMPRE cubre fechaObjetivo..+7 días. Así el
+    // resumen accionable ("Mañana +1" y "Próx. 7d +2 a +7") dispone de datos
+    // aunque el reporte visible esté en modo "Fecha exacta"; antes esos
+    // recuadros quedaban forzados a 0 al no consultar más allá del día base.
+    $hastaResumenProgramacion = $fechaBase->modify('+7 days');
+    $hastaResumenProgramacionIso = $hastaResumenProgramacion->format('Y-m-d');
     $hastaProgramacion = $rangoModo === 'ventana_7d'
-        ? $fechaBase->modify('+7 days')
+        ? $hastaResumenProgramacion
         : $fechaBase;
     $hastaProgramacionIso = $hastaProgramacion->format('Y-m-d');
 
@@ -4747,7 +4753,7 @@ if ($action === 'reporte_programacion') {
             $session,
             $catalogo,
             $fechaBaseIso,
-            $hastaProgramacionIso,
+            $hastaResumenProgramacionIso,
             $codigosFiltro
         );
     } catch (Throwable $e) {
@@ -4758,8 +4764,6 @@ if ($action === 'reporte_programacion') {
     }
 
     $hoy = new DateTimeImmutable('today');
-    $hoyIso = $hoy->format('Y-m-d');
-    $mananaIso = $hoy->modify('+1 day')->format('Y-m-d');
     $dnis = [];
     $candidatosFiltrados = [];
     foreach ($candidatos as $dniKey => $sel) {
@@ -4869,9 +4873,11 @@ if ($action === 'reporte_programacion') {
         return $cmp !== 0 ? $cmp : strcmp($a['paciente_nombre'], $b['paciente_nombre']);
     });
 
-    // Resumen accionable: sin “vencidas” ni escaneos históricos. “Toca fecha”
-    // cuenta exactamente las pacientes cuya fecha de próximo control es la
-    // fecha objetivo; para HOY coincide 1:1 con la tarjeta superior.
+    // Resumen accionable SIEMPRE relativo a la fecha objetivo, no al día real
+    // de hoy: toca_fecha = fechaObjetivo, manana = fechaObjetivo + 1 día,
+    // proximo_7_dias = fechaObjetivo + 2..+7 días. Se calcula sobre todos los
+    // candidatos de la ventana de 8 días (aunque el reporte visible esté en
+    // modo exacto) para coincidir con el panel superior de alertas.
     $resumen = [
         'total' => count($filas),
         'toca_en_fecha' => 0,
@@ -4879,20 +4885,21 @@ if ($action === 'reporte_programacion') {
         'proximo_7_dias' => 0,
         'al_dia' => 0,
     ];
-    foreach ($filas as $fila) {
-        $fechaProximoFila = (string)$fila['fecha_proximo_metodo_iso'];
-        $diasFila = (int)$fila['dias_restantes'];
-        if ($fechaProximoFila === $fechaBaseIso) {
+    foreach ($candidatos as $selResumen) {
+        $fechaProximoResumen = (string)($selResumen['fecha_proximo'] ?? '');
+        if ($fechaProximoResumen === ''
+            || $fechaProximoResumen < $fechaBaseIso
+            || $fechaProximoResumen > $hastaResumenProgramacionIso
+        ) {
+            continue;
+        }
+        $diasDesdeBase = (int)$fechaBase->diff(new DateTimeImmutable($fechaProximoResumen))->format('%r%a');
+        if ($diasDesdeBase === 0) {
             $resumen['toca_en_fecha']++;
-        }
-        if ($fechaBaseIso <= $hoyIso && $fechaProximoFila === $mananaIso) {
+        } elseif ($diasDesdeBase === 1) {
             $resumen['manana']++;
-        }
-        if ($diasFila >= 2 && $diasFila <= 7) {
+        } elseif ($diasDesdeBase >= 2 && $diasDesdeBase <= 7) {
             $resumen['proximo_7_dias']++;
-        }
-        if ($diasFila > 7) {
-            $resumen['al_dia']++;
         }
     }
 
