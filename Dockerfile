@@ -12,8 +12,6 @@ RUN apt-get update \
     && docker-php-ext-install -j"$(nproc)" pdo pdo_mysql mbstring opcache \
     && a2enmod headers rewrite \
     && sed -ri 's/AllowOverride None/AllowOverride All/' /etc/apache2/apache2.conf \
-    && sed -ri 's/^ServerTokens .*/ServerTokens Prod/; s/^ServerSignature .*/ServerSignature Off/' /etc/apache2/apache2.conf \
-    && sed -ri 's/^ServerTokens .*/ServerTokens Prod/; s/^ServerSignature .*/ServerSignature Off/' /etc/apache2/conf-available/security.conf \
     && rm -rf /var/lib/apt/lists/*
 
 COPY docker/php.ini /usr/local/etc/php/conf.d/planificahis.ini
@@ -36,6 +34,7 @@ RUN rm -rf /var/www/html/scripts_hospital \
     && printf 'ServerTokens Prod\nServerSignature Off\nTraceEnable Off\n' \
            > /etc/apache2/conf-available/zz-planificahis-security.conf \
     && a2enconf zz-planificahis-security \
+    && apache2ctl -t \
     && chown -R www-data:www-data /var/www/html
 
 EXPOSE 80

@@ -1,89 +1,49 @@
-# PlanificaHIS — Apache (XAMPP / Render)
-# Sirve index.php como única entrada de la aplicación PHP.
+# PlanificaHIS — Apache 2.4 (XAMPP / Render)
+# Configuración mínima y compatible. No se usan directivas exclusivas de
+# servidor (ServerTokens/ServerSignature) ni módulos sin proteger.
+
 Options -Indexes
 DirectoryIndex index.php
 AddDefaultCharset UTF-8
 
-# Tipos MIME necesarios para PWA (Android/iPhone).
+# Nunca exponer secretos, núcleo interno, dumps ni respaldos.
+<FilesMatch "^(\.env|db\.php|catalogo_establecimientos\.php|sync_cloud_to_local\.php|.*\.(sql|bat|sh|md|ini|log|bak|zip))$">
+    Require all denied
+</FilesMatch>
+
+# Metadatos de despliegue y control de versiones.
+<FilesMatch "^(\.htaccess|\.htpasswd|\.dockerignore|Dockerfile|render\.ya?ml|composer\.(json|lock))$">
+    Require all denied
+</FilesMatch>
+
+# Tipos MIME para la PWA (solo si el módulo está cargado).
 <IfModule mod_mime.c>
-  AddType application/manifest+json .webmanifest
-  AddType text/javascript .js
-  AddType image/svg+xml .svg
-  AddType image/png .png
-  AddType font/woff2 .woff2
+    AddType application/manifest+json .webmanifest
+    AddType text/javascript .js
+    AddType image/svg+xml .svg
+    AddType image/png .png
+    AddType font/woff2 .woff2
 </IfModule>
 
-<IfModule mod_headers.c>
-  Header always unset X-Powered-By
-  Header unset X-Powered-By
-  Header always unset Server
-  Header always set X-Content-Type-Options "nosniff"
-  Header always set X-Frame-Options "DENY"
-  Header always set Referrer-Policy "no-referrer"
-  Header always set Permissions-Policy "geolocation=(), camera=(), microphone=(), payment=(), usb=()"
-  Header always set Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
-  Header always set X-Robots-Tag "noindex, nofollow, noarchive"
-  Header always set Cross-Origin-Opener-Policy "same-origin"
-  Header always set Cross-Origin-Resource-Policy "same-origin"
-</IfModule>
-
-# El service worker debe actualizarse de inmediato y controlar todo el ámbito.
+# El service worker y el manifest nunca se cachean durante despliegues.
 <Files "sw.js">
-  <IfModule mod_headers.c>
-    Header always set Cache-Control "no-cache, no-store, must-revalidate, max-age=0"
-    Header always set Service-Worker-Allowed "/"
-  </IfModule>
+    <IfModule mod_headers.c>
+        Header always set Cache-Control "no-cache, no-store, must-revalidate, max-age=0"
+        Header always set Service-Worker-Allowed "/"
+    </IfModule>
 </Files>
 
-# El manifest no debe quedar cacheado durante despliegues.
 <Files "manifest.webmanifest">
-  <IfModule mod_headers.c>
-    Header always set Cache-Control "no-cache, must-revalidate, max-age=0"
-  </IfModule>
+    <IfModule mod_headers.c>
+        Header always set Cache-Control "no-cache, must-revalidate, max-age=0"
+    </IfModule>
 </Files>
 
-# Nunca exponer secretos, respaldos, dumps ni metadatos del repositorio.
-<FilesMatch "(?i)^(\.env.*|\.git.*|composer\.(json|lock)|package(-lock)?\.json|tsconfig\.json|vite\.config\.ts|metadata\.json|Dockerfile|render\.ya?ml|README\.md|\.dockerignore|.*\.(dump|bak|old|log|ini|sh))$">
-  Require all denied
-</FilesMatch>
-# Cualquier dump SQL queda fuera del alcance web.
-<FilesMatch "(?i)\.sql$">
-  Require all denied
-</FilesMatch>
-
-# Núcleo interno: solo puede incluirse desde PHP. Nunca por URL directa.
-<FilesMatch "(?i)^(db|catalogo_establecimientos|sync_cloud_to_local)\.php$">
-  Require all denied
-</FilesMatch>
-
-# Extensiones de datos, scripts locales, documentación y respaldos.
-<FilesMatch "(?i)\.(sql|bat|cmd|ps1|sh|md|ini|env|log|bak|old|dump|zip|tar|gz|7z|rar)$">
-  Require all denied
-</FilesMatch>
-
-# El .htaccess, el Dockerfile y los manifiestos de despliegue jamás se sirven.
-<FilesMatch "(?i)^(\.htaccess|\.htpasswd|Dockerfile|\.dockerignore|render\.ya?ml|composer\.(json|lock))$">
-  Require all denied
-</FilesMatch>
-
-# Copia interna del script de índices: solo la entrega api.php autenticado.
-<FilesMatch "(?i)^optimizar_indices_5gb\.sql\.txt$">
-  Require all denied
-</FilesMatch>
-
-# Carpetas de desarrollo que no deben servirse por HTTP.
+# Apache en CGI/FastCGI no siempre expone Authorization a PHP.
+# Las carpetas internas de desarrollo nunca se sirven por HTTP.
 <IfModule mod_rewrite.c>
-  RewriteEngine On
-  # Apache no siempre expone Authorization a PHP (CGI/FastCGI). Lo copiamos a
-  # una variable de entorno que PHP sí puede leer.
-  RewriteCond %{HTTP:Authorization} .
-  RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
-  RewriteRule ^(?:node_modules|src|\.git|\.aistudio|scripts_hospital|docker|storage|private)(?:/|$) - [R=404,L]
+    RewriteEngine On
+    RewriteCond %{HTTP:Authorization} .
+    RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+    RewriteRule ^(?:node_modules|src|\.git|\.aistudio|scripts_hospital|docker|storage|private)(?:/|$) - [R=404,L]
 </IfModule>
-
-# Los assets estáticos pueden cachearse; el HTML y PHP clínico no.
-<FilesMatch "\.(png|svg|woff2?)$">
-  <IfModule mod_headers.c>
-    Header always set Cache-Control "public, max-age=604800"
-  </IfModule>
-</FilesMatch>

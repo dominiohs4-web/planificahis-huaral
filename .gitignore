@@ -24,3 +24,5 @@ public/planificahis.apk
 
 # Metadatos del entorno de desarrollo
 .aistudio/
+.agents/
+skills-lock.json

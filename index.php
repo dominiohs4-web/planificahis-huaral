@@ -10,502 +10,35 @@
 declare(strict_types=1);
 
 /* =========================================================================
- * BLINDAJE DE SALIDA — PlanificaHIS
+ * SEGURIDAD DE SALIDA - PlanificaHIS
  * -------------------------------------------------------------------------
- * Toda la respuesta HTML pasa por este buffer antes de llegar al navegador:
- *   1) Minifica CSS y HTML (comentarios y espacios entre etiquetas).
- *   2) Minifica el JavaScript sin alterar cadenas, plantillas ni expresiones
- *      regulares.
- *   3) En produccion empaqueta el bundle principal en Base64/UTF-8 y lo
- *      ejecuta desde un cargador minimo que se autoelimina del DOM.
- *   4) Encierra el bundle en una IIFE estricta (cero funciones/estado en
- *      window) e instala la delegacion privada de manejadores inline.
- *   5) Inserta el modulo anti-inspeccion (F12, atajos, clic derecho, consola
- *      y detector de DevTools) fuera de localhost.
- * Si algo falla, se devuelve el HTML original para no romper la PWA.
+ * La respuesta se entrega directamente desde PHP, sin buffer, minificacion
+ * ni ofuscacion: el HTML, CSS y JavaScript se envian tal como fueron
+ * escritos. Esto evita los limites de PCRE/backtracking y mantiene la PWA
+ * estable en PHP 8.2 y Apache 2.4.
  * ========================================================================= */
 
-ob_start('phs_render_output');
-
-define('PHS_EVENT_SHIM', <<<'JS'
-(function () {
-  var EVENTS = ['click', 'change', 'input', 'submit', 'paste', 'keyup', 'keydown'];
-  var SELECTOR = '[onclick],[onchange],[oninput],[onsubmit],[onpaste],[onkeyup],[onkeydown]';
-  function run(node, ev, expr) {
-    try {
-      (function (event) { return eval(expr); }).call(node, ev);
-    } catch (err) {
-      /* Un manejador invalido jamas debe romper la PWA. */
+if (!headers_sent()) {
+    if (function_exists('header_remove')) {
+        header_remove('X-Powered-By');
+        header_remove('Server');
     }
-  }
-  function bind(node) {
-    if (!node || node.nodeType !== 1) return;
-    for (var i = 0; i < EVENTS.length; i++) {
-      var type = EVENTS[i];
-      var attr = 'on' + type;
-      if (node.hasAttribute && node.hasAttribute(attr)) {
-        var expr = node.getAttribute(attr);
-        node.removeAttribute(attr);
-        (function (expression, eventType, target) {
-          target.addEventListener(eventType, function (e) {
-            if (eventType === 'submit') { try { e.preventDefault(); } catch (x) {} }
-            run(target, e, expression);
-          }, false);
-        })(expr, type, node);
-      }
-    }
-  }
-  function scan(root) {
-    if (!root) return;
-    if (root.nodeType === 1) bind(root);
-    if (root.querySelectorAll) {
-      var list = root.querySelectorAll(SELECTOR);
-      for (var i = 0; i < list.length; i++) bind(list[i]);
-    }
-  }
-  scan(document);
-  document.addEventListener('DOMContentLoaded', function () { scan(document); });
-  try {
-    new MutationObserver(function (mutations) {
-      for (var i = 0; i < mutations.length; i++) {
-        var m = mutations[i];
-        if (m.type === 'attributes') bind(m.target);
-        if (m.addedNodes) {
-          for (var j = 0; j < m.addedNodes.length; j++) scan(m.addedNodes[j]);
-        }
-      }
-    }).observe(document.documentElement, {
-      childList: true,
-      subtree: true,
-      attributes: true,
-      attributeFilter: ['onclick', 'onchange', 'oninput', 'onsubmit', 'onpaste', 'onkeyup', 'onkeydown']
-    });
-  } catch (e) {}
-})();
-JS
-);
-
-define('PHS_ANTI_INSPECT', <<<'JS'
-(function () {
-  var host = String(location.hostname || '').toLowerCase();
-  var local = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]'
-    || /\.localhost$/.test(host) || location.protocol === 'file:';
-  if (local) return;
-  function stop(e) {
-    try { e.preventDefault(); } catch (x) {}
-    try { e.stopPropagation(); } catch (x) {}
-    return false;
-  }
-  window.addEventListener('keydown', function (e) {
-    var k = String(e.key || '');
-    var code = Number(e.keyCode || e.which || 0);
-    var ctrl = !!(e.ctrlKey || e.metaKey);
-    var up = k.toUpperCase();
-    if (code === 123 || up === 'F12') { stop(e); return; }
-    if (ctrl && e.shiftKey && (up === 'I' || up === 'J' || up === 'C' || up === 'K')) { stop(e); return; }
-    if (e.metaKey && e.altKey && (up === 'I' || up === 'J' || up === 'C' || up === 'K')) { stop(e); return; }
-    if (ctrl && (up === 'U' || up === 'S' || code === 85 || code === 83)) { stop(e); return; }
-  }, true);
-  document.addEventListener('contextmenu', function (e) {
-    var t = e.target;
-    var tag = t && t.tagName ? String(t.tagName).toUpperCase() : '';
-    if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-    stop(e);
-  }, true);
-  var methods = ['log', 'info', 'debug', 'warn', 'dir', 'table'];
-  for (var i = 0; i < methods.length; i++) { try { console[methods[i]] = function () {}; } catch (x) {} }
-  try { console.clear(); } catch (x) {}
-  var touch = (('ontouchstart' in window) || (navigator.maxTouchPoints || 0) > 0) && (screen.width || 0) < 1024;
-  if (touch) return;
-  var overlayId = 'phs-sec-overlay';
-  var shown = false;
-  function overlay() {
-    if (document.getElementById(overlayId)) return;
-    var el = document.createElement('div');
-    el.id = overlayId;
-    el.setAttribute('role', 'alertdialog');
-    el.setAttribute('aria-modal', 'true');
-    el.style.cssText = 'position:fixed;inset:0;z-index:2147483647;background:#0b1220;color:#e2e8f0;display:flex;align-items:center;justify-content:center;padding:24px;text-align:center;font-family:system-ui,-apple-system,sans-serif;';
-    el.innerHTML = '<div style="max-width:460px"><div style="font-size:42px;line-height:1;margin-bottom:14px">&#128274;</div><h2 style="margin:0 0 10px;font-size:19px;color:#fff">Acceso restringido</h2><p style="margin:0;font-size:13px;line-height:1.65">Acceso restringido por pol&iacute;ticas de seguridad de datos cl&iacute;nicos - DIRESA Lima</p><p style="margin:12px 0 0;font-size:11px;color:#94a3b8">Cierre las herramientas de desarrollador para continuar usando PlanificaSalud HIS.</p></div>';
-    document.documentElement.appendChild(el);
-    shown = true;
-  }
-  function hide() {
-    var el = document.getElementById(overlayId);
-    if (el && el.parentNode) el.parentNode.removeChild(el);
-    shown = false;
-  }
-  function printing() {
-    try { return !!(window.matchMedia && window.matchMedia('print').matches); } catch (x) { return false; }
-  }
-  setInterval(function () {
-    if (printing()) {
-      // Nunca interferir con la impresión oficial de reportes PDF.
-      if (shown) hide();
-      return;
-    }
-    var ow = window.outerWidth || 0;
-    var oh = window.outerHeight || 0;
-    var iw = window.innerWidth || 0;
-    var ih = window.innerHeight || 0;
-    // Algunos navegadores embebidos o moviles reportan 0: no son evidencia
-    // de DevTools y jamas deben bloquear la atencion clinica.
-    if (ow <= 0 || oh <= 0 || iw <= 0 || ih <= 0) return;
-    var dw = Math.abs(ow - iw);
-    var dh = Math.abs(oh - ih);
-    if (dw > 180 || dh > 180) { if (!shown) overlay(); } else if (shown) { hide(); }
-  }, 1200);
-})();
-JS
-);
-
-/**
- * ¿La peticion llega desde un entorno de desarrollo local?
- */
-function phs_output_is_local(): bool
-{
-    $host = strtolower(trim((string)($_SERVER['HTTP_HOST'] ?? $_SERVER['SERVER_NAME'] ?? 'localhost')));
-    $host = preg_replace('/:\d+$/', '', $host) ?? $host;
-    $host = trim($host, '[]');
-    if ($host === '' || in_array($host, ['localhost', '127.0.0.1', '::1'], true)) {
-        return true;
-    }
-    return str_ends_with($host, '.localhost') || str_ends_with($host, '.test');
-}
-
-/**
- * Cargador minimo: decodifica Base64/UTF-8, ejecuta el bundle y elimina el
- * nodo <script> del DOM para que no aparezca en la pestana Elements.
- */
-function phs_boot_loader(string $b64): string
-{
-    return '(function(){var s=document.currentScript;try{var b=atob("' . $b64 . '"),u=new Uint8Array(b.length),i;'
-        . 'for(i=0;i<b.length;i++){u[i]=b.charCodeAt(i);}'
-        . 'var t;try{t=new TextDecoder("utf-8").decode(u);}catch(e){t=decodeURIComponent(escape(b));}'
-        . 'new Function(t)();}catch(e){try{console.error("[PlanificaHIS] Inicializacion controlada.");}catch(x){}}'
-        . 'finally{if(s&&s.parentNode){s.parentNode.removeChild(s);}}})();';
-}
-
-/**
- * Heuristica para distinguir una expresion regular de una division.
- */
-function phs_js_regex_allowed(string $out): bool
-{
-    $t = rtrim($out);
-    if ($t === '') {
-        return true;
-    }
-    $last = $t[strlen($t) - 1];
-    if (strpos('([{,;:=!&|?+-*%^~<>', $last) !== false) {
-        return true;
-    }
-    return preg_match('/(?:return|throw|typeof|instanceof|in|of|new|delete|void|case|do|else|yield)$/', $t) === 1;
-}
-
-/**
- * Minificador de JavaScript consciente de cadenas, plantillas anidadas,
- * expresiones regulares y comentarios. No renombra identificadores.
- */
-function phs_js_range(string $js, int &$i, int $n, string &$out, bool $stopAtBrace): void
-{
-    $depth = 0;
-    while ($i < $n) {
-        $c = $js[$i];
-
-        if ($stopAtBrace && $c === '}' && $depth === 0) {
-            return;
-        }
-
-        if ($c === ' ' || $c === "\t" || $c === "\r" || $c === "\n" || $c === "\f" || $c === "\v") {
-            $j = $i;
-            $sawNewline = false;
-            while ($j < $n) {
-                $w = $js[$j];
-                if ($w === "\n" || $w === "\r") {
-                    $sawNewline = true;
-                } elseif ($w !== ' ' && $w !== "\t" && $w !== "\f" && $w !== "\v") {
-                    break;
-                }
-                $j++;
-            }
-            $next = $j < $n ? $js[$j] : '';
-            $last = $out === '' ? '' : $out[strlen($out) - 1];
-            $trimmed = rtrim($out);
-            $asi = $sawNewline && $last !== '' && (
-                preg_match('/(?:return|throw|break|continue|yield)$/', $trimmed) === 1
-                || (strpos(')]}', $last) !== false && $next !== '' && strpos('([`/', $next) !== false)
-                || (preg_match('/[A-Za-z0-9_$]/', $last) === 1 && $next !== '' && strpos('([`/', $next) !== false)
-            );
-            if ($asi) {
-                if ($out !== '' && substr($out, -1) !== "\n") {
-                    $out .= "\n";
-                }
-            } elseif (
-                $out !== '' && $last !== ''
-                && strpos("([{;,:?=+-*/%&|!<>~^", $last) === false
-                && ($next === '' || strpos(")]};,:?=+-*/%&|!<>~^", $next) === false)
-            ) {
-                if (substr($out, -1) !== ' ') {
-                    $out .= ' ';
-                }
-            }
-            $i = $j;
-            continue;
-        }
-
-        if ($c === '/' && $i + 1 < $n && $js[$i + 1] === '/') {
-            $j = $i + 2;
-            while ($j < $n && $js[$j] !== "\n" && $js[$j] !== "\r") {
-                $j++;
-            }
-            $i = $j;
-            continue;
-        }
-
-        if ($c === '/' && $i + 1 < $n && $js[$i + 1] === '*') {
-            $j = $i + 2;
-            while ($j + 1 < $n && !($js[$j] === '*' && $js[$j + 1] === '/')) {
-                $j++;
-            }
-            $i = min($n, $j + 2);
-            $last = $out === '' ? '' : $out[strlen($out) - 1];
-            if (
-                $i < $n && $last !== ''
-                && preg_match('/[A-Za-z0-9_$]/', $last) === 1
-                && preg_match('/[A-Za-z0-9_$]/', $js[$i]) === 1
-                && substr($out, -1) !== ' '
-            ) {
-                $out .= ' ';
-            }
-            continue;
-        }
-
-        if ($c === "'" || $c === '"') {
-            $quote = $c;
-            $out .= $c;
-            $i++;
-            while ($i < $n) {
-                $ch = $js[$i];
-                $out .= $ch;
-                $i++;
-                if ($ch === '\\' && $i < $n) {
-                    $out .= $js[$i];
-                    $i++;
-                    continue;
-                }
-                if ($ch === $quote) {
-                    break;
-                }
-            }
-            continue;
-        }
-
-        if ($c === '`') {
-            $out .= '`';
-            $i++;
-            while ($i < $n) {
-                $ch = $js[$i];
-                if ($ch === '\\') {
-                    $out .= $ch;
-                    $i++;
-                    if ($i < $n) {
-                        $out .= $js[$i];
-                        $i++;
-                    }
-                    continue;
-                }
-                if ($ch === '`') {
-                    $out .= '`';
-                    $i++;
-                    break;
-                }
-                if ($ch === '$' && $i + 1 < $n && $js[$i + 1] === '{') {
-                    $out .= '${';
-                    $i += 2;
-                    phs_js_range($js, $i, $n, $out, true);
-                    if ($i < $n && $js[$i] === '}') {
-                        $out .= '}';
-                        $i++;
-                    }
-                    continue;
-                }
-                $out .= $ch;
-                $i++;
-            }
-            continue;
-        }
-
-        if ($c === '/') {
-            if (phs_js_regex_allowed($out)) {
-                $out .= '/';
-                $i++;
-                $inClass = false;
-                while ($i < $n) {
-                    $ch = $js[$i];
-                    $out .= $ch;
-                    $i++;
-                    if ($ch === '\\' && $i < $n) {
-                        $out .= $js[$i];
-                        $i++;
-                        continue;
-                    }
-                    if ($ch === '[') {
-                        $inClass = true;
-                        continue;
-                    }
-                    if ($ch === ']') {
-                        $inClass = false;
-                        continue;
-                    }
-                    if ($ch === '/' && !$inClass) {
-                        break;
-                    }
-                }
-                while ($i < $n && preg_match('/[a-z]/i', $js[$i]) === 1) {
-                    $out .= $js[$i];
-                    $i++;
-                }
-            } else {
-                $out .= '/';
-                $i++;
-            }
-            continue;
-        }
-
-        if ($c === '{') {
-            $depth++;
-            $out .= '{';
-            $i++;
-            continue;
-        }
-        if ($c === '}') {
-            if ($depth > 0) {
-                $depth--;
-            }
-            $out .= '}';
-            $i++;
-            continue;
-        }
-
-        $out .= $c;
-        $i++;
-    }
-}
-
-function phs_minify_js(string $js): string
-{
-    $i = 0;
-    $n = strlen($js);
-    $out = '';
-    phs_js_range($js, $i, $n, $out, false);
-    return trim($out);
-}
-
-function phs_minify_css(string $css): string
-{
-    $css = preg_replace('#/\*.*?\*/#s', '', $css) ?? $css;
-    $css = preg_replace('/\s+/', ' ', $css) ?? $css;
-    $css = preg_replace('/\s*([{};:,>])\s*/', '$1', $css) ?? $css;
-    return trim($css);
-}
-
-/**
- * Buffer de salida: minifica, empaqueta y ofusca todo el documento.
- */
-function phs_render_output(string $buffer): string
-{
-    try {
-        if ($buffer === '' || stripos($buffer, '<!doctype') === false) {
-            return $buffer;
-        }
-
-        $isLocal = phs_output_is_local();
-        $assets = [];
-
-        // 1) Los <script> se extraen primero para que las plantillas CSS que
-        //    viven dentro del JS no se confundan con hojas de estilo reales.
-        $html = preg_replace_callback('#<script\b([^>]*)>(.*?)</script>#is', function (array $m) use (&$assets, $isLocal): string {
-            $attrs = $m[1];
-            $body = $m[2];
-            if (stripos($attrs, 'src=') !== false || trim($body) === '') {
-                return $m[0];
-            }
-            $min = phs_minify_js($body);
-            if ($min === '') {
-                return $m[0];
-            }
-            $isMain = strpos($min, 'const CATALOGO') !== false && strpos($min, 'function render') !== false;
-            if ($isMain) {
-                $bundle = "(()=>{\"use strict\";\n"
-                    . PHS_ANTI_INSPECT . "\n"
-                    . $min . "\n"
-                    . PHS_EVENT_SHIM . "\n"
-                    . '})();';
-                if ($isLocal) {
-                    $markup = '<script data-phs-bundle="dev">' . $bundle . '</script>';
-                } else {
-                    $markup = '<script data-phs-boot="1">' . phs_boot_loader(base64_encode($bundle)) . '</script>';
-                }
-            } else {
-                $markup = '<script' . $attrs . '>' . $min . '</script>';
-            }
-            $key = '@@PHS_ASSET_' . count($assets) . '@@';
-            $assets[$key] = $markup;
-            return $key;
-        }, $buffer);
-
-        if ($html === null) {
-            return $buffer;
-        }
-
-        // 2) CSS real (fuera de los scripts ya tokenizados).
-        $html = preg_replace_callback('#<style\b([^>]*)>(.*?)</style>#is', function (array $m) use (&$assets): string {
-            $key = '@@PHS_ASSET_' . count($assets) . '@@';
-            $assets[$key] = '<style' . $m[1] . '>' . phs_minify_css($m[2]) . '</style>';
-            return $key;
-        }, $html);
-
-        if ($html === null) {
-            return $buffer;
-        }
-
-        // 3) HTML: comentarios y espacios entre etiquetas.
-        $html = preg_replace('/<!--(?!\[if).*?-->/s', '', $html) ?? $html;
-        $html = preg_replace('/>\s+</', '><', $html) ?? $html;
-        $html = preg_replace('/[ \t]{2,}/', ' ', $html) ?? $html;
-        $html = trim($html);
-
-        // 4) Restaurar los assets procesados.
-        if ($assets) {
-            $html = strtr($html, $assets);
-        }
-
-        return $html;
-    } catch (Throwable $e) {
-        error_log('[PlanificaHIS] Blindaje de salida omitido: ' . $e->getMessage());
-        return $buffer;
-    }
+    header('X-Content-Type-Options: nosniff');
+    header('X-Frame-Options: SAMEORIGIN');
+    header('Referrer-Policy: strict-origin-when-cross-origin');
+    header('X-Permitted-Cross-Domain-Policies: none');
+    header('Permissions-Policy: geolocation=(), camera=(), microphone=(), payment=(), usb=()');
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    header('Pragma: no-cache');
+    header('Strict-Transport-Security: max-age=63072000; includeSubDomains; preload');
+    header('Cross-Origin-Opener-Policy: same-origin');
+    header('Cross-Origin-Resource-Policy: same-origin');
+    header('X-Robots-Tag: noindex, nofollow');
 }
 
 date_default_timezone_set('America/Lima');
 
 require_once __DIR__ . '/catalogo_establecimientos.php';
-
-if (function_exists('header_remove')) {
-    header_remove('X-Powered-By');
-    header_remove('Server');
-}
-header('X-Content-Type-Options: nosniff');
-header('X-Frame-Options: DENY');
-header('Referrer-Policy: no-referrer');
-header('X-Permitted-Cross-Domain-Policies: none');
-header('Strict-Transport-Security: max-age=63072000; includeSubDomains; preload');
-header('Permissions-Policy: geolocation=(), camera=(), microphone=(), payment=(), usb=()');
-header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
-header('Pragma: no-cache');
-header('Cross-Origin-Opener-Policy: same-origin');
-header('Cross-Origin-Resource-Policy: same-origin');
-header('X-Robots-Tag: noindex, nofollow');
 
 $catalogo = hospital_establecimientos();
 $porDistrito = hospital_establecimientos_por_distrito();
@@ -781,6 +314,47 @@ $hospitalSvgJson = json_encode($hospitalSvgDataUri, JSON_UNESCAPED_UNICODE | JSO
   </style>
 </head>
 <body class="bg-slate-200/70 text-slate-900 antialiased min-h-[100dvh] flex flex-col items-center">
+  <script>
+    // Protección ligera contra inspección. No altera la interfaz, el zoom,
+    // AnyDesk, la impresión PDF ni las descargas de Excel.
+    (function () {
+      'use strict';
+      var host = String(location.hostname || '').toLowerCase();
+      var esLocal = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
+
+      function detener(e) {
+        try { e.preventDefault(); } catch (x) {}
+        try { e.stopPropagation(); } catch (x) {}
+        return false;
+      }
+
+      document.addEventListener('keydown', function (e) {
+        var tecla = String(e.key || '').toUpperCase();
+        var codigo = Number(e.keyCode || e.which || 0);
+        if (tecla === 'F12' || codigo === 123) return detener(e);
+        if (e.ctrlKey && e.shiftKey && (tecla === 'I' || tecla === 'J' || tecla === 'C')) return detener(e);
+        if (e.metaKey && e.altKey && (tecla === 'I' || tecla === 'J' || tecla === 'C')) return detener(e);
+        if ((e.ctrlKey || e.metaKey) && (tecla === 'U' || codigo === 85)) return detener(e);
+      }, true);
+
+      document.addEventListener('contextmenu', function (e) {
+        var el = e.target;
+        var etiqueta = el && el.tagName ? String(el.tagName).toUpperCase() : '';
+        if (etiqueta === 'INPUT' || etiqueta === 'TEXTAREA' || etiqueta === 'SELECT') return;
+        return detener(e);
+      }, true);
+
+      // En producción no se imprime nada interno en la consola. En local se
+      // conserva el depurador para desarrollo.
+      if (!esLocal) {
+        var silenciar = ['log', 'info', 'debug', 'table'];
+        for (var i = 0; i < silenciar.length; i++) {
+          try { console[silenciar[i]] = function () {}; } catch (x) {}
+        }
+      }
+    })();
+  </script>
+
   <!-- Splash institucional: primer elemento del body para pintar en 0 ms. -->
   <div id="phs-splash" role="status" aria-live="polite" aria-label="Cargando PlanificaSalud HIS">
     <div class="phs-splash__card">

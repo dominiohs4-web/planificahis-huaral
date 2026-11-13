@@ -17,6 +17,8 @@ index.html
 .git/
 .gitignore
 .aistudio/
+.agents/
+skills-lock.json
 metadata.json
 
 # Secretos y entorno local

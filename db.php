@@ -14,6 +14,12 @@
  */
 declare(strict_types=1);
 
+// Nunca exponer la versión de PHP ni datos del servidor en las respuestas.
+if (function_exists('header_remove')) {
+    header_remove('X-Powered-By');
+    header_remove('Server');
+}
+
 // Toda la operación clínica (captaciones, próximas citas, reportes y
 // auditoría) se calcula en hora oficial del Perú, sin importar la zona
 // horaria configurada en el servidor web o en el Droplet.

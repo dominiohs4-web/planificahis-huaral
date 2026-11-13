@@ -7213,7 +7213,10 @@ if ($action === 'sync_export_local_sql') {
             $stmt = $pdo->query("SELECT * FROM `{$tablaOrigen}` ORDER BY {$order} LIMIT {$batch}");
             $rows = $stmt->fetchAll();
         } catch (Throwable $e) {
-            $sql .= "-- [OMITIDA] No se pudo leer `{$tablaOrigen}`: " . str_replace(["\r", "\n"], ' ', $e->getMessage()) . "\n\n";
+            // El detalle técnico queda solo en el log del servidor. El archivo
+            // exportado nunca incluye rutas, credenciales ni mensajes de PDO.
+            error_log('[PlanificaHIS] Exportación: no se pudo leer `' . $tablaOrigen . '`: ' . $e->getMessage());
+            $sql .= "-- [OMITIDA] No se pudo leer la tabla solicitada.\n\n";
             continue;
         }
         if (!$rows) {

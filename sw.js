@@ -3,7 +3,7 @@
  * - Navegaciones HTML: Network-First con timeout corto y fallback al shell.
  * - api.php y escrituras clinicas: SIEMPRE red, sin cache.
  */
-const SW_VERSION = 'planificahis-v2026.11.13-sec';
+const CACHE_NAME = 'planificahis-v2026.11.13-fix500';
 const NAV_TIMEOUT_MS = 3500;
 const PRECACHE = [
   './index.php',
@@ -21,7 +21,7 @@ const PRECACHE = [
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches
-      .open(SW_VERSION)
+      .open(CACHE_NAME)
       .then((cache) =>
         Promise.all(
           PRECACHE.map((url) =>
@@ -40,7 +40,7 @@ self.addEventListener('activate', (event) => {
     caches
       .keys()
       .then((keys) =>
-        Promise.all(keys.filter((key) => key !== SW_VERSION).map((key) => caches.delete(key)))
+        Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key)))
       )
       .then(() => self.clients.claim())
   );
@@ -66,7 +66,7 @@ async function cachePut(request, response) {
   if (!response || !response.ok) return;
   try {
     const copy = response.clone();
-    const cache = await caches.open(SW_VERSION);
+    const cache = await caches.open(CACHE_NAME);
     await cache.put(request, copy);
   } catch (e) {
     /* El cache es una optimizacion, nunca debe romper la respuesta. */
